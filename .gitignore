@@ -1,2 +1,12 @@
+# Build output
+dist
+
+# Logs
+*.log
+logs/
+
+# Secrets
+secrets/
 secrets/*
 external-info/*
+node_modules/
