@@ -123,16 +123,32 @@ def load_oldest_json_job_file(directory, algorithm_name):
         return None
 
 def get_next_geo_job(algorithm_name):
+    try:
+        log(f"get_next_geo_job {algorithm_name=} v=4:26pm")
+        # Process the oldest JSON file
+        json_data = load_oldest_json_job_file(splint_inbox_dir, algorithm_name)
 
-    log(f"get_next_geo_job {algorithm_name=}")
-    # Process the oldest JSON file
-    json_data = load_oldest_json_job_file(splint_inbox_dir, algorithm_name)
+        result_data = None
+
+        if json_data is not None:
+            log("\nJSON data loaded successfully:")
+            log(f"Data type: {type(json_data)}")
+            
+            for key in list(json_data.keys()):
+                log(f"INPUT: {key}: {json_data[key]}")
     
-    if json_data is not None:
-        log("\nJSON data loaded successfully:")
-        log(f"Data type: {type(json_data)}")
-        
-        for key in list(json_data.keys()):
-            log(f"{key}: {json_data[key]}")
-   
-    return json_data
+            result_data = json.loads(json_data["params"]) if "params" in json_data else None
+
+            if result_data is None:
+                log("No 'params' key found in JSON data.")
+            else:
+                result_data["jobname"] = json_data["jobname"]
+
+                for key in list(result_data.keys()):
+                    log(f"RESULT: {key}: {result_data[key]}")
+                return result_data
+
+        raise Exception("No data found to extract correctly")
+    except Exception as e:
+        log(f"Exception in get_next_geo_job: {traceback.format_exc()}")
+        return None

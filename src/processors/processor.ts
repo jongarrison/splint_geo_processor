@@ -60,7 +60,7 @@ export class Processor {
   const idPart = job?.id ?? job?.ID ?? job?.Id ?? `ts_${Date.now()}`;
   const algoPart = job?.GeometryAlgorithmName || 'algorithm';
   const baseName = `${algoPart}_${idPart}`.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const inboxJson = path.join(this.inbox, `${baseName}.json`);
+  const inboxJson = path.join(this.inbox, `${baseName}.json`);
         const inputPayload = {
           id: idPart,
           algorithm: job?.GeometryAlgorithmName,
@@ -74,6 +74,26 @@ export class Processor {
         fs.writeFileSync(inboxJson, JSON.stringify(inputPayload, null, 2), 'utf8');
         this.logger.info({ inboxJson }, 'Wrote input JSON to inbox');
 
+        // Prepare per-job archive directory and job-specific log file immediately
+        const home = process.env.HOME || process.env.USERPROFILE || '.';
+        const archiveRoot = path.join(home, 'SplintFactoryFiles', 'archive');
+        const now = new Date();
+        const pad2 = (n: number) => String(n).padStart(2, '0');
+        const yy = pad2(now.getFullYear() % 100);
+        const mm = pad2(now.getMonth() + 1);
+        const dd = pad2(now.getDate());
+        const HH = pad2(now.getHours());
+        const MM = pad2(now.getMinutes());
+        const archiveDirName = `${yy}${mm}${dd}-${HH}-${MM}-${baseName}`;
+        const jobArchiveDir = path.join(archiveRoot, archiveDirName);
+        fs.mkdirSync(jobArchiveDir, { recursive: true });
+        const jobLogPath = path.join(jobArchiveDir, `${baseName}.log`);
+        const jobLogStream = fs.createWriteStream(jobLogPath, { flags: 'a' });
+        const jobLog = (level: 'info'|'warn', message: string, extra?: any) => {
+          const line = `${new Date().toISOString()} [${level}] ${message}${extra ? ' ' + JSON.stringify(extra) : ''}\n`;
+          try { jobLogStream.write(line); } catch {}
+        };
+
         // Single-threaded processing section: pause polling while we process this job
         try {
           this.logger.info({ id: idPart, algo: algoPart }, 'Starting geometry processing');
@@ -83,10 +103,14 @@ export class Processor {
             params: inputPayload.params,
             ghScriptsDir: this.config.ghScriptsDir,
             outboxDir: this.outbox,
+            baseName,
+            inboxJsonPath: inboxJson,
             rhinoCli: this.config.rhinoCli,
             rhinoCodeCli: this.config.rhinoCodeCli,
             bambuCli: this.config.bambuCli,
             dryRun: this.config.dryRun,
+            logger: this.logger,
+            jobLog
           });
 
           // Read files and post success
@@ -110,6 +134,15 @@ export class Processor {
           this.logger.error({ err: procErr?.message }, 'Processing failed');
           await this.reportResult(idPart, false, String(procErr?.message || 'Processing failed'));
         } finally {
+          // Archive job files (inbox and any produced outbox files) regardless of success/failure
+          try {
+            const expectedGeometry = path.join(this.outbox, `${baseName}.stl`);
+            const expectedPrint = path.join(this.outbox, `${baseName}.gcode.3mf`);
+            await this.archiveJobFiles(archiveDirName, inboxJson, expectedGeometry, expectedPrint);
+          } catch (archiveErr: any) {
+            this.logger.warn({ err: archiveErr?.message }, 'Archiving job files failed');
+          }
+          try { jobLogStream.end(); } catch {}
           this.logger.info({ id: idPart }, 'Finished processing');
         }
       } catch (err) {
@@ -159,5 +192,47 @@ export class Processor {
     } catch (err) {
       this.logger.error({ err }, 'Error reporting success');
     }
+  }
+
+  private async archiveJobFiles(archiveDirName: string, inboxJson: string, geometryPath: string, printPath?: string) {
+    const home = process.env.HOME || process.env.USERPROFILE || '.';
+    const archiveRoot = path.join(home, 'SplintFactoryFiles', 'archive');
+    const destDir = path.join(archiveRoot, archiveDirName);
+    fs.mkdirSync(destDir, { recursive: true });
+
+    const moveIfExists = (src: string | undefined, dstBaseName?: string) => {
+      if (!src) return;
+      if (!fs.existsSync(src)) return;
+      const dest = path.join(destDir, dstBaseName || path.basename(src));
+      try {
+        fs.renameSync(src, dest);
+      } catch {
+        // fallback to copy+unlink if rename across devices fails
+        try {
+          fs.copyFileSync(src, dest);
+          fs.unlinkSync(src);
+        } catch (err) {
+          // swallow; best-effort archiving
+        }
+      }
+    };
+
+    // Always archive the inbox JSON
+    moveIfExists(inboxJson);
+
+    // Archive all outbox artifacts for this job (move all files present)
+    try {
+      const outboxDir = this.outbox;
+      const entries = fs.readdirSync(outboxDir, { withFileTypes: true });
+      for (const ent of entries) {
+        if (!ent.isFile()) continue;
+        const src = path.join(outboxDir, ent.name);
+        moveIfExists(src);
+      }
+    } catch (e) {
+      // Best-effort; ignore listing failures
+    }
+
+    this.logger.info({ destDir }, 'Archived job files');
   }
 }

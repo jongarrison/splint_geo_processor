@@ -11,10 +11,15 @@ export interface PipelineInputs {
   params: any;
   ghScriptsDir: string;
   outboxDir: string;
+  baseName: string;
+  inboxJsonPath: string;
   rhinoCli?: string;
   rhinoCodeCli?: string;
   bambuCli?: string;
   dryRun?: boolean;
+  // Optional structured logger and per-job log function
+  logger?: { info: (obj: any, msg?: string) => void; warn: (obj: any, msg?: string) => void };
+  jobLog?: (level: 'info' | 'warn', message: string, extra?: any) => void;
 }
 
 export interface PipelineOutputs {
@@ -27,17 +32,28 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   const geometryPath = path.join(input.outboxDir, `${base}.stl`);
   const printPath = path.join(input.outboxDir, `${base}.gcode.3mf`);
 
+  const logInfo = (msg: string, extra?: any) => {
+    input.logger?.info(extra || {}, msg);
+    if (input.jobLog) input.jobLog('info', msg, extra);
+  };
+  const logWarn = (msg: string, extra?: any) => {
+    input.logger?.warn(extra || {}, msg);
+    if (input.jobLog) input.jobLog('warn', msg, extra);
+  };
+
   if (input.dryRun) {
     // Produce tiny dummy files to exercise the flow
     fs.writeFileSync(geometryPath, 'solid dryrun\nendsolid dryrun\n');
     fs.writeFileSync(printPath, '3mf-dryrun');
+    logInfo('DRY_RUN wrote placeholder files', { geometryPath, printPath });
     return { geometryPath, printPath };
   }
 
   // Resolve Grasshopper script path (algorithm.gh)
   const ghScript = path.join(input.ghScriptsDir, `${input.algorithm}.gh`);
-  if (!fs.existsSync(ghScript)) {
-    throw new Error(`Grasshopper script not found: ${ghScript}. Ensure it exists under splint_geo_processor/generators/ or set GH_SCRIPTS_DIR.`);
+  const ghScriptAbs = path.resolve(ghScript);
+  if (!fs.existsSync(ghScriptAbs)) {
+    throw new Error(`Grasshopper script not found: ${ghScriptAbs}. Ensure it exists under splint_geo_processor/generators/ or set GH_SCRIPTS_DIR.`);
   }
 
   // Rhino/Grasshopper step
@@ -50,12 +66,22 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
 
   // 1) Ensure Rhino is running via rhinocode list --json
   const rhinoIsRunning = async (): Promise<boolean> => {
-    const { stdout } = await execFileAsync(input.rhinoCodeCli!, ['list', '--json'], { timeout: 30_000 });
+    const cmd = `${input.rhinoCodeCli} list --json`;
     try {
-      const parsed = JSON.parse(stdout.trim() || '[]');
-      return Array.isArray(parsed) && parsed.length > 0;
-    } catch {
-      // If parsing fails, assume not running
+      const { stdout, stderr } = await execFileAsync(input.rhinoCodeCli!, ['list', '--json'], { timeout: 30_000 });
+      // Log command and brief outputs
+      if (stderr && stderr.trim()) {
+        logWarn('stderr (rhinocode list)', { stderr: stderr.substring(0, 500) });
+      }
+      // Parse
+      try {
+        const parsed = JSON.parse(stdout.trim() || '[]');
+        return Array.isArray(parsed) && parsed.length > 0;
+      } catch {
+        return false;
+      }
+    } catch (err: any) {
+      logWarn('command failed (rhinocode list)', { cmd, error: err?.message || String(err) });
       return false;
     }
   };
@@ -70,7 +96,10 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   if (!running) {
     // 2) Start Rhino in background using open -a {RHINO_CLI} --args -nosplash
     const openCmd = `open -a "${input.rhinoCli}" --args -nosplash`;
-    await execAsync(openCmd, { timeout: 30_000 });
+    logInfo('exec', { cmd: openCmd });
+    const { stdout: openStdout, stderr: openStderr } = await execAsync(openCmd, { timeout: 30_000 });
+    if (openStdout && openStdout.trim()) logInfo('stdout (open)', { stdout: openStdout.substring(0, 500) });
+    if (openStderr && openStderr.trim()) logWarn('stderr (open)', { stderr: openStderr.substring(0, 500) });
     // Wait and retry a few times
     for (let attempt = 0; attempt < 5; attempt++) {
       await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
@@ -88,19 +117,64 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
 
   // 3) Run GrasshopperPlayer with the script
   // rhinocode command "- _GrasshopperPlayer {gh_script_path}" (hyphen underscore)
-  const ghArg = `-_GrasshopperPlayer "${ghScript}"`;
-  await execFileAsync(input.rhinoCodeCli, ['command', ghArg], { timeout: 10 * 60_000 });
+  const ghArg = `-_GrasshopperPlayer "${ghScriptAbs}"`;
+  const runCmd = `${input.rhinoCodeCli} command ${ghArg}`;
+  logInfo('exec', { cmd: runCmd });
+  const execEnv = {
+    ...process.env,
+    SF_JOB_BASENAME: base,
+    SF_OUTBOX_DIR: input.outboxDir,
+    SF_INBOX_JSON: (input as any).inboxJsonPath || '',
+    SF_PARAMS_JSON: typeof input.params === 'string' ? input.params : JSON.stringify(input.params ?? {})
+  } as NodeJS.ProcessEnv;
+  const { stdout: ghStdout, stderr: ghStderr } = await execFileAsync(input.rhinoCodeCli, ['command', ghArg], { timeout: 10 * 60_000, env: execEnv });
+  if (ghStdout && ghStdout.trim()) logInfo('stdout (rhinocode command)', { stdout: ghStdout.substring(0, 2000) });
+  if (ghStderr && ghStderr.trim()) logWarn('stderr (rhinocode command)', { stderr: ghStderr.substring(0, 2000) });
 
-  // For now we assume the GH script writes its outputs to outbox naming convention
-  // If not present, we write a placeholder to unblock the pipeline
-  if (!fs.existsSync(geometryPath)) {
-    fs.writeFileSync(geometryPath, 'solid pipeline\nendsolid pipeline\n');
+  // Validate geometry output exists and is non-trivial, allowing a brief delay for file write
+  {
+    const start = Date.now();
+    let ok = false;
+    let size = 0;
+    while (Date.now() - start < 15000) {
+      if (fs.existsSync(geometryPath)) {
+        try {
+          const stats = fs.statSync(geometryPath);
+          size = stats.size;
+          if (stats.isFile() && size >= 200) { ok = true; break; }
+        } catch {}
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    if (!ok) {
+      throw new Error(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes): ${geometryPath}`);
+    }
   }
 
-  // Bambu Studio step (stub)
+  // Bambu Studio step (real CLI)
   if (input.bambuCli) {
-    // Example: await execFileAsync(input.bambuCli, ['--slice', geometryPath, '--output', printPath], { timeout: 10 * 60_000 });
-    fs.writeFileSync(printPath, '3mf-pipeline');
+    // Use the exact settings/filament JSON paths provided
+    const settingsJson = "/Users/jon/Library/Application Support/BambuStudio/system/BBL/machine/Bambu Lab P1S 0.4 nozzle.json;/Users/jon/Library/Application Support/BambuStudio/system/BBL/process/0.20mm Standard @BBL X1C.json";
+    const filamentJson = "/Users/jon/Library/Application Support/BambuStudio/system/BBL/filament/Generic PLA.json";
+
+    const args = [
+      '--orient', '1',
+      '--arrange', '1',
+      '--load-settings', settingsJson,
+      '--load-filaments', filamentJson,
+      '--slice', '0',
+      '--debug', '2',
+      '--export-3mf', printPath,
+      geometryPath
+    ];
+
+    // Log full command
+    const prettyArgs = args.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ');
+    logInfo('execFile', { cmd: `${input.bambuCli} ${prettyArgs}` });
+
+    const { stdout: bambuStdout, stderr: bambuStderr } = await execFileAsync(input.bambuCli, args, { timeout: 10 * 60_000 });
+    if (bambuStdout && bambuStdout.trim()) logInfo('stdout (bambu)', { stdout: bambuStdout.substring(0, 2000) });
+    if (bambuStderr && bambuStderr.trim()) logWarn('stderr (bambu)', { stderr: bambuStderr.substring(0, 2000) });
   }
 
   return { geometryPath, printPath: fs.existsSync(printPath) ? printPath : undefined };

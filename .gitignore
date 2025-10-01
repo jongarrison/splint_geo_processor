@@ -10,3 +10,4 @@ secrets/
 secrets/*
 external-info/*
 node_modules/
+**/__pycache__
