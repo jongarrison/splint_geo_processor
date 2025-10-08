@@ -153,9 +153,11 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
 
   // Bambu Studio step (real CLI)
   if (input.bambuCli) {
-    // Use the exact settings/filament JSON paths provided
-    const settingsJson = "/Users/jon/Library/Application Support/BambuStudio/system/BBL/machine/Bambu Lab P1S 0.4 nozzle.json;/Users/jon/Library/Application Support/BambuStudio/system/BBL/process/0.20mm Standard @BBL X1C.json";
-    const filamentJson = "/Users/jon/Library/Application Support/BambuStudio/system/BBL/filament/Generic PLA.json";
+    const machineSettingsPath = path.join(__dirname, '../../printer-settings/machine/Bambu Lab P1S 0.4 nozzle.json');
+    const processSettingsPath = path.join(__dirname, '../../printer-settings/process/0.20mm Standard @BBL X1C.json');
+    const filamentSettingsPath = path.join(__dirname, '../../printer-settings/filament/Generic PLA.json');
+    const settingsJson = `${machineSettingsPath};${processSettingsPath}`;
+    const filamentJson = "${filamentSettingsPath}";
 
     const args = [
       '--orient', '1',
