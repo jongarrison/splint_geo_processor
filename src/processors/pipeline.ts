@@ -1,9 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFile, exec } from 'node:child_process';
 import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
+
+// ES module equivalent of __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export interface PipelineInputs {
   id: string;
@@ -153,11 +158,12 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
 
   // Bambu Studio step (real CLI)
   if (input.bambuCli) {
-    const machineSettingsPath = path.join(__dirname, '../../printer-settings/machine/Bambu Lab P1S 0.4 nozzle.json');
-    const processSettingsPath = path.join(__dirname, '../../printer-settings/process/0.20mm Standard @BBL X1C.json');
-    const filamentSettingsPath = path.join(__dirname, '../../printer-settings/filament/Generic PLA.json');
+
+    const machineSettingsPath = path.join(__dirname, '../../printer-settings/machine/machine-final.json');
+    const processSettingsPath = path.join(__dirname, '../../printer-settings/process/process-final.json');
+    const filamentSettingsPath = path.join(__dirname, '../../printer-settings/filament/filament-final.json');
     const settingsJson = `${machineSettingsPath};${processSettingsPath}`;
-    const filamentJson = "${filamentSettingsPath}";
+    const filamentJson = `${filamentSettingsPath}`;
 
     const args = [
       '--orient', '1',
