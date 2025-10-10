@@ -58,15 +58,21 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   const ghScript = path.join(input.ghScriptsDir, `${input.algorithm}.gh`);
   const ghScriptAbs = path.resolve(ghScript);
   if (!fs.existsSync(ghScriptAbs)) {
-    throw new Error(`Grasshopper script not found: ${ghScriptAbs}. Ensure it exists under splint_geo_processor/generators/ or set GH_SCRIPTS_DIR.`);
+    const errorMsg = `Grasshopper script not found: ${ghScriptAbs}. Ensure it exists under splint_geo_processor/generators/ or set GH_SCRIPTS_DIR.`;
+    logWarn(errorMsg);
+    throw new Error(errorMsg);
   }
 
   // Rhino/Grasshopper step
   if (!input.rhinoCli) {
-    throw new Error('RHINO_CLI not configured and DRY_RUN is false');
+    const errorMsg = 'RHINO_CLI not configured and DRY_RUN is false';
+    logWarn(errorMsg);
+    throw new Error(errorMsg);
   }
   if (!input.rhinoCodeCli) {
-    throw new Error('RHINOCODE_CLI not configured and DRY_RUN is false');
+    const errorMsg = 'RHINOCODE_CLI not configured and DRY_RUN is false';
+    logWarn(errorMsg);
+    throw new Error(errorMsg);
   }
 
   // 1) Ensure Rhino is running via rhinocode list --json

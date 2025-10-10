@@ -34,7 +34,7 @@ export class Processor {
         const resp = await this.http.get('/api/geometry-processing/next-job');
 
         if (resp.status === 404) {
-          this.logger.debug('No jobs available');
+          this.logger.info('No jobs available');
           await sleep(intervalMs);
           continue;
         }
@@ -50,7 +50,7 @@ export class Processor {
         }
 
         const job = resp.data as any;
-        this.logger.info('Received job');
+        this.logger.info({ apiUrl: this.config.apiUrl, jobId: job?.id ?? job?.ID ?? job?.Id }, 'Successfully connected to API and received job');
         try {
           const keys = Object.keys(job || {});
           this.logger.debug({ keys }, 'next-job shape');
@@ -89,9 +89,27 @@ export class Processor {
         fs.mkdirSync(jobArchiveDir, { recursive: true });
         const jobLogPath = path.join(jobArchiveDir, `${baseName}.log`);
         const jobLogStream = fs.createWriteStream(jobLogPath, { flags: 'a' });
+        
+        // Collect logs in memory to send to server (limit to 100KB)
+        const logLines: string[] = [];
+        const maxLogSize = 100 * 1024; // 100KB limit
+        let currentLogSize = 0;
+        
         const jobLog = (level: 'info'|'warn', message: string, extra?: any) => {
           const line = `${new Date().toISOString()} [${level}] ${message}${extra ? ' ' + JSON.stringify(extra) : ''}\n`;
-          try { jobLogStream.write(line); } catch {}
+          try { 
+            jobLogStream.write(line); 
+            // Add to in-memory log if under size limit
+            if (currentLogSize + line.length <= maxLogSize) {
+              logLines.push(line);
+              currentLogSize += line.length;
+            } else if (logLines.length > 0 && !logLines[logLines.length - 1].includes('[Log truncated]')) {
+              // Add truncation notice once
+              const truncMsg = '[Log truncated - exceeded 100KB limit]\n';
+              logLines.push(truncMsg);
+              currentLogSize += truncMsg.length;
+            }
+          } catch {}
         };
 
         // Single-threaded processing section: pause polling while we process this job
@@ -129,10 +147,14 @@ export class Processor {
             printName = path.basename(outputs.printPath);
           }
 
-          await this.reportSuccess(idPart, geometryB64, geometryName, printB64, printName);
+          const processingLog = logLines.join('');
+          await this.reportSuccess(idPart, geometryB64, geometryName, printB64, printName, processingLog);
         } catch (procErr: any) {
           this.logger.error({ err: procErr?.message }, 'Processing failed');
-          await this.reportResult(idPart, false, String(procErr?.message || 'Processing failed'));
+          // Log the error to jobLog so it appears in processing log sent to server
+          jobLog('warn', `Processing failed: ${procErr?.message || 'Unknown error'}`);
+          const processingLog = logLines.join('');
+          await this.reportResult(idPart, false, String(procErr?.message || 'Processing failed'), processingLog);
         } finally {
           // Archive job files (inbox and any produced outbox files) regardless of success/failure
           try {
@@ -153,12 +175,13 @@ export class Processor {
     }
   }
 
-  private async reportResult(jobId: string, isSuccess: boolean, errorMessage?: string) {
+  private async reportResult(jobId: string, isSuccess: boolean, errorMessage?: string, processingLog?: string) {
     const payload: any = {
       GeometryProcessingQueueID: jobId,
       isSuccess,
     };
     if (!isSuccess && errorMessage) payload.errorMessage = errorMessage;
+    if (processingLog) payload.processingLog = processingLog;
     try {
       const resp = await this.http.post('/api/geometry-processing/result', payload);
       if (resp.status >= 200 && resp.status < 300) {
@@ -171,7 +194,7 @@ export class Processor {
     }
   }
 
-  private async reportSuccess(jobId: string, geometryB64: string, geometryName: string, printB64?: string, printName?: string) {
+  private async reportSuccess(jobId: string, geometryB64: string, geometryName: string, printB64?: string, printName?: string, processingLog?: string) {
     const payload: any = {
       GeometryProcessingQueueID: jobId,
       isSuccess: true,
@@ -181,6 +204,9 @@ export class Processor {
     if (printB64 && printName) {
       payload.PrintFileContents = printB64;
       payload.PrintFileName = printName;
+    }
+    if (processingLog) {
+      payload.processingLog = processingLog;
     }
     try {
       const resp = await this.http.post('/api/geometry-processing/result', payload);
