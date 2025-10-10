@@ -1,43 +1,36 @@
 
 algorithm name:
-infinitysplint
-
-
-
-inter-phalange-distance-mm
-root-circumference-mm
-mid-circumference-mm
-tip-circumference-mm
-flexion-degrees
-
-
-
-inter-phalange-distance-mm_out
-root-circumference-mm_out
-mid-circumference-mm_out
-tip-circumference-mm_out
-flexion-degrees_out
-
-
-inter-phalange-distance-mm = inter-phalange-distance-mm_out
-root-circumference-mm = root-circumference-mm_out
-mid-circumference-mm = mid-circumference-mm_out
-tip-circumference-mm = tip-circumference-mm_out
-flexion-degrees = flexion-degrees_out
+infinity_splint_generator_251004
 
 {
-  "inter-phalange-distance-mm": 25.1,
-  "root-circumference-mm": 25.2,
-  "mid-circumference-mm": 25.3,
-  "tip-circumference-mm": 25.4,
-  "flexion-degrees": 1.5
+  "interPhalangeDistanceMM": 25,
+  "rootCircumferenceMM": 25,
+  "midCircumferenceMM": 25.444,
+  "tipCircumferenceMM": 25,
+  "flexionDegrees": 2
 }
 
+interPhalangeDistanceMM
+rootCircumferenceMM
+midCircumferenceMM
+tipCircumferenceMM
+flexionDegrees
 
-inter-phalange-distance-mm_out = job_data["inter-phalange-distance-mm"]
-root-circumference-mm_out = job_data["root-circumference-mm"]
-mid-circumference-mm_out = job_data["mid-circumference-mm"]
-tip-circumference-mm_out = job_data["tip-circumference-mm"]
-flexion-degrees_out = job_data["flexion-degrees"]
+interPhalangeDistanceMM_out
+rootCircumferenceMM_out
+midCircumferenceMM_out
+tipCircumferenceMM_out
+flexionDegrees_out
 
+interPhalangeDistanceMM_out = interPhalangeDistanceMM
+rootCircumferenceMM_out = rootCircumferenceMM
+midCircumferenceMM_out = midCircumferenceMM
+tipCircumferenceMM_out = tipCircumferenceMM
+flexionDegrees_out = flexionDegrees
+
+interPhalangeDistanceMM_out = job_data["interPhalangeDistanceMM"]
+rootCircumferenceMM_out = job_data["rootCircumferenceMM"]
+midCircumferenceMM_out = job_data["midCircumferenceMM"]
+tipCircumferenceMM_out = job_data["tipCircumferenceMM"]
+flexionDegrees_out = job_data["flexionDegrees"]
 
