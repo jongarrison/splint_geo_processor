@@ -142,24 +142,45 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   if (ghStdout && ghStdout.trim()) logInfo('stdout (rhinocode command)', { stdout: ghStdout.substring(0, 2000) });
   if (ghStderr && ghStderr.trim()) logWarn('stderr (rhinocode command)', { stderr: ghStderr.substring(0, 2000) });
 
-  // Validate geometry output exists and is non-trivial, allowing a brief delay for file write
+  // Validate geometry output exists and is non-trivial, allowing time for file write
+  // Grasshopper may take time to flush large files to disk
   {
     const start = Date.now();
+    const timeoutMs = 60000; // 60 second timeout for large files
     let ok = false;
     let size = 0;
-    while (Date.now() - start < 15000) {
+    let lastSize = -1;
+    let stableSizeCount = 0;
+    
+    while (Date.now() - start < timeoutMs) {
       if (fs.existsSync(geometryPath)) {
         try {
           const stats = fs.statSync(geometryPath);
           size = stats.size;
-          if (stats.isFile() && size >= 200) { ok = true; break; }
+          
+          // File must be at least 200 bytes and stable (not still growing)
+          if (stats.isFile() && size >= 200) {
+            // Check if size has stabilized (same size for 2 consecutive checks)
+            if (size === lastSize) {
+              stableSizeCount++;
+              if (stableSizeCount >= 2) {
+                ok = true;
+                break;
+              }
+            } else {
+              stableSizeCount = 0;
+              lastSize = size;
+            }
+          }
         } catch {}
       }
       await new Promise(r => setTimeout(r, 500));
     }
     if (!ok) {
+      logWarn(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes, timeout=${timeoutMs}ms): ${geometryPath}`);
       throw new Error(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes): ${geometryPath}`);
     }
+    logInfo(`Geometry output validated (${size} bytes)`, { geometryPath, waitTimeMs: Date.now() - start });
   }
 
   // Bambu Studio step (real CLI)
