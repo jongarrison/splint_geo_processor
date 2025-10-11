@@ -176,6 +176,20 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       }
       await new Promise(r => setTimeout(r, 500));
     }
+
+    // Check for Grasshopper's log.txt and include it in our logs
+    const ghLogPath = path.join(input.outboxDir, 'log.txt');
+    if (fs.existsSync(ghLogPath)) {
+      try {
+        const ghLogContent = fs.readFileSync(ghLogPath, 'utf-8');
+        if (ghLogContent.trim()) {
+          logInfo('Grasshopper log.txt contents:', { log: ghLogContent.substring(0, 20000) });
+        }
+      } catch (err: any) {
+        logWarn('Failed to read Grasshopper log.txt', { error: err?.message });
+      }
+    }
+
     if (!ok) {
       logWarn(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes, timeout=${timeoutMs}ms): ${geometryPath}`);
       throw new Error(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes): ${geometryPath}`);
@@ -195,6 +209,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     const args = [
       '--orient', '1',
       '--arrange', '1',
+      '--curr-bed-type', '"Textured PEI Plate"',  //See: https://github.com/bambulab/BambuStudio/wiki/Command-Line-Usage
       '--load-settings', settingsJson,
       '--load-filaments', filamentJson,
       '--slice', '0',
