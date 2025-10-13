@@ -183,7 +183,12 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       try {
         const ghLogContent = fs.readFileSync(ghLogPath, 'utf-8');
         if (ghLogContent.trim()) {
-          logInfo('Grasshopper log.txt contents:', { log: ghLogContent.substring(0, 20000) });
+          // Format the log with prominent markers and preserved line endings
+          const formattedLog = '\n' +
+            '================== RHINO LOG START ==================\n' +
+            ghLogContent +
+            '\n=================== RHINO LOG END ===================\n';
+          logInfo(formattedLog.substring(0, 20000));
         }
       } catch (err: any) {
         logWarn('Failed to read Grasshopper log.txt', { error: err?.message });
@@ -209,7 +214,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     const args = [
       '--orient', '1',
       '--arrange', '1',
-      '--curr-bed-type', '"Textured PEI Plate"',  //See: https://github.com/bambulab/BambuStudio/wiki/Command-Line-Usage
+      '--curr-bed-type', '3',  // Textured PEI Plate (numeric code: 0=Cool, 1=Engineering, 2=HighTemp, 3=Textured, 4=Smooth)
       '--load-settings', settingsJson,
       '--load-filaments', filamentJson,
       '--slice', '0',

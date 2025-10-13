@@ -48,21 +48,19 @@ def confirm_job_is_processed_and_exit(jobname, is_success, message, is_kill_on_c
     conf_path = Path(get_outbox_job_confirmation_filepath(jobname))
     try:
         #Remove the job queue file that started all of this work
-        if job_path.exists():
-            shutil.move(job_path, splint_archive_dir)
-            # job_path.unlink()
-            if job_path.exists():
-                message = f"FAILED TO Archive JOB FILE. previous message:{message}"
+        # if job_path.exists():
+        #     shutil.move(job_path, splint_archive_dir) # This is now handled by the splint_geo_processor
+        #     # job_path.unlink()
+        #     if job_path.exists():
+        #         log(f"FAILED TO Archive JOB FILE. previous message:{message}: {job_path}")
 
-        conf_data = {"result": "SUCCESS" if is_success else "FAILURE", "message": message}
-        with open(conf_path, "w") as f:
-            json.dump(conf_data, f, indent=2)        
+        log(f"RESULT: {"SUCCESS" if is_success else "FAILURE"} {message=} {jobname=}")
 
-        if (is_kill_on_completion):
-            log("Killing Rhino is not currently allowed...")
-            # rs.Exit()
-        else:
-            log("Rhino exit disabled via: is_kill_on_completion")
+        # if (is_kill_on_completion):
+        #     log("Killing Rhino is not currently allowed...")
+        #     # rs.Exit()
+        # else:
+        #     log("Rhino exit disabled via: is_kill_on_completion")
     except Exception as e:
         conf_data = {"result": "FAILURE", "phase": "during confirmation", "exception": f"{traceback.format_exc()}", "message": message}
         with open(conf_path, "w") as f:
