@@ -214,7 +214,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     const args = [
       '--orient', '1',
       '--arrange', '1',
-      '--curr-bed-type', '3',  // Textured PEI Plate (numeric code: 0=Cool, 1=Engineering, 2=HighTemp, 3=Textured, 4=Smooth)
+      '--curr-bed-type', 'Textured PEI Plate',  // Must match string key in s_keys_map_BedType (PrintConfig.cpp line 723)
       '--load-settings', settingsJson,
       '--load-filaments', filamentJson,
       '--slice', '0',
