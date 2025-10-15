@@ -216,7 +216,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       '--arrange', '1',
       '--curr-bed-type', 'Textured PEI Plate',  // Must match string key in s_keys_map_BedType (PrintConfig.cpp line 723)
       '--load-settings', settingsJson,
-      '--load-filaments', filamentJson,
+      '--load-filaments', `${filamentJson};${filamentJson};${filamentJson};${filamentJson}`, //JG - TODO - maybe back this out
       '--slice', '0',
       '--debug', '2',
       '--export-3mf', printPath,
@@ -225,7 +225,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
 
     // Log full command
     const prettyArgs = args.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ');
-    logInfo('execFile', { cmd: `${input.bambuCli} ${prettyArgs}` });
+    logInfo('execFile Bambu CLI: ', { cmd: `${input.bambuCli} ${prettyArgs}` });
 
     const { stdout: bambuStdout, stderr: bambuStderr } = await execFileAsync(input.bambuCli, args, { timeout: 10 * 60_000 });
     if (bambuStdout && bambuStdout.trim()) logInfo('stdout (bambu)', { stdout: bambuStdout.substring(0, 2000) });
