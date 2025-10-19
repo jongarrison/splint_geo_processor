@@ -216,7 +216,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       '--arrange', '1',
       '--curr-bed-type', 'Textured PEI Plate',  // Must match string key in s_keys_map_BedType (PrintConfig.cpp line 723)
       '--load-settings', settingsJson,
-      '--load-filaments', `${filamentJson};${filamentJson};${filamentJson};${filamentJson}`, //JG - TODO - maybe back this out
+      '--load-filaments', filamentJson,  // Single filament → virtual slot 0 (runtime mapping via ams_mapping, see ../../agent-notes/ams_mapping_and_slicing.md)
       '--slice', '0',
       '--debug', '2',
       '--export-3mf', printPath,
