@@ -168,7 +168,17 @@ export class Processor {
           this.logger.info({ id: idPart }, 'Finished processing');
         }
       } catch (err) {
-        this.logger.error({ err }, 'Processor iteration failed');
+        // Check for connection refused errors and log them cleanly
+        const isConnectionError = 
+          (err as any)?.code === 'ECONNREFUSED' ||
+          (err as any)?.cause?.code === 'ECONNREFUSED' ||
+          (err as any)?.message?.includes('ECONNREFUSED');
+        
+        if (isConnectionError) {
+          this.logger.warn('Server is down or unreachable (ECONNREFUSED)');
+        } else {
+          this.logger.error({ err }, 'Processor iteration failed');
+        }
       }
       // throttle loop regardless of outcome
       await sleep(intervalMs);
