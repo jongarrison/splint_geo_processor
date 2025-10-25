@@ -141,6 +141,7 @@ def get_next_geo_job(algorithm_name):
                 log("No 'params' key found in JSON data.")
             else:
                 result_data["jobname"] = json_data["jobname"]
+                result_data["objectID"] = json_data.get("metadata", {}).get("objectID", "NA")
 
                 for key in list(result_data.keys()):
                     log(f"RESULT: {key}: {result_data[key]}")

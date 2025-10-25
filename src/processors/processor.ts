@@ -68,11 +68,12 @@ export class Processor {
           metadata: {
             GeometryName: job?.GeometryName,
             CustomerNote: job?.CustomerNote,
-            CustomerID: job?.CustomerID
+            CustomerID: job?.CustomerID,
+            objectID: job?.objectID
           }
         };
         fs.writeFileSync(inboxJson, JSON.stringify(inputPayload, null, 2), 'utf8');
-        this.logger.info({ inboxJson }, 'Wrote input JSON to inbox');
+        this.logger.info({ inboxJson, objectID: job?.objectID }, 'Wrote input JSON to inbox');
 
         // Prepare per-job archive directory and job-specific log file immediately
         const home = process.env.HOME || process.env.USERPROFILE || '.';
