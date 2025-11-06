@@ -11,3 +11,4 @@ secrets/*
 external-info/*
 node_modules/
 **/__pycache__
+stubs/*
