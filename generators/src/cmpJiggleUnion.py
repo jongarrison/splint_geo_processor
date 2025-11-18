@@ -149,6 +149,7 @@ class cmpJiggleUnion:
         if self.enableJiggle == False:
             return Brep.CreateBooleanUnion(self.breps, self.tol, self.allowNonManifold), -1, []
 
+        
 
         unions = []
         jigCounts = []

@@ -29,6 +29,9 @@ def get_outbox_job_confirmation_filepath(jobname):
 def get_log_filepath():
     return os.path.join(splint_outbox_dir, "log.txt")
 
+def get_generator_filepath():
+    return Path(__file__).parent.parent.resolve()
+
 def log(message):
     print(f"log:{message}")
     with open(get_log_filepath(), "a") as f:
@@ -151,3 +154,22 @@ def get_next_geo_job(algorithm_name):
     except Exception as e:
         log(f"Exception in get_next_geo_job: {traceback.format_exc()}")
         return None
+
+def load_dev_data(geo_algorithm_name):
+    dev_data_path = Path.joinpath(get_generator_filepath(), f"{geo_algorithm_name}.json")
+    log(f"Loading dev data from {dev_data_path}")
+    if not dev_data_path.exists():
+        log(f"Dev data file does not exist: {dev_data_path}")
+        raise Exception(f"Dev data file does not exist: {dev_data_path}")
+
+    try:
+        with open(dev_data_path, 'r', encoding='utf-8') as file:
+            data = json.load(file)
+            log(f"Loaded dev data from {dev_data_path}")
+            return data
+    except json.JSONDecodeError as e:
+        log(f"Error parsing dev data JSON file {dev_data_path}: {e}")
+        raise e
+    except Exception as e:
+        log(f"Error reading dev data file {dev_data_path}: {e}")
+        raise e
