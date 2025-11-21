@@ -1,9 +1,10 @@
 {
-    "distal_phalange_l_mm": 25.0,
-    "middle_phalange_l_mm": 29.2,
-    "tip_circumference_mm": 47.0,
-    "dip_circumference_mm": 48.0,
-    "mid_phalange_circumference_mm": 47.0,
-    "pip_circumference_mm": 48.0,
-    "flexion_degrees": -5.0
+    "distal_phalange_l_mm": 26.0,
+    "middle_phalange_l_mm": 27.0,
+    "tip_circumference_mm": 49.0,
+    "dip_circumference_mm": 50.5,
+    "mid_phalange_circumference_mm": 55.0,
+    "pip_circumference_mm": 64.0,
+    "flexion_degrees": -5.0,
+    "lateral_flexion_degrees": 0.0
 }
