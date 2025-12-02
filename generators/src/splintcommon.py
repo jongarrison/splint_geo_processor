@@ -123,34 +123,36 @@ def load_oldest_json_job_file(directory, algorithm_name):
         log(f"Error reading file {oldest_file.name}: {e}")
         return None
 
+def extract_server_params_data(json_data):
+    result_data = None
+
+    if json_data is not None:
+        log("\nJSON data loaded successfully:")
+        log(f"Data type: {type(json_data)}")
+        
+        for key in list(json_data.keys()):
+            log(f"INPUT: {key}: {json_data[key]}")
+
+        result_data = json.loads(json_data["params"]) if "params" in json_data else None
+
+        if result_data is None:
+            log("No 'params' key found in JSON data.")
+        else:
+            result_data["jobname"] = json_data["jobname"]
+            result_data["objectID"] = json_data.get("metadata", {}).get("objectID", "NA")
+
+            for key in list(result_data.keys()):
+                log(f"RESULT: {key}: {result_data[key]}")
+            return result_data
+    raise Exception("No data found to extract correctly")
+
 def get_next_geo_job(algorithm_name):
     try:
-        log(f"get_next_geo_job {algorithm_name=} v=4:26pm")
+        log(f"get_next_geo_job {algorithm_name=}")
         # Process the oldest JSON file
         json_data = load_oldest_json_job_file(splint_inbox_dir, algorithm_name)
 
-        result_data = None
-
-        if json_data is not None:
-            log("\nJSON data loaded successfully:")
-            log(f"Data type: {type(json_data)}")
-            
-            for key in list(json_data.keys()):
-                log(f"INPUT: {key}: {json_data[key]}")
-    
-            result_data = json.loads(json_data["params"]) if "params" in json_data else None
-
-            if result_data is None:
-                log("No 'params' key found in JSON data.")
-            else:
-                result_data["jobname"] = json_data["jobname"]
-                result_data["objectID"] = json_data.get("metadata", {}).get("objectID", "NA")
-
-                for key in list(result_data.keys()):
-                    log(f"RESULT: {key}: {result_data[key]}")
-                return result_data
-
-        raise Exception("No data found to extract correctly")
+        return extract_server_params_data(json_data)
     except Exception as e:
         log(f"Exception in get_next_geo_job: {traceback.format_exc()}")
         return None
@@ -165,8 +167,10 @@ def load_dev_data(geo_algorithm_name):
     try:
         with open(dev_data_path, 'r', encoding='utf-8') as file:
             data = json.load(file)
+            data["jobname"] = dev_data_path.stem #name
+
             log(f"Loaded dev data from {dev_data_path}")
-            return data
+            return extract_server_params_data(data)
     except json.JSONDecodeError as e:
         log(f"Error parsing dev data JSON file {dev_data_path}: {e}")
         raise e

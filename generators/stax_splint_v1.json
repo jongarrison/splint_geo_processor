@@ -1,10 +1,11 @@
 {
-    "distal_phalange_l_mm": 26.0,
-    "middle_phalange_l_mm": 27.0,
-    "tip_circumference_mm": 49.0,
-    "dip_circumference_mm": 50.5,
-    "mid_phalange_circumference_mm": 55.0,
-    "pip_circumference_mm": 64.0,
-    "flexion_degrees": -5.0,
-    "lateral_flexion_degrees": 0.0
+  "id": "cmigitt280001jpgfmqndp880",
+  "algorithm": "stax_splint_v1",
+  "params": "{\"distal_phalange_l_mm\":25,\"middle_phalange_l_mm\":26,\"tip_circumference_mm\":51,\"dip_circumference_mm\":56,\"mid_phalange_circumference_mm\":57,\"pip_circumference_mm\":66,\"flexion_degrees\":-5,\"lateral_flexion_degrees\":0}",
+  "metadata": {
+    "GeometryName": "STAX Splint",
+    "CustomerNote": "The design should have a longer tail now",
+    "CustomerID": "jon2",
+    "objectID": "JGDV"
+  }
 }
