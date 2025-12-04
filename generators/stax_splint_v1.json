@@ -1,11 +1,11 @@
 {
-  "id": "cmigitt280001jpgfmqndp880",
+  "id": "cmigog1xr0005jpgfhqedssk6",
   "algorithm": "stax_splint_v1",
-  "params": "{\"distal_phalange_l_mm\":25,\"middle_phalange_l_mm\":26,\"tip_circumference_mm\":51,\"dip_circumference_mm\":56,\"mid_phalange_circumference_mm\":57,\"pip_circumference_mm\":66,\"flexion_degrees\":-5,\"lateral_flexion_degrees\":0}",
+  "params": "{\"distal_phalange_l_mm\":25,\"middle_phalange_l_mm\":26,\"tip_circumference_mm\":51,\"dip_circumference_mm\":55,\"mid_phalange_circumference_mm\":57,\"pip_circumference_mm\":66,\"flexion_degrees\":-10,\"lateral_flexion_degrees\":0}",
   "metadata": {
     "GeometryName": "STAX Splint",
-    "CustomerNote": "The design should have a longer tail now",
-    "CustomerID": "jon2",
-    "objectID": "JGDV"
+    "CustomerNote": null,
+    "CustomerID": "Jon410-Wed",
+    "objectID": "FDHK"
   }
 }

@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { createLogger } from './utils/logger.js';
 import { Processor } from './processors/processor.js';
 import { loadConfig } from './config.js';

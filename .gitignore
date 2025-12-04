@@ -12,3 +12,8 @@ external-info/*
 node_modules/
 **/__pycache__
 stubs/*
+
+# Environment variables
+.env
+.env.local
+.env.production
