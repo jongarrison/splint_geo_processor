@@ -5,6 +5,7 @@ import path from 'node:path';
 import { sleep } from '../utils/sleep.js';
 import type { AppConfig } from '../config.js';
 import { runPipeline } from './pipeline.js';
+import FormData from 'form-data';
 
 export class Processor {
   private http: AxiosInstance;
@@ -25,7 +26,11 @@ export class Processor {
   }
 
   async run() {
-    this.logger.info({ apiUrl: this.config.apiUrl }, 'Processor loop starting');
+    const env = this.config.environment === 'production' ? 'prod' : 
+                this.config.environment === 'local' ? 'local' : 
+                this.config.environment;
+    
+    this.logger.info({ apiUrl: this.config.apiUrl }, `[${env}] Processor loop starting`);
     const intervalMs = this.config.pollIntervalMs || 5000;
 
     while (true) {
@@ -34,23 +39,26 @@ export class Processor {
         const resp = await this.http.get('/api/geometry-processing/next-job');
 
         if (resp.status === 404) {
-          this.logger.info('No jobs available');
+          this.logger.info(`[${env}] No jobs available`);
           await sleep(intervalMs);
           continue;
         }
         if (resp.status === 401) {
-          this.logger.warn('Unauthorized (401). Check SF_API_KEY or secrets/api-key.txt for a valid API key.');
+          this.logger.warn(`[${env}] Unauthorized (401). Check SF_API_KEY or secrets/api-key.txt for a valid API key.`);
           await sleep(intervalMs);
           continue;
         }
         if (resp.status !== 200) {
-          this.logger.warn({ status: resp.status, data: resp.data }, 'Unexpected response from next-job');
+          this.logger.warn({ status: resp.status, data: resp.data }, `[${env}] Unexpected response from next-job`);
           await sleep(intervalMs);
           continue;
         }
 
         const job = resp.data as any;
-        this.logger.info({ apiUrl: this.config.apiUrl, jobId: job?.id ?? job?.ID ?? job?.Id }, 'Successfully connected to API and received job');
+        this.logger.info({ 
+          apiUrl: this.config.apiUrl, 
+          jobId: job?.id ?? job?.ID ?? job?.Id 
+        }, `[${env}] Job received from factory`);
         try {
           const keys = Object.keys(job || {});
           this.logger.debug({ keys }, 'next-job shape');
@@ -132,24 +140,32 @@ export class Processor {
             jobLog
           });
 
-          // Read files and post success
-          const fsRead = (p: string) => fs.readFileSync(p);
-          const toB64 = (buf: Buffer) => buf.toString('base64');
+          // Prepare files for multipart upload
+          const geometryPath = outputs.geometryPath;
+          const geometryName = path.basename(geometryPath);
+          const geometrySize = fs.statSync(geometryPath).size;
 
-          const geometryBuf = fsRead(outputs.geometryPath);
-          const geometryB64 = toB64(geometryBuf);
-          const geometryName = path.basename(outputs.geometryPath);
-
-          let printB64: string | undefined;
+          let printPath: string | undefined;
           let printName: string | undefined;
+          let printSize: number | undefined;
           if (outputs.printPath && fs.existsSync(outputs.printPath)) {
-            const printBuf = fsRead(outputs.printPath);
-            printB64 = toB64(printBuf);
-            printName = path.basename(outputs.printPath);
+            printPath = outputs.printPath;
+            printName = path.basename(printPath);
+            printSize = fs.statSync(printPath).size;
           }
 
           const processingLog = logLines.join('');
-          await this.reportSuccess(idPart, geometryB64, geometryName, printB64, printName, processingLog);
+          
+          // Log file sizes for debugging
+          this.logger.info({
+            geometryFileSize: geometrySize,
+            geometryFileName: geometryName,
+            printFileSize: printSize || 0,
+            printFileName: printName || null,
+            processingLogSize: processingLog.length,
+          }, 'Uploading files via multipart');
+
+          await this.reportSuccess(idPart, geometryPath, geometryName, printPath, printName, processingLog);
         } catch (procErr: any) {
           this.logger.error({ err: procErr?.message }, 'Processing failed');
           // Log the error to jobLog so it appears in processing log sent to server
@@ -192,7 +208,16 @@ export class Processor {
       isSuccess,
     };
     if (!isSuccess && errorMessage) payload.errorMessage = errorMessage;
-    if (processingLog) payload.processingLog = processingLog;
+    if (processingLog) {
+      // Truncate processing log to prevent 413 errors (server limit: 100KB, using 95KB for safety)
+      const maxLogSize = 95 * 1024; // 95KB
+      if (processingLog.length > maxLogSize) {
+        const truncated = processingLog.slice(0, maxLogSize);
+        payload.processingLog = truncated + '\n\n[Log truncated - original size: ' + processingLog.length + ' bytes]';
+      } else {
+        payload.processingLog = processingLog;
+      }
+    }
     try {
       const resp = await this.http.post('/api/geometry-processing/result', payload);
       if (resp.status >= 200 && resp.status < 300) {
@@ -205,29 +230,61 @@ export class Processor {
     }
   }
 
-  private async reportSuccess(jobId: string, geometryB64: string, geometryName: string, printB64?: string, printName?: string, processingLog?: string) {
-    const payload: any = {
-      GeometryProcessingQueueID: jobId,
-      isSuccess: true,
-      GeometryFileContents: geometryB64,
-      GeometryFileName: geometryName,
-    };
-    if (printB64 && printName) {
-      payload.PrintFileContents = printB64;
-      payload.PrintFileName = printName;
+  private async reportSuccess(jobId: string, geometryPath: string, geometryName: string, printPath?: string, printName?: string, processingLog?: string) {
+    // Use multipart/form-data to upload files without base64 encoding
+    const form = new FormData();
+    form.append('GeometryProcessingQueueID', jobId);
+    form.append('isSuccess', 'true');
+    
+    // Attach geometry file as stream
+    form.append('geometryFile', fs.createReadStream(geometryPath), {
+      filename: geometryName,
+      contentType: this.getContentType(geometryName),
+    });
+    
+    // Attach print file if present
+    if (printPath && printName) {
+      form.append('printFile', fs.createReadStream(printPath), {
+        filename: printName,
+        contentType: this.getContentType(printName),
+      });
     }
+    
+    // Attach processing log (truncated if needed)
     if (processingLog) {
-      payload.processingLog = processingLog;
+      const maxLogSize = 95 * 1024; // 95KB
+      if (processingLog.length > maxLogSize) {
+        const truncated = processingLog.slice(0, maxLogSize);
+        form.append('processingLog', truncated + '\n\n[Log truncated - original size: ' + processingLog.length + ' bytes]');
+      } else {
+        form.append('processingLog', processingLog);
+      }
     }
+    
     try {
-      const resp = await this.http.post('/api/geometry-processing/result', payload);
+      const resp = await this.http.post('/api/geometry-processing/result', form, {
+        headers: form.getHeaders(),
+        maxBodyLength: Infinity, // Allow large file uploads
+        maxContentLength: Infinity,
+      });
       if (resp.status >= 200 && resp.status < 300) {
         this.logger.info({ jobId }, 'Reported success');
       } else {
         this.logger.warn({ status: resp.status, data: resp.data }, 'Failed to report success');
       }
     } catch (err) {
-      this.logger.error({ err }, 'Error reporting success');
+      this.logger.error({ err }, 'Error reporting result');
+    }
+  }
+
+  private getContentType(filename: string): string {
+    const ext = path.extname(filename).toLowerCase();
+    switch (ext) {
+      case '.stl': return 'model/stl';
+      case '.3mf': return 'model/3mf';
+      case '.obj': return 'text/plain';
+      case '.gcode': return 'text/plain';
+      default: return 'application/octet-stream';
     }
   }
 

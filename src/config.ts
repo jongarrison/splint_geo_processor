@@ -12,6 +12,7 @@ export interface AppConfig {
   rhinoCodeCli?: string;       // Path to rhinocode CLI (for list/command)
   bambuCli?: string;           // Path to BambuStudio CLI
   dryRun?: boolean;            // If true, simulate outputs without invoking external tools
+  environment: string;         // Environment name (local, production, or derived from URL)
 }
 
 function readSecretFile(fileName: string): string | undefined {
@@ -75,5 +76,27 @@ export function loadConfig(): AppConfig {
     // This helps dev bootstrap without crashing.
   }
 
-  return { apiUrl, apiKey, pollIntervalMs, inboxDir, outboxDir, ghScriptsDir, rhinoCli: rhinoCli || undefined, rhinoCodeCli: rhinoCodeCli || undefined, bambuCli: bambuCli || undefined, dryRun };
+  // Determine environment name from API URL or explicit env var
+  let environment = process.env.NODE_ENV || 'unknown';
+  if (apiUrl.includes('localhost') || apiUrl.includes('127.0.0.1')) {
+    environment = 'local';
+  } else if (apiUrl.includes('splintfactory.com')) {
+    environment = 'production';
+  } else if (apiUrl.includes('vercel.app')) {
+    environment = 'vercel';
+  }
+
+  return { 
+    apiUrl, 
+    apiKey, 
+    pollIntervalMs, 
+    inboxDir, 
+    outboxDir, 
+    ghScriptsDir, 
+    rhinoCli: rhinoCli || undefined, 
+    rhinoCodeCli: rhinoCodeCli || undefined, 
+    bambuCli: bambuCli || undefined, 
+    dryRun,
+    environment 
+  };
 }

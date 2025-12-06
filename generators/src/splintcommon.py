@@ -45,7 +45,7 @@ def log_clear(message=""):
 
 log(f"Splint Home Dirs verified: {splint_home_dir=}")
 
-def confirm_job_is_processed_and_exit(jobname, is_success, message, is_kill_on_completion):
+def confirm_job_is_processed_and_exit(jobname, is_success, message):
     job_path = Path(get_inbox_job_filepath(jobname))
 
     conf_path = Path(get_outbox_job_confirmation_filepath(jobname))
@@ -59,18 +59,10 @@ def confirm_job_is_processed_and_exit(jobname, is_success, message, is_kill_on_c
 
         log(f"RESULT: {"SUCCESS" if is_success else "FAILURE"} {message=} {jobname=}")
 
-        # if (is_kill_on_completion):
-        #     log("Killing Rhino is not currently allowed...")
-        #     # rs.Exit()
-        # else:
-        #     log("Rhino exit disabled via: is_kill_on_completion")
     except Exception as e:
         conf_data = {"result": "FAILURE", "phase": "during confirmation", "exception": f"{traceback.format_exc()}", "message": message}
         with open(conf_path, "w") as f:
             json.dump(conf_data, f, indent=2)        
-        if (is_kill_on_completion):
-            log("Attempting to exit Rhino after exception")
-            rs.Exit()
 
 def load_oldest_json_job_file(directory, algorithm_name):
     """

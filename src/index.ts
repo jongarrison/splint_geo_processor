@@ -8,7 +8,11 @@ const logger = createLogger();
 async function main() {
   logger.info('splint_geo_processor starting...');
   const config = loadConfig();
-  logger.info({ apiUrl: config.apiUrl, pollIntervalMs: config.pollIntervalMs }, 'Loaded config');
+  logger.info({ 
+    environment: config.environment,
+    apiUrl: config.apiUrl, 
+    pollIntervalMs: config.pollIntervalMs 
+  }, 'Loaded config');
   const processor = new Processor(logger, config);
   await processor.run();
 }
