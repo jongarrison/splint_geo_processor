@@ -1,0 +1,13 @@
+# PowerShell scripts should always use Windows line endings (CRLF)
+*.ps1 text eol=crlf
+
+# TypeScript and JavaScript use LF
+*.ts text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+
+# Markdown files use LF
+*.md text eol=lf
+
+# Shell scripts use LF
+*.sh text eol=lf

@@ -26,7 +26,8 @@ $sshServer = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Se
 
 if ($sshServer.State -eq "Installed") {
     Write-Host "✓ OpenSSH Server is already installed" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "Installing OpenSSH Server..." -ForegroundColor Yellow
     Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
     Write-Host "✓ OpenSSH Server installed successfully" -ForegroundColor Green
@@ -44,7 +45,8 @@ $firewallRule = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction S
 
 if ($firewallRule) {
     Write-Host "✓ Firewall rule already exists" -ForegroundColor Green
-} else {
+}
+else {
     New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
     Write-Host "✓ Firewall rule created for SSH (port 22)" -ForegroundColor Green
 }
@@ -59,7 +61,8 @@ foreach ($dir in $dirs) {
     if (-not (Test-Path $path)) {
         New-Item -Path $path -ItemType Directory -Force | Out-Null
         Write-Host "✓ Created: $path" -ForegroundColor Green
-    } else {
+    }
+    else {
         Write-Host "✓ Already exists: $path" -ForegroundColor Green
     }
 }
@@ -113,7 +116,8 @@ $sshDir = "$env:USERPROFILE\.ssh"
 if (-not (Test-Path $sshDir)) {
     New-Item -Path $sshDir -ItemType Directory -Force | Out-Null
     Write-Host "✓ Created: $sshDir" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "✓ Already exists: $sshDir" -ForegroundColor Green
 }
 
@@ -122,7 +126,8 @@ $authorizedKeysPath = Join-Path $sshDir "authorized_keys"
 if (-not (Test-Path $authorizedKeysPath)) {
     New-Item -Path $authorizedKeysPath -ItemType File -Force | Out-Null
     Write-Host "✓ Created: $authorizedKeysPath" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "✓ Already exists: $authorizedKeysPath" -ForegroundColor Green
 }
 
@@ -144,7 +149,8 @@ Write-Host "Step 9: Verifying SSH service status..." -ForegroundColor Cyan
 $sshService = Get-Service sshd
 if ($sshService.Status -eq "Running") {
     Write-Host "✓ SSH service is running" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "✗ SSH service is not running" -ForegroundColor Red
     exit 1
 }
