@@ -1,4 +1,4 @@
-# Setup SSH Server on Windows for Splint Geo Processor
+﻿# Setup SSH Server on Windows for Splint Geo Processor
 # Run this script as Administrator
 
 #Requires -RunAsAdministrator
