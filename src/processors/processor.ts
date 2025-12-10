@@ -231,44 +231,77 @@ export class Processor {
   }
 
   private async reportSuccess(jobId: string, geometryPath: string, geometryName: string, printPath?: string, printName?: string, processingLog?: string) {
-    // Use multipart/form-data to upload files without base64 encoding
-    const form = new FormData();
-    form.append('GeometryProcessingQueueID', jobId);
-    form.append('isSuccess', 'true');
-    
-    // Attach geometry file as stream
-    form.append('geometryFile', fs.createReadStream(geometryPath), {
-      filename: geometryName,
-      contentType: this.getContentType(geometryName),
-    });
-    
-    // Attach print file if present
-    if (printPath && printName) {
-      form.append('printFile', fs.createReadStream(printPath), {
-        filename: printName,
-        contentType: this.getContentType(printName),
-      });
-    }
-    
-    // Attach processing log (truncated if needed)
-    if (processingLog) {
-      const maxLogSize = 95 * 1024; // 95KB
-      if (processingLog.length > maxLogSize) {
-        const truncated = processingLog.slice(0, maxLogSize);
-        form.append('processingLog', truncated + '\n\n[Log truncated - original size: ' + processingLog.length + ' bytes]');
-      } else {
-        form.append('processingLog', processingLog);
-      }
-    }
-    
+    // Upload files to blob storage first to avoid payload size limits
     try {
-      const resp = await this.http.post('/api/geometry-processing/result', form, {
-        headers: form.getHeaders(),
-        maxBodyLength: Infinity, // Allow large file uploads
+      // Step 1: Upload files to blob storage
+      const uploadForm = new FormData();
+      uploadForm.append('files', fs.createReadStream(geometryPath), {
+        filename: geometryName,
+        contentType: this.getContentType(geometryName),
+      });
+      
+      if (printPath && printName) {
+        uploadForm.append('files', fs.createReadStream(printPath), {
+          filename: printName,
+          contentType: this.getContentType(printName),
+        });
+      }
+      
+      const uploadResp = await this.http.post('/api/blob/upload', uploadForm, {
+        headers: uploadForm.getHeaders(),
+        maxBodyLength: Infinity,
         maxContentLength: Infinity,
       });
+      
+      if (uploadResp.status < 200 || uploadResp.status >= 300) {
+        this.logger.error({ status: uploadResp.status, data: uploadResp.data }, 'Failed to upload files to blob storage');
+        return;
+      }
+      
+      const uploads = uploadResp.data.uploads;
+      if (!uploads || uploads.length === 0) {
+        this.logger.error('No uploads returned from blob storage');
+        return;
+      }
+      
+      // Find geometry and print file uploads
+      const geometryUpload = uploads.find((u: any) => u.filename === geometryName);
+      const printUpload = printPath && printName ? uploads.find((u: any) => u.filename === printName) : null;
+      
+      if (!geometryUpload) {
+        this.logger.error('Geometry file upload not found in response');
+        return;
+      }
+      
+      // Step 2: Report result with blob URLs
+      const payload: any = {
+        GeometryProcessingQueueID: jobId,
+        isSuccess: true,
+        geometryBlobUrl: geometryUpload.url,
+        geometryBlobPathname: geometryUpload.pathname,
+        GeometryFileName: geometryName,
+      };
+      
+      if (printUpload) {
+        payload.printBlobUrl = printUpload.url;
+        payload.printBlobPathname = printUpload.pathname;
+        payload.PrintFileName = printName;
+      }
+      
+      // Attach processing log (truncated if needed)
+      if (processingLog) {
+        const maxLogSize = 95 * 1024; // 95KB
+        if (processingLog.length > maxLogSize) {
+          const truncated = processingLog.slice(0, maxLogSize);
+          payload.processingLog = truncated + '\n\n[Log truncated - original size: ' + processingLog.length + ' bytes]';
+        } else {
+          payload.processingLog = processingLog;
+        }
+      }
+      
+      const resp = await this.http.post('/api/geometry-processing/result', payload);
       if (resp.status >= 200 && resp.status < 300) {
-        this.logger.info({ jobId }, 'Reported success');
+        this.logger.info({ jobId }, 'Reported success with blob URLs');
       } else {
         this.logger.warn({ status: resp.status, data: resp.data }, 'Failed to report success');
       }
