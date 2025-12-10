@@ -6,8 +6,9 @@ dist
 logs/
 
 # Secrets
-secrets/
 secrets/*
+!secrets/config.json.example
+!secrets/README.md
 external-info/*
 node_modules/
 **/__pycache__
