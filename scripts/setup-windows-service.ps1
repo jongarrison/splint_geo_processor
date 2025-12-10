@@ -18,12 +18,21 @@ if (-not (Test-Path $nssmPath)) {
     Write-Host "✓ NSSM already installed" -ForegroundColor Green
 }
 
-# Get the current directory (where splint_geo_processor is located)
-$repoPath = Read-Host "Enter the full path to splint_geo_processor directory (e.g., C:\Users\lazyb\work\splint_geo_processor)"
-if (-not (Test-Path $repoPath)) {
+# Get the repository path (auto-detect or prompt)
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoPath = Split-Path -Parent $scriptDir
+
+Write-Host "Detected repository path: $repoPath" -ForegroundColor Cyan
+$confirm = Read-Host "Is this correct? (Y/n)"
+if ($confirm -and $confirm -ne "Y" -and $confirm -ne "y" -and $confirm -ne "") {
+    $repoPath = Read-Host "Enter the full path to splint_geo_processor directory"
+}
+
+if (-not $repoPath -or -not (Test-Path $repoPath)) {
     Write-Host "✗ Directory not found: $repoPath" -ForegroundColor Red
     exit 1
 }
+Write-Host "✓ Using repository path: $repoPath" -ForegroundColor Green
 
 # Check if node is installed
 Write-Host ""
@@ -53,16 +62,24 @@ Write-Host "✓ Configuration file found" -ForegroundColor Green
 
 # Build the TypeScript project
 Write-Host ""
-Write-Host "Step 4: Building TypeScript project..." -ForegroundColor Cyan
+Write-Host "Step 4: Installing dependencies and building..." -ForegroundColor Cyan
 Push-Location $repoPath
 try {
+    # Install npm dependencies first
+    Write-Host "Installing npm packages..." -ForegroundColor Yellow
+    npm install
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm install failed"
+    }
+    
+    Write-Host "Building TypeScript project..." -ForegroundColor Yellow
     npm run build
     if ($LASTEXITCODE -ne 0) {
         throw "Build failed"
     }
     Write-Host "✓ Project built successfully" -ForegroundColor Green
 } catch {
-    Write-Host "✗ Build failed. Please fix build errors first." -ForegroundColor Red
+    Write-Host "✗ Build failed: $_" -ForegroundColor Red
     Pop-Location
     exit 1
 }
