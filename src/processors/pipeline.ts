@@ -105,8 +105,15 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   }
 
   if (!running) {
-    // 2) Start Rhino in background using open -a {RHINO_CLI} --args -nosplash
-    const openCmd = `open -a "${input.rhinoCli}" --args -nosplash`;
+    // 2) Start Rhino in background (cross-platform)
+    let openCmd: string;
+    if (process.platform === 'win32') {
+      // Windows: start the executable directly
+      openCmd = `start "" "${input.rhinoCli}" -nosplash`;
+    } else {
+      // macOS: use open -a
+      openCmd = `open -a "${input.rhinoCli}" --args -nosplash`;
+    }
     logInfo('exec', { cmd: openCmd });
     const { stdout: openStdout, stderr: openStderr } = await execAsync(openCmd, { timeout: 30_000 });
     if (openStdout && openStdout.trim()) logInfo('stdout (open)', { stdout: openStdout.substring(0, 500) });
