@@ -5,7 +5,7 @@ import path from 'node:path';
 import { sleep } from '../utils/sleep.js';
 import type { AppConfig } from '../config.js';
 import { runPipeline } from './pipeline.js';
-import FormData from 'form-data';
+import { upload } from '@vercel/blob/client';
 
 export class Processor {
   private http: AxiosInstance;
@@ -231,49 +231,54 @@ export class Processor {
   }
 
   private async reportSuccess(jobId: string, geometryPath: string, geometryName: string, printPath?: string, printName?: string, processingLog?: string) {
-    // Upload files to blob storage first to avoid payload size limits
+    // Upload files directly to Vercel Blob using client upload pattern
     try {
-      // Step 1: Upload files to blob storage
-      const uploadForm = new FormData();
-      uploadForm.append('files', fs.createReadStream(geometryPath), {
-        filename: geometryName,
-        contentType: this.getContentType(geometryName),
+      this.logger.info({ geometryName, printName }, 'Uploading files to blob storage');
+
+      // Step 1: Upload geometry file
+      const geometryBuffer = fs.readFileSync(geometryPath);
+      const geometryBlob = new Blob([geometryBuffer], { 
+        type: this.getContentType(geometryName) 
       });
       
+      const geometryUpload = await upload(geometryName, geometryBlob, {
+        access: 'public',
+        handleUploadUrl: `${this.config.apiUrl}/api/blob/upload`,
+        headers: this.config.apiKey ? { 
+          Authorization: `Bearer ${this.config.apiKey}` 
+        } : {},
+      });
+
+      this.logger.info({ 
+        pathname: geometryUpload.pathname, 
+        url: geometryUpload.url,
+        size: geometryBuffer.length
+      }, 'Geometry file uploaded');
+
+      // Step 2: Upload print file if present
+      let printUpload;
       if (printPath && printName) {
-        uploadForm.append('files', fs.createReadStream(printPath), {
-          filename: printName,
-          contentType: this.getContentType(printName),
+        const printBuffer = fs.readFileSync(printPath);
+        const printBlob = new Blob([printBuffer], { 
+          type: this.getContentType(printName) 
         });
+        
+        printUpload = await upload(printName, printBlob, {
+          access: 'public',
+          handleUploadUrl: `${this.config.apiUrl}/api/blob/upload`,
+          headers: this.config.apiKey ? { 
+            Authorization: `Bearer ${this.config.apiKey}` 
+          } : {},
+        });
+
+        this.logger.info({ 
+          pathname: printUpload.pathname, 
+          url: printUpload.url,
+          size: printBuffer.length
+        }, 'Print file uploaded');
       }
-      
-      const uploadResp = await this.http.post('/api/blob/upload', uploadForm, {
-        headers: uploadForm.getHeaders(),
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-      });
-      
-      if (uploadResp.status < 200 || uploadResp.status >= 300) {
-        this.logger.error({ status: uploadResp.status, data: uploadResp.data }, 'Failed to upload files to blob storage');
-        return;
-      }
-      
-      const uploads = uploadResp.data.uploads;
-      if (!uploads || uploads.length === 0) {
-        this.logger.error('No uploads returned from blob storage');
-        return;
-      }
-      
-      // Find geometry and print file uploads
-      const geometryUpload = uploads.find((u: any) => u.filename === geometryName);
-      const printUpload = printPath && printName ? uploads.find((u: any) => u.filename === printName) : null;
-      
-      if (!geometryUpload) {
-        this.logger.error('Geometry file upload not found in response');
-        return;
-      }
-      
-      // Step 2: Report result with blob URLs
+
+      // Step 3: Report result with blob URLs
       const payload: any = {
         GeometryProcessingQueueID: jobId,
         isSuccess: true,
