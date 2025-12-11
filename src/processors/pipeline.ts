@@ -114,6 +114,16 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       // macOS: use open -a
       openCmd = `open -a "${input.rhinoCli}" --args -nosplash`;
     }
+    
+    // Log shell environment info
+    logInfo('Shell environment', {
+      SHELL: process.env.SHELL,
+      COMSPEC: process.env.COMSPEC,
+      PATH: process.env.PATH?.substring(0, 200),
+      platform: process.platform,
+      cwd: process.cwd()
+    });
+    
     logInfo('Launching Rhino', { cmd: openCmd, platform: process.platform });
     
     try {
