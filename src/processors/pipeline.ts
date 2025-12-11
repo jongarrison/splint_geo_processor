@@ -105,6 +105,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   };
 
   let running = false;
+  let runningInitially = false;
   try {
     running = await rhinoIsRunning();
   } catch {
@@ -243,15 +244,13 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
 
   // 4) Exit Rhino to free up license
   // Only attempt to exit if we launched Rhino (not if it was already running)
-  if (!running) {
-    logInfo('Closing Rhino to free license');
-    try {
-      // Use -_Exit N to exit without saving and without prompting
-      await execFileAsync(input.rhinoCodeCli, ['command', '-_Exit N'], { timeout: 30_000 });
-      logInfo('Rhino exit command sent');
-    } catch (exitErr: any) {
-      logWarn('Rhino exit command failed (may have already closed)', { error: exitErr?.message });
-    }
+  logInfo('Closing Rhino to free license');
+  try {
+    // Use -_Exit N to exit without saving and without prompting
+    await execFileAsync(input.rhinoCodeCli, ['command', '-_Exit N'], { timeout: 30_000 });
+    logInfo('Rhino exit command sent');
+  } catch (exitErr: any) {
+    logWarn('Rhino exit command failed (may have already closed)', { error: exitErr?.message });
   }
 
   // Bambu Studio step (real CLI)

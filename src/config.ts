@@ -76,14 +76,19 @@ export function loadConfig(): AppConfig {
     // This helps dev bootstrap without crashing.
   }
 
-  // Determine environment name from API URL or explicit env var
-  let environment = process.env.NODE_ENV || 'unknown';
-  if (apiUrl.includes('localhost') || apiUrl.includes('127.0.0.1')) {
-    environment = 'local';
-  } else if (apiUrl.includes('splintfactory.com')) {
-    environment = 'production';
-  } else if (apiUrl.includes('vercel.app')) {
-    environment = 'vercel';
+  // Determine environment from NODE_ENV, with fallback to URL detection
+  let environment = process.env.NODE_ENV;
+  if (!environment) {
+    // Fallback: infer from API URL if NODE_ENV not set
+    if (apiUrl.includes('localhost') || apiUrl.includes('127.0.0.1')) {
+      environment = 'local';
+    } else if (apiUrl.includes('splintfactory.com')) {
+      environment = 'production';
+    } else if (apiUrl.includes('vercel.app')) {
+      environment = 'vercel';
+    } else {
+      environment = 'unknown';
+    }
   }
 
   return { 

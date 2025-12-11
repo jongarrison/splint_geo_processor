@@ -6,6 +6,7 @@ import { sleep } from '../utils/sleep.js';
 import type { AppConfig } from '../config.js';
 import { runPipeline } from './pipeline.js';
 import { upload } from '@vercel/blob/client';
+import FormData from 'form-data';
 
 export class Processor {
   private http: AxiosInstance;
@@ -231,17 +232,58 @@ export class Processor {
   }
 
   private async reportSuccess(jobId: string, geometryPath: string, geometryName: string, printPath?: string, printName?: string, processingLog?: string) {
-    // Upload files directly to Vercel Blob using client upload pattern
+    // Upload files to blob storage
+    // Local dev uses multipart upload, production uses Vercel Blob client upload
     try {
-      this.logger.info({ geometryName, printName }, 'Uploading files to blob storage');
+      this.logger.info({ geometryName, printName, environment: this.config.environment }, 'Uploading files to blob storage');
 
-      // Step 1: Upload geometry file
-      const geometryBuffer = fs.readFileSync(geometryPath);
-      const geometryBlob = new Blob([geometryBuffer], { 
-        type: this.getContentType(geometryName) 
+      const isLocalDev = this.config.environment === 'local';
+
+      if (isLocalDev) {
+        // Local development: Use multipart upload (legacy format for filesystem storage)
+        await this.reportSuccessMultipart(jobId, geometryPath, geometryName, printPath, printName, processingLog);
+      } else {
+        // Production: Use Vercel Blob client upload
+        await this.reportSuccessClientUpload(jobId, geometryPath, geometryName, printPath, printName, processingLog);
+      }
+    } catch (err) {
+      this.logger.error({ err }, 'Error reporting result');
+    }
+  }
+
+  private async reportSuccessClientUpload(jobId: string, geometryPath: string, geometryName: string, printPath?: string, printName?: string, processingLog?: string) {
+    // Production: Upload directly to Vercel Blob using client upload pattern
+    this.logger.info({ environment: this.config.environment }, 'Using Vercel Blob client upload (production mode)');
+
+    // Step 1: Upload geometry file
+    const geometryBuffer = fs.readFileSync(geometryPath);
+    const geometryBlob = new Blob([geometryBuffer], { 
+      type: this.getContentType(geometryName) 
+    });
+    
+    const geometryUpload = await upload(geometryName, geometryBlob, {
+      access: 'public',
+      handleUploadUrl: `${this.config.apiUrl}/api/blob/upload`,
+      headers: this.config.apiKey ? { 
+        Authorization: `Bearer ${this.config.apiKey}` 
+      } : {},
+    });
+
+    this.logger.info({ 
+      pathname: geometryUpload.pathname, 
+      url: geometryUpload.url,
+      size: geometryBuffer.length
+    }, 'Geometry file uploaded');
+
+    // Step 2: Upload print file if present
+    let printUpload;
+    if (printPath && printName) {
+      const printBuffer = fs.readFileSync(printPath);
+      const printBlob = new Blob([printBuffer], { 
+        type: this.getContentType(printName) 
       });
       
-      const geometryUpload = await upload(geometryName, geometryBlob, {
+      printUpload = await upload(printName, printBlob, {
         access: 'public',
         handleUploadUrl: `${this.config.apiUrl}/api/blob/upload`,
         headers: this.config.apiKey ? { 
@@ -250,68 +292,121 @@ export class Processor {
       });
 
       this.logger.info({ 
-        pathname: geometryUpload.pathname, 
-        url: geometryUpload.url,
-        size: geometryBuffer.length
-      }, 'Geometry file uploaded');
+        pathname: printUpload.pathname, 
+        url: printUpload.url,
+        size: printBuffer.length
+      }, 'Print file uploaded');
+    }
 
-      // Step 2: Upload print file if present
-      let printUpload;
-      if (printPath && printName) {
-        const printBuffer = fs.readFileSync(printPath);
-        const printBlob = new Blob([printBuffer], { 
-          type: this.getContentType(printName) 
-        });
-        
-        printUpload = await upload(printName, printBlob, {
-          access: 'public',
-          handleUploadUrl: `${this.config.apiUrl}/api/blob/upload`,
-          headers: this.config.apiKey ? { 
-            Authorization: `Bearer ${this.config.apiKey}` 
-          } : {},
-        });
-
-        this.logger.info({ 
-          pathname: printUpload.pathname, 
-          url: printUpload.url,
-          size: printBuffer.length
-        }, 'Print file uploaded');
-      }
-
-      // Step 3: Report result with blob URLs
-      const payload: any = {
-        GeometryProcessingQueueID: jobId,
-        isSuccess: true,
-        geometryBlobUrl: geometryUpload.url,
-        geometryBlobPathname: geometryUpload.pathname,
-        GeometryFileName: geometryName,
-      };
-      
-      if (printUpload) {
-        payload.printBlobUrl = printUpload.url;
-        payload.printBlobPathname = printUpload.pathname;
-        payload.PrintFileName = printName;
-      }
-      
-      // Attach processing log (truncated if needed)
-      if (processingLog) {
-        const maxLogSize = 95 * 1024; // 95KB
-        if (processingLog.length > maxLogSize) {
-          const truncated = processingLog.slice(0, maxLogSize);
-          payload.processingLog = truncated + '\n\n[Log truncated - original size: ' + processingLog.length + ' bytes]';
-        } else {
-          payload.processingLog = processingLog;
-        }
-      }
-      
-      const resp = await this.http.post('/api/geometry-processing/result', payload);
-      if (resp.status >= 200 && resp.status < 300) {
-        this.logger.info({ jobId }, 'Reported success with blob URLs');
+    // Step 3: Report result with blob URLs
+    const payload: any = {
+      GeometryProcessingQueueID: jobId,
+      isSuccess: true,
+      geometryBlobUrl: geometryUpload.url,
+      geometryBlobPathname: geometryUpload.pathname,
+      GeometryFileName: geometryName,
+    };
+    
+    if (printUpload) {
+      payload.printBlobUrl = printUpload.url;
+      payload.printBlobPathname = printUpload.pathname;
+      payload.PrintFileName = printName;
+    }
+    
+    // Attach processing log (truncated if needed)
+    if (processingLog) {
+      const maxLogSize = 95 * 1024; // 95KB
+      if (processingLog.length > maxLogSize) {
+        const truncated = processingLog.slice(0, maxLogSize);
+        payload.processingLog = truncated + '\n\n[Log truncated - original size: ' + processingLog.length + ' bytes]';
       } else {
-        this.logger.warn({ status: resp.status, data: resp.data }, 'Failed to report success');
+        payload.processingLog = processingLog;
       }
-    } catch (err) {
-      this.logger.error({ err }, 'Error reporting result');
+    }
+    
+    const resp = await this.http.post('/api/geometry-processing/result', payload);
+    if (resp.status >= 200 && resp.status < 300) {
+      this.logger.info({ jobId }, 'Reported success with blob URLs');
+    } else {
+      this.logger.warn({ status: resp.status, data: resp.data }, 'Failed to report success');
+    }
+  }
+
+  private async reportSuccessMultipart(jobId: string, geometryPath: string, geometryName: string, printPath?: string, printName?: string, processingLog?: string) {
+    // Local development: Use multipart upload to filesystem storage
+    this.logger.info({ environment: this.config.environment }, 'Using multipart upload to filesystem (local development mode)');
+
+    // Step 1: Upload files via multipart form
+    const uploadForm = new FormData();
+    uploadForm.append('files', fs.createReadStream(geometryPath), {
+      filename: geometryName,
+      contentType: this.getContentType(geometryName),
+    });
+    
+    if (printPath && printName) {
+      uploadForm.append('files', fs.createReadStream(printPath), {
+        filename: printName,
+        contentType: this.getContentType(printName),
+      });
+    }
+    
+    const uploadResp = await this.http.post('/api/blob/upload', uploadForm, {
+      headers: uploadForm.getHeaders(),
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+    
+    if (uploadResp.status < 200 || uploadResp.status >= 300) {
+      this.logger.error({ status: uploadResp.status, data: uploadResp.data }, 'Failed to upload files');
+      return;
+    }
+    
+    const uploads = uploadResp.data.uploads;
+    if (!uploads || uploads.length === 0) {
+      this.logger.error('No uploads returned');
+      return;
+    }
+    
+    // Find geometry and print file uploads
+    const geometryUpload = uploads.find((u: any) => u.filename === geometryName);
+    const printUpload = printPath && printName ? uploads.find((u: any) => u.filename === printName) : null;
+    
+    if (!geometryUpload) {
+      this.logger.error('Geometry file upload not found in response');
+      return;
+    }
+    
+    // Step 2: Report result with blob URLs
+    const payload: any = {
+      GeometryProcessingQueueID: jobId,
+      isSuccess: true,
+      geometryBlobUrl: geometryUpload.url,
+      geometryBlobPathname: geometryUpload.pathname,
+      GeometryFileName: geometryName,
+    };
+    
+    if (printUpload) {
+      payload.printBlobUrl = printUpload.url;
+      payload.printBlobPathname = printUpload.pathname;
+      payload.PrintFileName = printName;
+    }
+    
+    // Attach processing log (truncated if needed)
+    if (processingLog) {
+      const maxLogSize = 95 * 1024; // 95KB
+      if (processingLog.length > maxLogSize) {
+        const truncated = processingLog.slice(0, maxLogSize);
+        payload.processingLog = truncated + '\n\n[Log truncated - original size: ' + processingLog.length + ' bytes]';
+      } else {
+        payload.processingLog = processingLog;
+      }
+    }
+    
+    const resp = await this.http.post('/api/geometry-processing/result', payload);
+    if (resp.status >= 200 && resp.status < 300) {
+      this.logger.info({ jobId }, 'Reported success with blob URLs');
+    } else {
+      this.logger.warn({ status: resp.status, data: resp.data }, 'Failed to report success');
     }
   }
 
