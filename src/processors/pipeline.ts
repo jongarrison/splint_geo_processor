@@ -108,29 +108,43 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     // 2) Start Rhino in background (cross-platform)
     let openCmd: string;
     if (process.platform === 'win32') {
-      // Windows: start the executable directly
-      openCmd = `start "" "${input.rhinoCli}" -nosplash`;
+      // Windows: start the executable directly with /nosplash flag
+      openCmd = `start "" "${input.rhinoCli}" /nosplash`;
     } else {
       // macOS: use open -a
       openCmd = `open -a "${input.rhinoCli}" --args -nosplash`;
     }
-    logInfo('exec', { cmd: openCmd });
-    const { stdout: openStdout, stderr: openStderr } = await execAsync(openCmd, { timeout: 30_000 });
-    if (openStdout && openStdout.trim()) logInfo('stdout (open)', { stdout: openStdout.substring(0, 500) });
-    if (openStderr && openStderr.trim()) logWarn('stderr (open)', { stderr: openStderr.substring(0, 500) });
+    logInfo('Launching Rhino', { cmd: openCmd, platform: process.platform });
+    
+    try {
+      const { stdout: openStdout, stderr: openStderr } = await execAsync(openCmd, { timeout: 30_000 });
+      if (openStdout && openStdout.trim()) logInfo('stdout (rhino launch)', { stdout: openStdout.substring(0, 500) });
+      if (openStderr && openStderr.trim()) logWarn('stderr (rhino launch)', { stderr: openStderr.substring(0, 500) });
+    } catch (err: any) {
+      logWarn('Rhino launch command failed (may be ok if Rhino started)', { error: err?.message || String(err) });
+    }
+    
     // Wait and retry a few times
+    logInfo('Waiting for Rhino to start...');
     for (let attempt = 0; attempt < 5; attempt++) {
       await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
       try {
         running = await rhinoIsRunning();
-        if (running) break;
-      } catch {
-        // keep trying
+        if (running) {
+          logInfo('Rhino detected as running', { attempt: attempt + 1 });
+          break;
+        } else {
+          logInfo('Rhino not detected yet', { attempt: attempt + 1 });
+        }
+      } catch (err: any) {
+        logWarn('Error checking if Rhino is running', { attempt: attempt + 1, error: err?.message || String(err) });
       }
     }
     if (!running) {
-      throw new Error('Rhino did not start successfully');
+      throw new Error('Rhino did not start successfully after 5 attempts');
     }
+  } else {
+    logInfo('Rhino already running');
   }
 
   // 3) Run GrasshopperPlayer with the script
