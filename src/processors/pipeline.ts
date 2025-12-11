@@ -80,15 +80,22 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     const cmd = `${input.rhinoCodeCli} list --json`;
     try {
       const { stdout, stderr } = await execFileAsync(input.rhinoCodeCli!, ['list', '--json'], { timeout: 30_000 });
-      // Log command and brief outputs
+      // Log command and outputs
+      logInfo('rhinocode list output', { 
+        stdout: stdout.substring(0, 1000),
+        stderr: stderr ? stderr.substring(0, 500) : undefined 
+      });
       if (stderr && stderr.trim()) {
         logWarn('stderr (rhinocode list)', { stderr: stderr.substring(0, 500) });
       }
       // Parse
       try {
         const parsed = JSON.parse(stdout.trim() || '[]');
-        return Array.isArray(parsed) && parsed.length > 0;
-      } catch {
+        const detected = Array.isArray(parsed) && parsed.length > 0;
+        logInfo('rhinocode list result', { detected, count: Array.isArray(parsed) ? parsed.length : 0 });
+        return detected;
+      } catch (parseErr: any) {
+        logWarn('rhinocode list parse error', { error: parseErr?.message });
         return false;
       }
     } catch (err: any) {
