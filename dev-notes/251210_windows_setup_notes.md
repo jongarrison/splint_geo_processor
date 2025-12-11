@@ -47,28 +47,33 @@
      - `RHINOCODE_CLI`: `C:\Program Files\Rhino 9 WIP\System\RhinoCode.exe`
      - `BAMBU_CLI`: `C:\Program Files\Bambu Studio\bambu-studio.exe`
 
-### Install as Windows Service
+### Install as Startup Task
+
+**Note:** Windows services cannot launch GUI applications. We use a scheduled task instead,
+which runs in the user's interactive session.
+
 1. Run as Administrator:
    ```powershell
-   .\scripts\setup-windows-service.ps1
+   .\scripts\setup-windows-startup.ps1
    ```
 2. Script will:
-   - Install NSSM (service manager) via Chocolatey
    - Build TypeScript project
-   - Create Windows service "SplintGeoProcessor"
-   - Configure auto-start and crash recovery
-   - Start the service
+   - Create scheduled task "SplintGeoProcessor" to run at user logon
+   - Configure task to run in interactive session (allows launching Rhino GUI)
+   - Start the task immediately
 
-### Service Management
+### Task Management
 ```powershell
 # Check status
-Get-Service SplintGeoProcessor
+Get-ScheduledTask SplintGeoProcessor
+Get-ScheduledTaskInfo SplintGeoProcessor
 
-# Restart
-Restart-Service SplintGeoProcessor
+# Start/stop manually
+Start-ScheduledTask SplintGeoProcessor
+Stop-ScheduledTask SplintGeoProcessor
 
 # View logs
-Get-Content ~\SplintFactoryFiles\logs\service-stdout.log -Tail 50
+Get-Content ~\SplintFactoryFiles\logs\geo-processor.log -Tail 50
 ```
 
 ## Installed Paths
