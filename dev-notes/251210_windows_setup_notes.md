@@ -47,6 +47,37 @@
      - `RHINOCODE_CLI`: `C:\Program Files\Rhino 9 WIP\System\RhinoCode.exe`
      - `BAMBU_CLI`: `C:\Program Files\Bambu Studio\bambu-studio.exe`
 
+### Configure Rhino for RhinoCode (One-Time Setup)
+
+**CRITICAL:** Rhino must be configured to start the script server for RhinoCode CLI to work.
+
+1. Launch Rhino manually
+2. Go to **Tools** → **Options** → **General**
+3. In the **Command lists to run** section under **When Rhino starts**, add:
+   ```
+   StartScriptServer
+   ```
+4. Click **OK** and close Rhino
+
+**Test RhinoCode connectivity:**
+```powershell
+# Launch Rhino (it will auto-start the script server)
+Start-Process "C:\Program Files\Rhino 9 WIP\System\Rhino.exe"
+
+# Wait a few seconds, then verify RhinoCode can see it
+& "C:\Program Files\Rhino 9 WIP\System\RhinoCode.exe" list --json
+# Should return a non-empty array with Rhino instance info
+```
+
+### Configure Grasshopper Plugins (One-Time Setup)
+
+1. Launch Rhino
+2. Type `Grasshopper` command to open Grasshopper
+3. Open a test splint .gh file (e.g., from splint_generators_gh repository)
+4. Let Grasshopper install any required plugins
+5. Verify the script runs without errors
+6. Close Grasshopper and Rhino
+
 ### Install as Startup Task
 
 **Note:** Windows services cannot launch GUI applications. We use a scheduled task instead,
