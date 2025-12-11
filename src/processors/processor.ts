@@ -7,11 +7,15 @@ import type { AppConfig } from '../config.js';
 import { runPipeline } from './pipeline.js';
 import { upload } from '@vercel/blob/client';
 import FormData from 'form-data';
+import { cleanupOldFiles } from '../utils/cleanup.js';
 
 export class Processor {
   private http: AxiosInstance;
   private inbox: string;
   private outbox: string;
+  private lastCleanupTime: number = 0;
+  private readonly CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours (twice daily)
+  private readonly DAYS_TO_KEEP = 7;
 
   constructor(private logger: pino.Logger, private config: AppConfig) {
     this.http = axios.create({
@@ -32,11 +36,15 @@ export class Processor {
                 this.config.environment;
     
     this.logger.info({ apiUrl: this.config.apiUrl }, `[${env}] Processor loop starting`);
+    
+    // Run cleanup on startup
+    await this.runCleanupIfNeeded(true);
+    
     const intervalMs = this.config.pollIntervalMs || 5000;
 
     while (true) {
       try {
-        // Poll for next job
+        // Poll for next job (priority: check for work first)
         const resp = await this.http.get('/api/geometry-processing/next-job');
 
         if (resp.status === 404) {
@@ -198,6 +206,10 @@ export class Processor {
           this.logger.error({ err }, 'Processor iteration failed');
         }
       }
+      
+      // Run periodic cleanup (once or twice daily)
+      await this.runCleanupIfNeeded();
+      
       // throttle loop regardless of outcome
       await sleep(intervalMs);
     }
@@ -419,6 +431,28 @@ export class Processor {
       case '.gcode': return 'text/plain';
       default: return 'application/octet-stream';
     }
+  }
+
+  private async runCleanupIfNeeded(force: boolean = false): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastCleanup = now - this.lastCleanupTime;
+    
+    if (!force && timeSinceLastCleanup < this.CLEANUP_INTERVAL_MS) {
+      return; // Not time yet
+    }
+    
+    const home = process.env.HOME || process.env.USERPROFILE || '.';
+    const baseDir = path.join(home, 'SplintFactoryFiles');
+    const logsDir = path.join(baseDir, 'logs');
+    const archiveDir = path.join(baseDir, 'archive');
+    
+    await cleanupOldFiles(this.logger, {
+      logsDir,
+      archiveDir,
+      daysToKeep: this.DAYS_TO_KEEP,
+    });
+    
+    this.lastCleanupTime = now;
   }
 
   private async archiveJobFiles(archiveDirName: string, inboxJson: string, geometryPath: string, printPath?: string) {
