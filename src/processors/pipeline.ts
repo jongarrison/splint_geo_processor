@@ -241,6 +241,18 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     logInfo(`Geometry output validated (${size} bytes)`, { geometryPath, waitTimeMs: Date.now() - start });
   }
 
+  // 4) Exit Rhino to free up license
+  // Only attempt to exit if we launched Rhino (not if it was already running)
+  if (!running) {
+    logInfo('Closing Rhino to free license');
+    try {
+      await execFileAsync(input.rhinoCodeCli, ['command', '-Exit'], { timeout: 30_000 });
+      logInfo('Rhino exit command sent');
+    } catch (exitErr: any) {
+      logWarn('Rhino exit command failed (may have already closed)', { error: exitErr?.message });
+    }
+  }
+
   // Bambu Studio step (real CLI)
   if (input.bambuCli) {
 
