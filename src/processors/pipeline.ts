@@ -108,8 +108,8 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     // 2) Start Rhino in background (cross-platform)
     let openCmd: string;
     if (process.platform === 'win32') {
-      // Windows: start the executable directly with /nosplash flag
-      openCmd = `start "" "${input.rhinoCli}" /nosplash`;
+      // Windows: Use cmd.exe to run start command (works from any shell including Git Bash)
+      openCmd = `cmd.exe /c start "" "${input.rhinoCli}" /nosplash`;
     } else {
       // macOS: use open -a
       openCmd = `open -a "${input.rhinoCli}" --args -nosplash`;
