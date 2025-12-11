@@ -113,7 +113,16 @@ $appPath = Join-Path $repoPath "dist\index.js"
 & $nssmPath set $serviceName AppRotateFiles 1
 & $nssmPath set $serviceName AppRotateBytes 10485760  # 10MB
 
-Write-Host "✓ Service installed" -ForegroundColor Green
+# Run service as current user so it can launch GUI applications
+Write-Host "Configuring service to run as current user..." -ForegroundColor Yellow
+$username = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$password = Read-Host "Enter password for $username (needed to run service as user)" -AsSecureString
+$credential = New-Object System.Management.Automation.PSCredential ($username, $password)
+$plainPassword = $credential.GetNetworkCredential().Password
+
+& $nssmPath set $serviceName ObjectName $username $plainPassword
+
+Write-Host "✓ Service installed and configured to run as user" -ForegroundColor Green
 
 # Start the service
 Write-Host ""
