@@ -116,7 +116,8 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     let openCmd: string;
     if (process.platform === 'win32') {
       // Windows: Use PowerShell Start-Process which can launch GUI apps from scheduled tasks
-      openCmd = `powershell.exe -Command "Start-Process -FilePath '${input.rhinoCli}' -ArgumentList '/nosplash'"`;
+      // /nosplash prevents user prompts, /runscript=StartScriptServer enables RhinoCode connectivity
+      openCmd = `powershell.exe -Command "Start-Process -FilePath '${input.rhinoCli}' -ArgumentList '/nosplash','/runscript=StartScriptServer'"`;
     } else {
       // macOS: use open -a
       openCmd = `open -a "${input.rhinoCli}" --args -nosplash`;
