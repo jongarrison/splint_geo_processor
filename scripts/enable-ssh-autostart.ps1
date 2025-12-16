@@ -87,6 +87,66 @@ if ($sshService.Status -eq "Running" -and $sshService.StartType -eq "Automatic")
     Write-Host ""
     Write-Host "You can verify this after reboot by running:" -ForegroundColor Yellow
     Write-Host "  Get-Service sshd" -ForegroundColor Gray
+    Write-Host ""
+    
+    # Check for Bonjour/mDNS service
+    Write-Host "Step 6: Checking Bonjour/mDNS configuration..." -ForegroundColor Cyan
+    $bonjourService = Get-Service -Name "Bonjour Service" -ErrorAction SilentlyContinue
+    
+    if ($bonjourService) {
+        Write-Host "✓ Bonjour service is installed" -ForegroundColor Green
+        
+        # Set Bonjour to start automatically
+        if ($bonjourService.StartType -ne "Automatic") {
+            Set-Service -Name "Bonjour Service" -StartupType 'Automatic'
+            Write-Host "✓ Bonjour service set to Automatic startup" -ForegroundColor Green
+        }
+        else {
+            Write-Host "✓ Bonjour service already set to Automatic startup" -ForegroundColor Green
+        }
+        
+        # Start it if not running
+        if ($bonjourService.Status -ne "Running") {
+            Write-Host "  Starting Bonjour service..." -ForegroundColor Yellow
+            Start-Service "Bonjour Service" -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+            $bonjourService = Get-Service -Name "Bonjour Service"
+            if ($bonjourService.Status -eq "Running") {
+                Write-Host "✓ Bonjour service started" -ForegroundColor Green
+            }
+            else {
+                Write-Host "! Could not start Bonjour service" -ForegroundColor Yellow
+            }
+        }
+        else {
+            Write-Host "✓ Bonjour service is running" -ForegroundColor Green
+        }
+        
+        Write-Host "  This machine should be reachable via <hostname>.local" -ForegroundColor White
+    }
+    else {
+        Write-Host "! Bonjour/mDNS service not installed" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  Without Bonjour, this machine cannot be reached via .local hostname" -ForegroundColor Yellow
+        Write-Host "  (e.g., lazyboy2000.local won't work)" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  Options:" -ForegroundColor White
+        Write-Host "  1. Install Bonjour Print Services from Apple:" -ForegroundColor Gray
+        Write-Host "     https://support.apple.com/kb/DL999" -ForegroundColor Gray
+        Write-Host "  2. Use the IP address directly instead of .local hostname" -ForegroundColor Gray
+        Write-Host ""
+    }
+    
+    Write-Host ""
+    Write-Host "Current Network Information:" -ForegroundColor Yellow
+    Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notlike "*Loopback*"} | Select-Object InterfaceAlias, IPAddress | Format-Table -AutoSize
+    Write-Host ""
+    Write-Host "To connect from Mac, use:" -ForegroundColor White
+    $hostname = $env:COMPUTERNAME.ToLower()
+    if ($bonjourService -and $bonjourService.Status -eq "Running") {
+        Write-Host "  ssh $env:USERNAME@$hostname.local" -ForegroundColor Gray
+    }
+    Write-Host "  ssh $env:USERNAME@<IP-ADDRESS-FROM-ABOVE>" -ForegroundColor Gray
 }
 else {
     Write-Host ""
