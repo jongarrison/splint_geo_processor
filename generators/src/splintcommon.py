@@ -4,6 +4,9 @@ from pathlib import Path
 import traceback
 import rhinoscriptsyntax as rs
 import shutil
+from Rhino.Geometry import Brep
+import Rhino.Geometry as rg
+import scriptcontext as sc
 
 splint_home_dir = Path("~/SplintFactoryFiles/").expanduser()
 Path(splint_home_dir).mkdir(parents=True, exist_ok=True)
@@ -169,3 +172,90 @@ def load_dev_data(geo_algorithm_name):
     except Exception as e:
         log(f"Error reading dev data file {dev_data_path}: {e}")
         raise e
+
+def checkGeometryExists(geo):
+    """
+    Check if in various forms of geometry input, there is valid geometry present.
+    geo could be a list or a single geometry item.
+    could be a brep or something else
+    """
+    print(f"{geo=} type={type(geo)}")
+
+    isExisting = False
+
+    if geo is None:
+        print("geo is None (root)")
+        isExisting = False
+    elif type(geo) is Brep:
+        print("geo is Brep. Yay.")
+        isExisting = True
+    elif hasattr(geo, '__getitem__'):
+        if len(geo) == 0 or geo[0] is None:
+            print(f"geo[0] is None len={len(geo)}")
+            isExisting = False
+        else:
+            isExisting = len(geo) == 1
+            print(f"geo is list of {len(geo)} len. {isExisting=}")
+    else:
+        print("fall through no recognized type")
+
+    doesExist = isExisting
+    doesntExist = not isExisting
+    print(f"{doesExist=} {doesntExist=}") #Sure this looks funny, but it's useful for debugging and keeping component code minimal
+    return doesExist
+
+def trim_solid_robust(brep_to_trim, cutting_brep, tolerance=None):
+    """
+    Robust brep trimming with fallbacks for tangent/overlapping surfaces.
+    Returns open brep with naked edges (like GH TrimSolid component).
+    """
+    brep_to_trim = rs.coercebrep(brep_to_trim)
+    cutting_brep = rs.coercebrep(cutting_brep)
+    log(f"trim_solid_robust brep_to_trim={type(brep_to_trim)} cutting_brep={type(cutting_brep)} tolerance={tolerance}")
+    if tolerance is None:
+        log(f"{sc.doc.ModelAbsoluteTolerance=}")
+        tolerance = sc.doc.ModelAbsoluteTolerance
+    
+    # Method 1: Try direct Split
+    log("Method 1: Try direct Split")
+    try:
+        pieces = brep_to_trim.Split(cutting_brep, tolerance)
+        log(f"trim_solid_robust 1 {pieces=}")
+        if pieces and len(pieces) > 0:
+            # Return the piece(s) - you may need logic to pick the right one
+            return pieces
+    except Exception as e:
+        log(f"Exception in trim_solid_robust Method 1: {traceback.format_exc()}")
+    
+    # Method 2: Try with slightly larger tolerance
+    log("Method 2: Try with slightly larger tolerance")
+    try:
+        pieces = brep_to_trim.Split(cutting_brep, tolerance * 10)
+        #Can we find the piece with significant overlap with brep_to_trim?
+
+        log(f"trim_solid_robust 2 {pieces=}")
+        if pieces and len(pieces) > 0:
+            return pieces
+    except Exception as e:
+        log(f"Exception in trim_solid_robust Method 2: {traceback.format_exc()}")
+    
+    # Method 3: Try intersecting first, then trim
+    # (more robust for tangent surfaces)
+    log("Method 3: Try intersecting first, then trim")
+    try:
+        # Get intersection curves
+        intersection = rg.Intersect.Intersection.BrepBrep(
+            brep_to_trim, cutting_brep, tolerance
+        )
+        log(f"trim_solid_robust 3 {intersection=}")
+
+        if intersection[1]:  # if curves exist
+            # Use curves to split
+            # This is more complex - may need curve-based splitting
+            pass
+    except Exception as e:
+        log(f"Exception in trim_solid_robust Method 3: {traceback.format_exc()}")
+
+    
+    # Return None or original brep if all methods fail
+    return None

@@ -108,6 +108,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   let runningInitially = false;
   try {
     running = await rhinoIsRunning();
+    runningInitially = running;
   } catch {
     running = false;
   }
@@ -243,14 +244,25 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   }
 
   // 4) Exit Rhino to free up license
-  // Only attempt to exit if we launched Rhino (not if it was already running)
-  logInfo('Closing Rhino to free license');
-  try {
-    // Use -_Exit N to exit without saving and without prompting
-    await execFileAsync(input.rhinoCodeCli, ['command', '-_Exit N'], { timeout: 30_000 });
-    logInfo('Rhino exit command sent');
-  } catch (exitErr: any) {
-    logWarn('Rhino exit command failed (may have already closed)', { error: exitErr?.message });
+  // Only exit if:
+  //   - We launched Rhino (it wasn't already running)
+  //   - AND we're in production (not local dev)
+  const isLocalDev = process.env.NODE_ENV === 'local' || 
+                     input.rhinoCli?.includes('RhinoWIP') ||
+                     process.platform === 'darwin';
+  
+  if (!runningInitially && !isLocalDev) {
+    logInfo('Closing Rhino to free license (production mode)');
+    try {
+      // Use -_Exit N to exit without saving and without prompting
+      await execFileAsync(input.rhinoCodeCli, ['command', '-_Exit N'], { timeout: 30_000 });
+      logInfo('Rhino exit command sent');
+    } catch (exitErr: any) {
+      logWarn('Rhino exit command failed (may have already closed)', { error: exitErr?.message });
+    }
+  } else {
+    const reason = runningInitially ? 'Rhino was already running' : 'local development mode';
+    logInfo(`Keeping Rhino open (${reason})`);
   }
 
   // Bambu Studio step (real CLI)
