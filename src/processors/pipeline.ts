@@ -189,52 +189,83 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       logWarn('Rhino launch command failed (may be ok if Rhino started)', { error: err?.message || String(err) });
     }
     
-    // Wait and retry with increased attempts and better timing
-    // Rhino can take 10-20 seconds to fully launch, especially on Windows
-    logInfo('Waiting for Rhino to start...');
-    const maxAttempts = 12; // Increased from 5 to allow more time
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      // Progressive backoff: 2s, 2s, 3s, 3s, 4s, 4s, 5s, 5s, 5s, 5s, 5s, 5s
-      const waitMs = Math.min(2000 + Math.floor(attempt / 2) * 1000, 5000);
-      await new Promise((r) => setTimeout(r, waitMs));
+    // Phase 1: Wait up to 45 seconds for normal Rhino launch
+    // Rhino may need time for updates/configuration on first launch after update
+    logInfo('Phase 1: Waiting up to 45 seconds for Rhino to start...');
+    const phase1TimeoutMs = 45000;
+    const phase1StartTime = Date.now();
+    
+    while (!running && (Date.now() - phase1StartTime) < phase1TimeoutMs) {
+      await new Promise((r) => setTimeout(r, 3000)); // Check every 3 seconds
       
       try {
         running = await rhinoIsRunning();
         if (running) {
-          logInfo('Rhino detected as running', { attempt: attempt + 1, totalWaitMs: waitMs * (attempt + 1) });
+          const elapsedSec = ((Date.now() - phase1StartTime) / 1000).toFixed(1);
+          logInfo(`Rhino detected as running after ${elapsedSec}s`);
           break;
         } else {
-          logInfo('Rhino not detected yet', { attempt: attempt + 1 });
-          
-          // Recovery: Check if Rhino process exists but isn't responding to rhinocode CLI
-          // This can happen if Rhino is stuck on a GUI prompt (e.g., "Update available")
-          if (attempt >= 3) { // Start checking after 3 attempts
-            const processExists = await rhinoProcessExists();
-            if (processExists) {
-              logWarn('Rhino process exists but not responding to rhinocode CLI - may be stuck on GUI prompt');
-              if (attempt >= 5) { // After 5 attempts, try recovery
-                logWarn('Attempting recovery: killing stuck Rhino process');
-                await killRhinoProcess();
-                await new Promise((r) => setTimeout(r, 2000)); // Wait for process to die
-                // Try launching again
-                logInfo('Relaunching Rhino after killing stuck process');
-                try {
-                  const { stdout: openStdout, stderr: openStderr } = await execAsync(openCmd, { timeout: 30_000 });
-                  if (openStdout && openStdout.trim()) logInfo('stdout (rhino relaunch)', { stdout: openStdout.substring(0, 500) });
-                  if (openStderr && openStderr.trim()) logWarn('stderr (rhino relaunch)', { stderr: openStderr.substring(0, 500) });
-                } catch (err: any) {
-                  logWarn('Rhino relaunch failed', { error: err?.message || String(err) });
-                }
-              }
-            }
-          }
+          const elapsedSec = ((Date.now() - phase1StartTime) / 1000).toFixed(1);
+          logInfo(`Rhino not detected yet (${elapsedSec}s elapsed)`);
         }
       } catch (err: any) {
-        logWarn('Error checking if Rhino is running', { attempt: attempt + 1, error: err?.message || String(err) });
+        logWarn('Error checking if Rhino is running', { error: err?.message || String(err) });
       }
     }
+    
+    // Phase 2: Recovery attempt if Rhino still not running
     if (!running) {
-      throw new Error(`Rhino did not start successfully after ${maxAttempts} attempts`);
+      logWarn('Phase 1 timeout: Rhino not responding after 45 seconds');
+      
+      // Check if a Rhino process exists but isn't responding to rhinocode CLI
+      // This can happen if Rhino is stuck on a GUI prompt
+      const processExists = await rhinoProcessExists();
+      
+      if (processExists) {
+        logWarn('Rhino process exists but not responding to rhinocode CLI - attempting recovery');
+        logInfo('Killing stuck Rhino process...');
+        await killRhinoProcess();
+        await new Promise((r) => setTimeout(r, 3000)); // Wait for process to fully terminate
+        
+        // Relaunch Rhino once
+        logInfo('Relaunching Rhino after killing stuck process');
+        try {
+          const { stdout: openStdout, stderr: openStderr } = await execAsync(openCmd, { timeout: 30_000 });
+          if (openStdout && openStdout.trim()) logInfo('stdout (rhino relaunch)', { stdout: openStdout.substring(0, 500) });
+          if (openStderr && openStderr.trim()) logWarn('stderr (rhino relaunch)', { stderr: openStderr.substring(0, 500) });
+        } catch (err: any) {
+          logWarn('Rhino relaunch command failed (may be ok if Rhino started)', { error: err?.message || String(err) });
+        }
+        
+        // Phase 2: Wait up to 60 seconds after relaunch
+        logInfo('Phase 2: Waiting up to 60 seconds for relaunched Rhino...');
+        const phase2TimeoutMs = 60000;
+        const phase2StartTime = Date.now();
+        
+        while (!running && (Date.now() - phase2StartTime) < phase2TimeoutMs) {
+          await new Promise((r) => setTimeout(r, 3000)); // Check every 3 seconds
+          
+          try {
+            running = await rhinoIsRunning();
+            if (running) {
+              const elapsedSec = ((Date.now() - phase2StartTime) / 1000).toFixed(1);
+              logInfo(`Rhino detected as running after relaunch (${elapsedSec}s)`);
+              break;
+            } else {
+              const elapsedSec = ((Date.now() - phase2StartTime) / 1000).toFixed(1);
+              logInfo(`Rhino not detected yet after relaunch (${elapsedSec}s elapsed)`);
+            }
+          } catch (err: any) {
+            logWarn('Error checking if Rhino is running', { error: err?.message || String(err) });
+          }
+        }
+      } else {
+        logWarn('No Rhino process found - launch may have failed completely');
+      }
+    }
+    
+    if (!running) {
+      throw new Error('Rhino did not start successfully after initial launch (45s) and recovery attempt (60s)');
     }
   } else {
     logInfo('Rhino already running');
