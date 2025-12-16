@@ -75,7 +75,52 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     throw new Error(errorMsg);
   }
 
-  // 1) Ensure Rhino is running via rhinocode list --json
+  // 1) Utility functions for Rhino process management
+  
+  // Check if Rhino process is running via OS commands (independent of rhinocode CLI)
+  const rhinoProcessExists = async (): Promise<boolean> => {
+    try {
+      if (process.platform === 'win32') {
+        // Windows: Check for Rhino.exe process
+        const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq Rhino.exe" /NH', { timeout: 5000 });
+        const hasProcess = stdout.includes('Rhino.exe');
+        logInfo('Windows Rhino process check', { hasProcess, output: stdout.substring(0, 200) });
+        return hasProcess;
+      } else {
+        // macOS: Check for Rhino process
+        const { stdout } = await execAsync('pgrep -i rhino', { timeout: 5000 });
+        const hasProcess = stdout.trim().length > 0;
+        logInfo('macOS Rhino process check', { hasProcess, output: stdout.substring(0, 200) });
+        return hasProcess;
+      }
+    } catch (err: any) {
+      // pgrep returns error if no process found, which is normal
+      logInfo('Rhino process check result', { found: false });
+      return false;
+    }
+  };
+
+  // Kill all Rhino processes (for recovery or cleanup)
+  const killRhinoProcess = async (): Promise<void> => {
+    try {
+      if (process.platform === 'win32') {
+        // Windows: Force kill Rhino.exe
+        logInfo('Killing Rhino process on Windows');
+        await execAsync('taskkill /F /IM Rhino.exe', { timeout: 10000 });
+        logInfo('Rhino process killed successfully');
+      } else {
+        // macOS: Kill Rhino process
+        logInfo('Killing Rhino process on macOS');
+        await execAsync('killall Rhino', { timeout: 10000 });
+        logInfo('Rhino process killed successfully');
+      }
+    } catch (err: any) {
+      // Error may occur if process doesn't exist, which is fine
+      logInfo('Kill Rhino result', { error: err?.message || 'Process may not exist' });
+    }
+  };
+
+  // Check if Rhino is running via rhinocode list --json
   const rhinoIsRunning = async (): Promise<boolean> => {
     const cmd = `${input.rhinoCodeCli} list --json`;
     try {
@@ -144,24 +189,52 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       logWarn('Rhino launch command failed (may be ok if Rhino started)', { error: err?.message || String(err) });
     }
     
-    // Wait and retry a few times
+    // Wait and retry with increased attempts and better timing
+    // Rhino can take 10-20 seconds to fully launch, especially on Windows
     logInfo('Waiting for Rhino to start...');
-    for (let attempt = 0; attempt < 5; attempt++) {
-      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    const maxAttempts = 12; // Increased from 5 to allow more time
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Progressive backoff: 2s, 2s, 3s, 3s, 4s, 4s, 5s, 5s, 5s, 5s, 5s, 5s
+      const waitMs = Math.min(2000 + Math.floor(attempt / 2) * 1000, 5000);
+      await new Promise((r) => setTimeout(r, waitMs));
+      
       try {
         running = await rhinoIsRunning();
         if (running) {
-          logInfo('Rhino detected as running', { attempt: attempt + 1 });
+          logInfo('Rhino detected as running', { attempt: attempt + 1, totalWaitMs: waitMs * (attempt + 1) });
           break;
         } else {
           logInfo('Rhino not detected yet', { attempt: attempt + 1 });
+          
+          // Recovery: Check if Rhino process exists but isn't responding to rhinocode CLI
+          // This can happen if Rhino is stuck on a GUI prompt (e.g., "Update available")
+          if (attempt >= 3) { // Start checking after 3 attempts
+            const processExists = await rhinoProcessExists();
+            if (processExists) {
+              logWarn('Rhino process exists but not responding to rhinocode CLI - may be stuck on GUI prompt');
+              if (attempt >= 5) { // After 5 attempts, try recovery
+                logWarn('Attempting recovery: killing stuck Rhino process');
+                await killRhinoProcess();
+                await new Promise((r) => setTimeout(r, 2000)); // Wait for process to die
+                // Try launching again
+                logInfo('Relaunching Rhino after killing stuck process');
+                try {
+                  const { stdout: openStdout, stderr: openStderr } = await execAsync(openCmd, { timeout: 30_000 });
+                  if (openStdout && openStdout.trim()) logInfo('stdout (rhino relaunch)', { stdout: openStdout.substring(0, 500) });
+                  if (openStderr && openStderr.trim()) logWarn('stderr (rhino relaunch)', { stderr: openStderr.substring(0, 500) });
+                } catch (err: any) {
+                  logWarn('Rhino relaunch failed', { error: err?.message || String(err) });
+                }
+              }
+            }
+          }
         }
       } catch (err: any) {
         logWarn('Error checking if Rhino is running', { attempt: attempt + 1, error: err?.message || String(err) });
       }
     }
     if (!running) {
-      throw new Error('Rhino did not start successfully after 5 attempts');
+      throw new Error(`Rhino did not start successfully after ${maxAttempts} attempts`);
     }
   } else {
     logInfo('Rhino already running');
@@ -257,8 +330,27 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       // Use -_Exit N to exit without saving and without prompting
       await execFileAsync(input.rhinoCodeCli, ['command', '-_Exit N'], { timeout: 30_000 });
       logInfo('Rhino exit command sent');
+      
+      // Wait a moment for graceful exit
+      await new Promise((r) => setTimeout(r, 2000));
+      
+      // Force kill any remaining Rhino processes to ensure cleanup
+      // This handles cases where Exit command doesn't work due to GUI prompts
+      const stillRunning = await rhinoProcessExists();
+      if (stillRunning) {
+        logWarn('Rhino still running after Exit command - force killing');
+        await killRhinoProcess();
+        await new Promise((r) => setTimeout(r, 1000));
+        logInfo('Rhino force killed');
+      } else {
+        logInfo('Rhino exited cleanly');
+      }
     } catch (exitErr: any) {
-      logWarn('Rhino exit command failed (may have already closed)', { error: exitErr?.message });
+      logWarn('Rhino exit command failed', { error: exitErr?.message });
+      // Still try to kill the process
+      try {
+        await killRhinoProcess();
+      } catch {}
     }
   } else {
     const reason = runningInitially ? 'Rhino was already running' : 'local development mode';
