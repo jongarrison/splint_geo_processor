@@ -27,7 +27,69 @@ export class Processor {
     this.inbox = this.config.inboxDir;
     this.outbox = this.config.outboxDir;
     fs.mkdirSync(this.inbox, { recursive: true });
-    fs.mkdirSync(this.outbox, { recursive: true });
+    fs.mkdirSync(this.outbox, { recursive: true});
+  }
+
+  private async handleDebugRequest(job: any) {
+    try {
+      const idPart = job?.id ?? `debug_${Date.now()}`;
+      const algoPart = job?.GeometryAlgorithmName || 'algorithm';
+      const baseName = `${algoPart}_${idPart}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+      
+      this.logger.info({ 
+        id: idPart, 
+        algorithm: algoPart,
+        params: job?.GeometryInputParameterData
+      }, 'Debug: Launching Rhino/Grasshopper');
+
+      // Resolve Grasshopper script path
+      const ghScript = path.join(this.config.ghScriptsDir, `${algoPart}.gh`);
+      const ghScriptAbs = path.resolve(ghScript);
+      
+      if (!fs.existsSync(ghScriptAbs)) {
+        this.logger.error({ ghScript: ghScriptAbs }, 'Debug: Grasshopper script not found');
+        await this.reportResult(idPart, false, `Grasshopper script not found: ${ghScriptAbs}`);
+        return;
+      }
+
+      if (!this.config.rhinoCodeCli) {
+        this.logger.error('Debug: RHINOCODE_CLI not configured');
+        await this.reportResult(idPart, false, 'RHINOCODE_CLI not configured');
+        return;
+      }
+
+      // Launch Rhino with Grasshopper and the script file
+      const { exec } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const execAsync = promisify(exec);
+      
+      let openCmd: string;
+      if (process.platform === 'win32') {
+        // Windows: Launch Rhino with Grasshopper loading the script
+        openCmd = `powershell.exe -Command "Start-Process -FilePath '${this.config.rhinoCli}' -ArgumentList '/nosplash','/runscript=_Grasshopper _Load ${ghScriptAbs}'"`;
+      } else {
+        // macOS: Launch Rhino with Grasshopper
+        openCmd = `open -a "${this.config.rhinoCli}" --args -nosplash -runscript="_Grasshopper _Load ${ghScriptAbs}"`;
+      }
+
+      this.logger.info({ cmd: openCmd }, 'Debug: Executing launch command');
+      
+      try {
+        await execAsync(openCmd, { timeout: 30_000 });
+        this.logger.info('Debug: Rhino launched with Grasshopper script');
+      } catch (err: any) {
+        this.logger.warn({ error: err?.message }, 'Debug: Launch command completed (this is normal)');
+      }
+
+      // Mark the debug job as "complete" so it doesn't block the queue
+      await this.reportResult(idPart, true, undefined, 'Debug request completed - Grasshopper launched with script');
+      
+      this.logger.info({ id: idPart }, 'Debug request complete - Grasshopper is open for manual debugging');
+    } catch (err: any) {
+      this.logger.error({ error: err?.message }, 'Debug request failed');
+      // Still mark as complete to not block queue
+      await this.reportResult(job?.id || 'unknown', false, err?.message);
+    }
   }
 
   async run() {
@@ -66,8 +128,17 @@ export class Processor {
         const job = resp.data as any;
         this.logger.info({ 
           apiUrl: this.config.apiUrl, 
-          jobId: job?.id ?? job?.ID ?? job?.Id 
+          jobId: job?.id ?? job?.ID ?? job?.Id,
+          isDebug: job?.isDebugRequest || false
         }, `[${env}] Job received from factory`);
+        
+        // Handle debug requests differently
+        if (job?.isDebugRequest) {
+          this.logger.info({ jobId: job.id }, 'Debug request detected - launching Grasshopper without processing');
+          await this.handleDebugRequest(job);
+          continue; // Skip to next iteration
+        }
+        
         try {
           const keys = Object.keys(job || {});
           this.logger.debug({ keys }, 'next-job shape');
