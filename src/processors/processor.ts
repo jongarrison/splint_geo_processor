@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { sleep } from '../utils/sleep.js';
 import type { AppConfig } from '../config.js';
-import { runPipeline } from './pipeline.js';
+import { runPipeline, executeRhinoCommand, ensureRhinoRunning } from './pipeline.js';
 import { upload } from '@vercel/blob/client';
 import FormData from 'form-data';
 import { cleanupOldFiles } from '../utils/cleanup.js';
@@ -42,6 +42,22 @@ export class Processor {
         params: job?.GeometryInputParameterData
       }, 'Debug: Launching Rhino/Grasshopper');
 
+      // Write input JSON to inbox for manual debugging (same as normal flow)
+      const inboxJson = path.join(this.inbox, `${baseName}.json`);
+      const inputPayload = {
+        id: idPart,
+        algorithm: job?.GeometryAlgorithmName,
+        params: job?.GeometryInputParameterData,
+        metadata: {
+          GeometryName: job?.GeometryName,
+          CustomerNote: job?.CustomerNote,
+          CustomerID: job?.CustomerID,
+          objectID: job?.objectID
+        }
+      };
+      fs.writeFileSync(inboxJson, JSON.stringify(inputPayload, null, 2), 'utf8');
+      this.logger.info({ inboxJson, objectID: job?.objectID }, 'Debug: Wrote input JSON to inbox (manual cleanup required)');
+
       // Resolve Grasshopper script path
       const ghScript = path.join(this.config.ghScriptsDir, `${algoPart}.gh`);
       const ghScriptAbs = path.resolve(ghScript);
@@ -52,37 +68,71 @@ export class Processor {
         return;
       }
 
-      if (!this.config.rhinoCodeCli) {
-        this.logger.error('Debug: RHINOCODE_CLI not configured');
-        await this.reportResult(idPart, false, 'RHINOCODE_CLI not configured');
+      if (!this.config.rhinoCodeCli || !this.config.rhinoCli) {
+        this.logger.error('Debug: RHINOCODE_CLI or RHINO_CLI not configured');
+        await this.reportResult(idPart, false, 'RHINOCODE_CLI or RHINO_CLI not configured');
         return;
       }
 
-      // Launch Rhino with Grasshopper and the script file
-      const { exec } = await import('node:child_process');
-      const { promisify } = await import('node:util');
-      const execAsync = promisify(exec);
-      
-      let openCmd: string;
-      if (process.platform === 'win32') {
-        // Windows: Launch Rhino with Grasshopper loading the script
-        openCmd = `powershell.exe -Command "Start-Process -FilePath '${this.config.rhinoCli}' -ArgumentList '/nosplash','/runscript=_Grasshopper _Load ${ghScriptAbs}'"`;
-      } else {
-        // macOS: Launch Rhino with Grasshopper
-        openCmd = `open -a "${this.config.rhinoCli}" --args -nosplash -runscript="_Grasshopper _Load ${ghScriptAbs}"`;
+      // Ensure Rhino is running
+      this.logger.info('Debug: Ensuring Rhino is running');
+      const rhinoRunning = await ensureRhinoRunning(
+        this.config.rhinoCodeCli,
+        this.config.rhinoCli,
+        this.logger
+      );
+
+      if (!rhinoRunning) {
+        this.logger.error('Debug: Failed to start Rhino');
+        await this.reportResult(idPart, false, 'Failed to start Rhino');
+        return;
       }
 
-      this.logger.info({ cmd: openCmd }, 'Debug: Executing launch command');
+      // Wait for Rhino to fully initialize before sending Grasshopper command
+      // Without this delay, commands sent immediately after launch may not be processed correctly
+      this.logger.info('Debug: Waiting for Rhino to fully initialize');
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      // Prime Grasshopper by opening the window first
+      // This establishes the right command context for subsequent file open commands
+      this.logger.info('Debug: Opening Grasshopper window to prime command context');
+      try {
+        await executeRhinoCommand(
+          this.config.rhinoCodeCli, 
+          '-_Grasshopper _Window _Show _EnterEnd', 
+          { timeout: 10000 }, 
+          this.logger
+        );
+      } catch (err: any) {
+        this.logger.warn({ error: err?.message }, 'Debug: Grasshopper window open command completed');
+      }
+
+      // Brief pause to let Grasshopper window initialize
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Execute command to open Grasshopper with the script
+      // Format: -_Grasshopper _Document _Open /path _EnterEnd
+      // No ! prefix, no quotes on path, _EnterEnd closes the command cleanly
+      const commandString = `-_Grasshopper _Document _Open ${ghScriptAbs} _EnterEnd`;
+      this.logger.info({ commandString }, 'Debug: Opening Grasshopper script');
       
       try {
-        await execAsync(openCmd, { timeout: 30_000 });
-        this.logger.info('Debug: Rhino launched with Grasshopper script');
+        await executeRhinoCommand(this.config.rhinoCodeCli, commandString, {}, this.logger);
+        this.logger.info('Debug: Grasshopper script opened successfully');
       } catch (err: any) {
-        this.logger.warn({ error: err?.message }, 'Debug: Launch command completed (this is normal)');
+        this.logger.warn({ error: err?.message }, 'Debug: Command completed (may need manual verification)');
       }
 
       // Mark the debug job as "complete" so it doesn't block the queue
-      await this.reportResult(idPart, true, undefined, 'Debug request completed - Grasshopper launched with script');
+      // Note: Debug jobs are auto-deleted after pickup, so 404 is expected and not an error
+      try {
+        await this.reportResult(idPart, true, undefined, 'Debug request completed - Grasshopper opened with script');
+      } catch (err: any) {
+        // Suppress 404 errors for debug jobs - they're auto-deleted after pickup
+        if (err?.response?.status !== 404) {
+          this.logger.warn({ error: err?.message }, 'Failed to report debug result (non-404 error)');
+        }
+      }
       
       this.logger.info({ id: idPart }, 'Debug request complete - Grasshopper is open for manual debugging');
     } catch (err: any) {
@@ -134,9 +184,10 @@ export class Processor {
         
         // Handle debug requests differently
         if (job?.isDebugRequest) {
-          this.logger.info({ jobId: job.id }, 'Debug request detected - launching Grasshopper without processing');
+          this.logger.info({ jobId: job.id }, 'Debug request detected - launching Grasshopper and exiting');
           await this.handleDebugRequest(job);
-          continue; // Skip to next iteration
+          this.logger.info('Debug workflow complete - exiting processor');
+          process.exit(0);
         }
         
         try {
@@ -309,8 +360,14 @@ export class Processor {
       } else {
         this.logger.warn({ status: resp.status, data: resp.data }, 'Failed to report result');
       }
-    } catch (err) {
+    } catch (err: any) {
+      // Re-throw to allow caller to handle (e.g., suppress 404 for debug jobs)
+      if (err?.response?.status) {
+        this.logger.warn({ status: err.response.status, data: err.response.data }, 'Failed to report result');
+        throw err;
+      }
       this.logger.error({ err }, 'Error reporting result');
+      throw err;
     }
   }
 

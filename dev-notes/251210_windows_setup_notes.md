@@ -25,6 +25,25 @@
    ```
 2. Machine now accessible at: `lazyboy2000.local`
 
+## Windows Auto-Login Configuration
+For unattended operation (e.g., after power outages), configure Windows to automatically login:
+
+**Note:** Windows 11 Home doesn't show the netplwiz checkbox for auto-login. Use registry method instead.
+
+1. Via SSH (using Git Bash), run these commands with appropriate username/password:
+   ```bash
+   ssh <hostname>.local 'cmd.exe /c "reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\" /v AutoAdminLogon /t REG_SZ /d 1 /f"'
+   ssh <hostname>.local 'cmd.exe /c "reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\" /v DefaultUserName /t REG_SZ /d <username> /f"'
+   ssh <hostname>.local 'cmd.exe /c "reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\" /v DefaultPassword /t REG_SZ /d <password> /f"'
+   ```
+
+2. Test by restarting the machine:
+   ```bash
+   ssh <hostname>.local 'cmd.exe /c "shutdown /r /t 5 /f"'
+   ```
+
+**Security Note:** This stores the password in plaintext in the registry. Only use on machines in secure physical locations.
+
 ## Splint Geo Processor Setup
 
 ### Configuration
