@@ -273,6 +273,18 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     throw new Error(errorMsg);
   }
 
+  // Check if Rhino was already running before we ensure it
+  const isRhinoRunning = async (rhinoCodeCli: string): Promise<boolean> => {
+    try {
+      const { stdout } = await execAsync(`${rhinoCodeCli} list`, { timeout: 5000 });
+      return stdout.includes('rhinocode server');
+    } catch {
+      return false;
+    }
+  };
+
+  const runningInitially = await isRhinoRunning(input.rhinoCodeCli);
+
   // Ensure Rhino is running using centralized function
   logInfo('Ensuring Rhino is running');
   const rhinoRunning = await ensureRhinoRunning(
@@ -367,6 +379,34 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   }
 
   // 4) Exit Rhino to free up license
+  // Helper functions for OS-level process management
+  const rhinoProcessExists = async (): Promise<boolean> => {
+    try {
+      if (process.platform === 'win32') {
+        const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq Rhino.exe" /NH', { timeout: 5000 });
+        return stdout.includes('Rhino.exe');
+      } else {
+        const { stdout } = await execAsync('pgrep -i rhino', { timeout: 5000 });
+        return stdout.trim().length > 0;
+      }
+    } catch {
+      return false;
+    }
+  };
+
+  const killRhinoProcess = async (): Promise<void> => {
+    try {
+      if (process.platform === 'win32') {
+        await execAsync('taskkill /F /IM Rhino.exe', { timeout: 10000 });
+      } else {
+        await execAsync('killall Rhino', { timeout: 10000 });
+      }
+      logInfo('Rhino process killed');
+    } catch (err: any) {
+      logInfo('Kill Rhino result (may not exist)', { error: err?.message });
+    }
+  };
+
   // Only exit if:
   //   - We launched Rhino (it wasn't already running)
   //   - AND we're in production (not local dev)
