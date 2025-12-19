@@ -42,6 +42,21 @@ export class Processor {
         params: job?.GeometryInputParameterData
       }, 'Debug: Launching Rhino/Grasshopper');
 
+      // Clean up any existing JSON files for this algorithm in the inbox
+      try {
+        const existingFiles = fs.readdirSync(this.inbox);
+        const algoPrefix = `${algoPart}_`;
+        const filesToClean = existingFiles.filter(f => f.startsWith(algoPrefix) && f.endsWith('.json'));
+        if (filesToClean.length > 0) {
+          this.logger.info({ count: filesToClean.length, files: filesToClean }, 'Debug: Cleaning up stale inbox JSON files');
+          for (const file of filesToClean) {
+            fs.unlinkSync(path.join(this.inbox, file));
+          }
+        }
+      } catch (err: any) {
+        this.logger.warn({ error: err?.message }, 'Debug: Failed to clean up inbox files (continuing)');
+      }
+
       // Write input JSON to inbox for manual debugging (same as normal flow)
       const inboxJson = path.join(this.inbox, `${baseName}.json`);
       const inputPayload = {
@@ -198,6 +213,23 @@ export class Processor {
   // Write input JSON to inbox. Filename: {GeometryAlgorithmName}_{GeometryProcessingQueueID}.json
   const idPart = job?.id ?? job?.ID ?? job?.Id ?? `ts_${Date.now()}`;
   const algoPart = job?.GeometryAlgorithmName || 'algorithm';
+  
+  // Clean up any existing JSON files for this algorithm in the inbox
+  // This prevents Grasshopper from picking up stale files from failed/incomplete previous runs
+  try {
+    const existingFiles = fs.readdirSync(this.inbox);
+    const algoPrefix = `${algoPart}_`;
+    const filesToClean = existingFiles.filter(f => f.startsWith(algoPrefix) && f.endsWith('.json'));
+    if (filesToClean.length > 0) {
+      this.logger.info({ count: filesToClean.length, files: filesToClean }, 'Cleaning up stale inbox JSON files');
+      for (const file of filesToClean) {
+        fs.unlinkSync(path.join(this.inbox, file));
+      }
+    }
+  } catch (err: any) {
+    this.logger.warn({ error: err?.message }, 'Failed to clean up inbox files (continuing)');
+  }
+  
   const baseName = `${algoPart}_${idPart}`.replace(/[^a-zA-Z0-9._-]/g, '_');
   const inboxJson = path.join(this.inbox, `${baseName}.json`);
         const inputPayload = {

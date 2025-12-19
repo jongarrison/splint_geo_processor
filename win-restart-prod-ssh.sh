@@ -19,9 +19,12 @@ ssh ${WINDOWS_HOST} "cd ${REMOTE_DIR} && git pull"
 echo "📦 Installing dependencies and building..."
 ssh ${WINDOWS_HOST} "cd ${REMOTE_DIR} && npm install && npm run build"
 
-# Kill any running node processes for splint_geo_processor
+# Kill any running node processes
+# Need to use cmd.exe since SSH opens Git Bash by default
 echo "🛑 Stopping running process..."
-ssh ${WINDOWS_HOST} "powershell.exe -Command \"Get-Process node -ErrorAction SilentlyContinue | Where-Object { \\\$_.Path -like '*splint_geo_processor*' } | Stop-Process -Force\""
+ssh ${WINDOWS_HOST} "cmd.exe /c 'taskkill /F /IM node.exe 2>nul || echo No node.exe process found'"
+# Give it a moment to fully terminate
+sleep 2
 
 # Restart the scheduled task
 echo "♻️  Restarting SplintGeoProcessor task..."
