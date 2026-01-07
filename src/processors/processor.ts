@@ -24,7 +24,8 @@ export class Processor {
       timeout: 15000, // 15 second timeout for requests
       headers: this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {},
       validateStatus: () => true, // Don't throw on HTTP errors, handle them manually
-    });\n    
+    });
+    
     // Log axios configuration for debugging
     this.logger.info({ 
       baseURL: this.config.apiUrl,
