@@ -17,7 +17,18 @@ async function main() {
   await processor.run();
 }
 
-main().catch((err) => {
-  console.error(err);
+// Main error handler with retry logic
+main().catch(async (err) => {
+  logger.error({ 
+    error: err?.message,
+    code: err?.code,
+    stack: err?.stack,
+    name: err?.name
+  }, 'FATAL: Main process crashed unexpectedly');
+  
+  // Log to stderr for system logs
+  console.error('FATAL ERROR:', err);
+  console.error('Process will exit with code 1');
+  
   process.exit(1);
 });

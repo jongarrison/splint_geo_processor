@@ -18,12 +18,20 @@ export class Processor {
   private readonly DAYS_TO_KEEP = 7;
 
   constructor(private logger: pino.Logger, private config: AppConfig) {
+    // Configure axios with appropriate timeouts and error handling
     this.http = axios.create({
       baseURL: this.config.apiUrl,
-      timeout: 15000,
+      timeout: 15000, // 15 second timeout for requests
       headers: this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {},
-      validateStatus: () => true,
-    });
+      validateStatus: () => true, // Don't throw on HTTP errors, handle them manually
+    });\n    
+    // Log axios configuration for debugging
+    this.logger.info({ 
+      baseURL: this.config.apiUrl,
+      timeout: 15000,
+      hasApiKey: !!this.config.apiKey
+    }, 'HTTP client configured');
+    
     this.inbox = this.config.inboxDir;
     this.outbox = this.config.outboxDir;
     fs.mkdirSync(this.inbox, { recursive: true });
@@ -163,6 +171,19 @@ export class Processor {
                 this.config.environment;
     
     this.logger.info({ apiUrl: this.config.apiUrl }, `[${env}] Processor loop starting`);
+    
+    // Validate API connectivity before entering main loop
+    try {
+      this.logger.info({ apiUrl: this.config.apiUrl }, `[${env}] Testing API connectivity...`);
+      const testResp = await this.http.get('/api/geometry-processing/next-job');
+      this.logger.info({ status: testResp.status }, `[${env}] API connectivity confirmed`);
+    } catch (err: any) {
+      this.logger.warn({ 
+        error: err?.message,
+        code: err?.code,
+        apiUrl: this.config.apiUrl 
+      }, `[${env}] API connectivity test failed - continuing anyway (will retry in loop)`);
+    }
     
     // Run cleanup on startup
     await this.runCleanupIfNeeded(true);
@@ -328,13 +349,31 @@ export class Processor {
             processingLogSize: processingLog.length,
           }, 'Uploading files via multipart');
 
-          await this.reportSuccess(idPart, geometryPath, geometryName, printPath, printName, processingLog);
+          // Wrap reportSuccess in try-catch to prevent network errors from killing the process
+          try {
+            await this.reportSuccess(idPart, geometryPath, geometryName, printPath, printName, processingLog);
+          } catch (reportErr: any) {
+            this.logger.error({ 
+              error: reportErr?.message,
+              code: reportErr?.code,
+              stack: reportErr?.stack 
+            }, 'Failed to report success - job completed but upload failed');
+          }
         } catch (procErr: any) {
           this.logger.error({ err: procErr?.message }, 'Processing failed');
           // Log the error to jobLog so it appears in processing log sent to server
           jobLog('warn', `Processing failed: ${procErr?.message || 'Unknown error'}`);
           const processingLog = logLines.join('');
-          await this.reportResult(idPart, false, String(procErr?.message || 'Processing failed'), processingLog);
+          // Wrap reportResult in try-catch to prevent network errors from killing the process
+          try {
+            await this.reportResult(idPart, false, String(procErr?.message || 'Processing failed'), processingLog);
+          } catch (reportErr: any) {
+            this.logger.error({ 
+              error: reportErr?.message,
+              code: reportErr?.code,
+              stack: reportErr?.stack 
+            }, 'Failed to report failure - processing failed AND reporting failed');
+          }
         } finally {
           // Archive job files (inbox and any produced outbox files) regardless of success/failure
           try {
@@ -347,17 +386,50 @@ export class Processor {
           try { jobLogStream.end(); } catch {}
           this.logger.info({ id: idPart }, 'Finished processing');
         }
-      } catch (err) {
-        // Check for connection refused errors and log them cleanly
-        const isConnectionError = 
-          (err as any)?.code === 'ECONNREFUSED' ||
-          (err as any)?.cause?.code === 'ECONNREFUSED' ||
-          (err as any)?.message?.includes('ECONNREFUSED');
+      } catch (err: any) {
+        // Enhanced error handling with detailed logging for better debugging
+        const errorCode = err?.code || err?.response?.status || 'UNKNOWN';
+        const errorName = err?.name || 'Error';
+        const errorMessage = err?.message || 'Unknown error';
         
-        if (isConnectionError) {
-          this.logger.warn('Server is down or unreachable (ECONNREFUSED)');
+        // Check for various network/connection errors
+        const isConnectionRefused = 
+          err?.code === 'ECONNREFUSED' ||
+          err?.cause?.code === 'ECONNREFUSED' ||
+          errorMessage.includes('ECONNREFUSED');
+        
+        const isTimeout = 
+          err?.code === 'ETIMEDOUT' ||
+          err?.code === 'ECONNABORTED' ||
+          errorName === 'AxiosError' && errorMessage.includes('timeout');
+        
+        const isNetworkError = 
+          err?.code === 'ENOTFOUND' ||
+          err?.code === 'ENETUNREACH' ||
+          err?.code === 'EAI_AGAIN';
+        
+        // Log appropriate message based on error type
+        if (isConnectionRefused) {
+          this.logger.warn({ errorCode, errorMessage }, 'Server is down or unreachable (ECONNREFUSED) - will retry');
+        } else if (isTimeout) {
+          this.logger.warn({ 
+            errorCode, 
+            errorName,
+            timeout: err?.config?.timeout || 'unknown',
+            url: err?.config?.url || 'unknown'
+          }, 'Request timeout - will retry');
+        } else if (isNetworkError) {
+          this.logger.warn({ errorCode, errorMessage }, 'Network error - will retry');
         } else {
-          this.logger.error({ err }, 'Processor iteration failed');
+          // Log full error details for unexpected errors
+          this.logger.error({ 
+            errorCode,
+            errorName,
+            errorMessage,
+            errorStack: err?.stack,
+            url: err?.config?.url,
+            method: err?.config?.method
+          }, 'Processor iteration failed - will retry');
         }
       }
       
