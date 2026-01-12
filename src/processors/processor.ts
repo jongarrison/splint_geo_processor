@@ -219,6 +219,28 @@ export class Processor {
           isDebug: job?.isDebugRequest || false
         }, `[${env}] Job received from factory`);
         
+        // Mark job as started (unless it's a debug request)
+        if (!job?.isDebugRequest) {
+          try {
+            const markStartedResp = await this.http.post('/api/geometry-processing/mark-started', {
+              jobId: job?.id
+            });
+            if (markStartedResp.status === 200) {
+              this.logger.info({ jobId: job?.id }, 'Marked job as started');
+            } else {
+              this.logger.warn({ 
+                jobId: job?.id, 
+                status: markStartedResp.status 
+              }, 'Failed to mark job as started (continuing anyway)');
+            }
+          } catch (markErr: any) {
+            this.logger.warn({ 
+              jobId: job?.id, 
+              error: markErr?.message 
+            }, 'Error marking job as started (continuing anyway)');
+          }
+        }
+        
         // Handle debug requests differently
         if (job?.isDebugRequest) {
           this.logger.info({ jobId: job.id }, 'Debug request detected - launching Grasshopper and exiting');

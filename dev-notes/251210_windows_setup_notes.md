@@ -112,6 +112,19 @@ which runs in the user's interactive session.
    - Configure task to run in interactive session (allows launching Rhino GUI)
    - Start the task immediately
 
+**CRITICAL:** Ensure ExecutionTimeLimit is set to PT0S (unlimited) to prevent the task from being killed after 72 hours. Verify with:
+```powershell
+$task = Get-ScheduledTask -TaskName SplintGeoProcessor
+$task.Settings | Select-Object ExecutionTimeLimit
+# Should show: PT0S
+```
+
+If not set correctly, fix with:
+```powershell
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+Set-ScheduledTask -TaskName SplintGeoProcessor -Settings $settings
+```
+
 ### Task Management
 ```powershell
 # Check status

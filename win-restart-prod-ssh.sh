@@ -21,7 +21,7 @@ ssh ${WINDOWS_HOST} "cd ${REMOTE_DIR} && npm install && npm run build"
 
 # Kill any running node processes
 # Need to use cmd.exe since SSH opens Git Bash by default
-echo "🛑 Stopping running process..."
+echo "🛑 Stopping running process, if necessary..."
 ssh ${WINDOWS_HOST} "cmd.exe /c 'taskkill /F /IM node.exe 2>nul || echo No node.exe process found'"
 # Give it a moment to fully terminate
 sleep 2

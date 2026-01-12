@@ -21,7 +21,7 @@ npm install
 npm run build
 
 # Kill any running node processes
-echo "🛑 Stopping running process..."
+echo "🛑 Stopping running process, if necessary..."
 cmd.exe /c 'taskkill /F /IM node.exe 2>nul || echo No node.exe process found'
 
 # Give it a moment to fully terminate
