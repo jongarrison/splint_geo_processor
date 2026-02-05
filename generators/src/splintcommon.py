@@ -60,7 +60,7 @@ def confirm_job_is_processed_and_exit(jobname, is_success, message):
         #     if job_path.exists():
         #         log(f"FAILED TO Archive JOB FILE. previous message:{message}: {job_path}")
 
-        log(f"RESULT: {"SUCCESS" if is_success else "FAILURE"} {message=} {jobname=}")
+        log(f"RESULT: {'SUCCESS' if is_success else 'FAILURE'} {message=} {jobname=}")
 
     except Exception as e:
         conf_data = {"result": "FAILURE", "phase": "during confirmation", "exception": f"{traceback.format_exc()}", "message": message}

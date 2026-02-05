@@ -1,4 +1,4 @@
-# Splint Geometry Processor
+# Splint Geometry (aka Design) Processor
 
 A single-threaded worker that polls Splint Factory for geometry processing jobs, runs a Grasshopper-based pipeline (via Rhino), optionally slices with Bambu Studio, and reports results back to the server.
 
