@@ -1,5 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import pino from 'pino';
+
+const logger = pino({ level: 'info' });
 
 export interface AppConfig {
   apiUrl: string;
@@ -30,17 +33,17 @@ function readConfigJson(): Record<string, any> | undefined {
   try {
     const cwd = process.cwd();
     const filePath = path.join(cwd, 'secrets', 'config.json');
-    console.log('[config] Looking for config.json at:', filePath);
+    logger.info({ filePath }, 'Looking for config.json');
     if (fs.existsSync(filePath)) {
       const text = fs.readFileSync(filePath, 'utf8');
       const parsed = JSON.parse(text);
-      console.log('[config] Loaded config.json:', JSON.stringify(parsed, null, 2));
+      logger.info({ config: parsed }, 'Loaded config.json');
       return parsed;
     } else {
-      console.log('[config] config.json not found');
+      logger.info({ filePath }, 'config.json not found');
     }
   } catch (err) {
-    console.error('[config] Error reading config.json:', err);
+    logger.error({ err, filePath: path.join(process.cwd(), 'secrets', 'config.json') }, 'Error reading config.json');
   }
   return undefined;
 }
@@ -48,11 +51,12 @@ function readConfigJson(): Record<string, any> | undefined {
 export function loadConfig(): AppConfig {
   const json = readConfigJson() || {};
   
-  console.log('[config] Config sources:');
-  console.log('[config]   process.env.SF_API_URL:', process.env.SF_API_URL);
-  console.log('[config]   process.env.SPLINT_SERVER_URL:', process.env.SPLINT_SERVER_URL);
-  console.log('[config]   json.SF_API_URL:', json.SF_API_URL);
-  console.log('[config]   json.SPLINT_SERVER_URL:', json.SPLINT_SERVER_URL);
+  logger.info({
+    env_SF_API_URL: process.env.SF_API_URL,
+    env_SPLINT_SERVER_URL: process.env.SPLINT_SERVER_URL,
+    json_SF_API_URL: json.SF_API_URL,
+    json_SPLINT_SERVER_URL: json.SPLINT_SERVER_URL
+  }, 'Config sources');
   
   const apiUrl = process.env.SF_API_URL
     || process.env.SPLINT_SERVER_URL
@@ -62,8 +66,6 @@ export function loadConfig(): AppConfig {
     || readSecretFile('splint-server-url.txt')
     || 'http://localhost:3000';
   
-  console.log('[config] Final apiUrl:', apiUrl);
-  
   const apiKey = process.env.SF_API_KEY
     || process.env.SPLINT_SERVER_API_KEY
     || json.SF_API_KEY
@@ -72,7 +74,7 @@ export function loadConfig(): AppConfig {
     || readSecretFile('splint-server-key.txt')
     || '';
   
-  console.log('[config] Final apiKey:', apiKey ? '(set)' : '(not set)');
+  logger.info({ apiUrl, hasApiKey: !!apiKey }, 'Final config values');
   
   const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS || json.POLL_INTERVAL_MS || 3000);
 
