@@ -30,11 +30,18 @@ function readConfigJson(): Record<string, any> | undefined {
   try {
     const cwd = process.cwd();
     const filePath = path.join(cwd, 'secrets', 'config.json');
+    console.log('[config] Looking for config.json at:', filePath);
     if (fs.existsSync(filePath)) {
       const text = fs.readFileSync(filePath, 'utf8');
-      return JSON.parse(text);
+      const parsed = JSON.parse(text);
+      console.log('[config] Loaded config.json:', JSON.stringify(parsed, null, 2));
+      return parsed;
+    } else {
+      console.log('[config] config.json not found');
     }
-  } catch {}
+  } catch (err) {
+    console.error('[config] Error reading config.json:', err);
+  }
   return undefined;
 }
 
