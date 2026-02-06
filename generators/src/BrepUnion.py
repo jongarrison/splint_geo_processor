@@ -368,8 +368,8 @@ def robust_brep_union(breps, base_tolerance=None, check_volumes=True):
     # Strategy: Try a few different deterministic orderings
     # This helps when certain brep combinations create problematic intermediates
     orderings = [
-        ("Sequential 0→N", list(range(len(breps)))),
-        ("Sequential N→0", list(range(len(breps)-1, -1, -1))),
+        ("Sequential 0->N", list(range(len(breps)))),
+        ("Sequential N->0", list(range(len(breps)-1, -1, -1))),
     ]
     
     # For even counts, add binary tree pairing strategies

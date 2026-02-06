@@ -37,12 +37,12 @@ def get_generator_filepath():
 
 def log(message):
     print(f"log:{message}")
-    with open(get_log_filepath(), "a") as f:
+    with open(get_log_filepath(), "a", encoding='utf-8') as f:
         f.write(f"{message}\n")
 
 def log_clear(message=""):
     print(f"log_clear:{message}")
-    with open(get_log_filepath(), "a") as f:
+    with open(get_log_filepath(), "a", encoding='utf-8') as f:
         f.write(f"\n\n============================================")
         f.write(f"{message}\n")
 
@@ -64,7 +64,7 @@ def confirm_job_is_processed_and_exit(jobname, is_success, message):
 
     except Exception as e:
         conf_data = {"result": "FAILURE", "phase": "during confirmation", "exception": f"{traceback.format_exc()}", "message": message}
-        with open(conf_path, "w") as f:
+        with open(conf_path, "w", encoding='utf-8') as f:
             json.dump(conf_data, f, indent=2)        
 
 def load_oldest_json_job_file(directory, algorithm_name):
