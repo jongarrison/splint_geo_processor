@@ -47,6 +47,13 @@ function readConfigJson(): Record<string, any> | undefined {
 
 export function loadConfig(): AppConfig {
   const json = readConfigJson() || {};
+  
+  console.log('[config] Config sources:');
+  console.log('[config]   process.env.SF_API_URL:', process.env.SF_API_URL);
+  console.log('[config]   process.env.SPLINT_SERVER_URL:', process.env.SPLINT_SERVER_URL);
+  console.log('[config]   json.SF_API_URL:', json.SF_API_URL);
+  console.log('[config]   json.SPLINT_SERVER_URL:', json.SPLINT_SERVER_URL);
+  
   const apiUrl = process.env.SF_API_URL
     || process.env.SPLINT_SERVER_URL
     || json.SF_API_URL
@@ -54,6 +61,9 @@ export function loadConfig(): AppConfig {
     || readSecretFile('api-url.txt')
     || readSecretFile('splint-server-url.txt')
     || 'http://localhost:3000';
+  
+  console.log('[config] Final apiUrl:', apiUrl);
+  
   const apiKey = process.env.SF_API_KEY
     || process.env.SPLINT_SERVER_API_KEY
     || json.SF_API_KEY
@@ -61,6 +71,9 @@ export function loadConfig(): AppConfig {
     || readSecretFile('api-key.txt')
     || readSecretFile('splint-server-key.txt')
     || '';
+  
+  console.log('[config] Final apiKey:', apiKey ? '(set)' : '(not set)');
+  
   const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS || json.POLL_INTERVAL_MS || 3000);
 
   const home = process.env.HOME || process.env.USERPROFILE || '.';
