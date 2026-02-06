@@ -2,7 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import pino from 'pino';
 
-const logger = pino({ level: 'info' });
+// Create logger that writes to the same log file as main logger
+const home = process.env.HOME || process.env.USERPROFILE || '.';
+const logsDir = path.join(home, 'SplintFactoryFiles', 'logs');
+fs.mkdirSync(logsDir, { recursive: true });
+const date = new Date();
+const ymd = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+const logFile = path.join(logsDir, `processor-${ymd}.log`);
+const logger = pino(pino.destination(logFile));
 
 export interface AppConfig {
   apiUrl: string;
