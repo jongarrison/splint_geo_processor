@@ -14,8 +14,8 @@ from BrepGeneration import create_tapered_cylinder, create_sphere, create_cylind
 from BrepUnion import robust_brep_union
 
 
-# Segment names in order from base to tip
-SEGMENT_ORDER = ["metacarpal", "mcp", "pip", "dip", "tip"]
+# Segment names in order from base to tip (joints and phalanges as separate segments)
+SEGMENT_ORDER = ["metacarpal", "mcp", "proximal", "pip", "middle", "dip", "distal", "tip"]
 
 
 @dataclass
@@ -47,9 +47,12 @@ class FingerParams:
     metacarpal_len: float = 20.0
     
     # Segment range (which parts to generate)
-    # Valid values: "metacarpal", "mcp", "pip", "dip", "tip"
+    # Valid: "metacarpal", "mcp", "proximal", "pip", "middle", "dip", "distal", "tip"
     start_at: str = "metacarpal"
     end_at: str = "tip"
+    
+    # Shell mode: adds thickness to all radii (0 = off)
+    shell_thickness: float = 0.0
     
     def get_segment_range(self) -> Tuple[int, int]:
         """Returns (start_index, end_index) for segment generation."""
@@ -77,6 +80,10 @@ def create_finger_model(
     Orientation: Finger along +X, palm faces -Z. Positive angles = flexion toward palm.
     Construction order: Metacarpal -> MCP -> Proximal -> PIP -> Middle -> DIP -> Distal -> Tip
     
+    Position is always computed from origin through all segments, but geometry is only
+    created for segments within start_at..end_at range. This ensures partial models
+    align with full models for boolean operations.
+    
     Args:
         params: FingerParams dataclass with all measurements and options
         tolerance: Geometric tolerance for operations (defaults to document tolerance)
@@ -89,6 +96,8 @@ def create_finger_model(
     if tolerance is None:
         tolerance = sc.doc.ModelAbsoluteTolerance
     
+    shell = params.shell_thickness
+    
     log("=" * 60)
     log("CREATING FINGER MODEL")
     log("=" * 60)
@@ -98,24 +107,16 @@ def create_finger_model(
     log(f"Angles - MCP:{params.mcp_angle}deg, PIP:{params.pip_angle}deg, DIP:{params.dip_angle}deg")
     log(f"Metacarpal stub: {params.metacarpal_len}mm")
     log(f"Segment range: {params.start_at} -> {params.end_at}")
+    if shell != 0:
+        log(f"Shell thickness: {shell}mm")
     
-    # Convert circumferences to radii
-    mcp_radius = params.mcp_circ / (2 * math.pi)
-    pip_radius = params.pip_circ / (2 * math.pi)
-    dip_radius = params.dip_circ / (2 * math.pi)
-    tip_radius = params.tip_circ / (2 * math.pi)
+    # Convert circumferences to radii, add shell thickness
+    mcp_radius = params.mcp_circ / (2 * math.pi) + shell
+    pip_radius = params.pip_circ / (2 * math.pi) + shell
+    dip_radius = params.dip_circ / (2 * math.pi) + shell
+    tip_radius = params.tip_circ / (2 * math.pi) + shell
     
     log(f"Radii - MCP:{mcp_radius:.2f}, PIP:{pip_radius:.2f}, DIP:{dip_radius:.2f}, Tip:{tip_radius:.2f}")
-    
-    # Determine which angles to apply (only when both sides of joint are in range)
-    # MCP joint connects metacarpal to mcp segment
-    # PIP joint connects mcp to pip segment
-    # DIP joint connects pip to dip segment
-    apply_mcp_angle = params.includes_segment("metacarpal") and params.includes_segment("mcp")
-    apply_pip_angle = params.includes_segment("mcp") and params.includes_segment("pip")
-    apply_dip_angle = params.includes_segment("pip") and params.includes_segment("dip")
-    
-    log(f"Applying angles - MCP:{apply_mcp_angle}, PIP:{apply_pip_angle}, DIP:{apply_dip_angle}")
     
     # Track components and centerline points
     components = []
@@ -135,11 +136,16 @@ def create_finger_model(
             current_dir.Transform(rotation_xform)
             current_dir.Unitize()
     
-    # --- METACARPAL STUB ---
+    # Helper to check if this is the first rendered segment (for centerline start point)
+    def add_start_point_if_first():
+        if not centerline_points:
+            centerline_points.append(Point3d(current_pos))
+    
+    # --- METACARPAL STUB (cylinder) ---
+    metacarpal_end = current_pos + current_dir * params.metacarpal_len
     if params.includes_segment("metacarpal"):
         log("\n--- Metacarpal Stub ---")
-        centerline_points.append(Point3d(current_pos))
-        metacarpal_end = current_pos + current_dir * params.metacarpal_len
+        add_start_point_if_first()
         metacarpal_plane = Plane(current_pos, current_dir)
         metacarpal_brep = create_cylinder(metacarpal_plane, mcp_radius, params.metacarpal_len, tolerance)
         if metacarpal_brep:
@@ -148,17 +154,16 @@ def create_finger_model(
         else:
             log("ERROR: Failed to create metacarpal stub")
             return None, None, None
-        current_pos = metacarpal_end
-        centerline_points.append(Point3d(current_pos))
+        centerline_points.append(Point3d(metacarpal_end))
+    current_pos = metacarpal_end
     
-    # --- MCP JOINT + PROXIMAL PHALANX ---
-    if apply_mcp_angle:
-        apply_flexion(params.mcp_angle)
+    # --- MCP JOINT (sphere) ---
+    # Always apply MCP angle for correct positioning
+    apply_flexion(params.mcp_angle)
     
     if params.includes_segment("mcp"):
         log("\n--- MCP Joint ---")
-        if not centerline_points:
-            centerline_points.append(Point3d(current_pos))
+        add_start_point_if_first()
         mcp_brep = create_sphere(current_pos, mcp_radius, tolerance)
         if mcp_brep:
             components.append(mcp_brep)
@@ -166,9 +171,12 @@ def create_finger_model(
         else:
             log("ERROR: Failed to create MCP joint")
             return None, None, None
-        
+    
+    # --- PROXIMAL PHALANX (tapered cylinder) ---
+    proximal_end = current_pos + current_dir * params.proximal_len
+    if params.includes_segment("proximal"):
         log("\n--- Proximal Phalanx ---")
-        proximal_end = current_pos + current_dir * params.proximal_len
+        add_start_point_if_first()
         prox_line = Line(current_pos, proximal_end)
         prox_brep = create_tapered_cylinder(prox_line, mcp_radius, pip_radius, tolerance)
         if prox_brep:
@@ -177,17 +185,16 @@ def create_finger_model(
         else:
             log("ERROR: Failed to create proximal phalanx")
             return None, None, None
-        current_pos = proximal_end
-        centerline_points.append(Point3d(current_pos))
+        centerline_points.append(Point3d(proximal_end))
+    current_pos = proximal_end
     
-    # --- PIP JOINT + MIDDLE PHALANX ---
-    if apply_pip_angle:
-        apply_flexion(params.pip_angle)
+    # --- PIP JOINT (sphere) ---
+    # Always apply PIP angle for correct positioning
+    apply_flexion(params.pip_angle)
     
     if params.includes_segment("pip"):
         log("\n--- PIP Joint ---")
-        if not centerline_points:
-            centerline_points.append(Point3d(current_pos))
+        add_start_point_if_first()
         pip_brep = create_sphere(current_pos, pip_radius, tolerance)
         if pip_brep:
             components.append(pip_brep)
@@ -195,9 +202,12 @@ def create_finger_model(
         else:
             log("ERROR: Failed to create PIP joint")
             return None, None, None
-        
+    
+    # --- MIDDLE PHALANX (tapered cylinder) ---
+    middle_end = current_pos + current_dir * params.middle_len
+    if params.includes_segment("middle"):
         log("\n--- Middle Phalanx ---")
-        middle_end = current_pos + current_dir * params.middle_len
+        add_start_point_if_first()
         mid_line = Line(current_pos, middle_end)
         mid_brep = create_tapered_cylinder(mid_line, pip_radius, dip_radius, tolerance)
         if mid_brep:
@@ -206,17 +216,16 @@ def create_finger_model(
         else:
             log("ERROR: Failed to create middle phalanx")
             return None, None, None
-        current_pos = middle_end
-        centerline_points.append(Point3d(current_pos))
+        centerline_points.append(Point3d(middle_end))
+    current_pos = middle_end
     
-    # --- DIP JOINT + DISTAL PHALANX ---
-    if apply_dip_angle:
-        apply_flexion(params.dip_angle)
+    # --- DIP JOINT (sphere) ---
+    # Always apply DIP angle for correct positioning
+    apply_flexion(params.dip_angle)
     
     if params.includes_segment("dip"):
         log("\n--- DIP Joint ---")
-        if not centerline_points:
-            centerline_points.append(Point3d(current_pos))
+        add_start_point_if_first()
         dip_brep = create_sphere(current_pos, dip_radius, tolerance)
         if dip_brep:
             components.append(dip_brep)
@@ -224,9 +233,12 @@ def create_finger_model(
         else:
             log("ERROR: Failed to create DIP joint")
             return None, None, None
-        
+    
+    # --- DISTAL PHALANX (tapered cylinder) ---
+    distal_end = current_pos + current_dir * params.distal_len
+    if params.includes_segment("distal"):
         log("\n--- Distal Phalanx ---")
-        distal_end = current_pos + current_dir * params.distal_len
+        add_start_point_if_first()
         dist_line = Line(current_pos, distal_end)
         dist_brep = create_tapered_cylinder(dist_line, dip_radius, tip_radius, tolerance)
         if dist_brep:
@@ -235,14 +247,13 @@ def create_finger_model(
         else:
             log("ERROR: Failed to create distal phalanx")
             return None, None, None
-        current_pos = distal_end
-        centerline_points.append(Point3d(current_pos))
+        centerline_points.append(Point3d(distal_end))
+    current_pos = distal_end
     
     # --- FINGERTIP (sphere) ---
     if params.includes_segment("tip"):
         log("\n--- Fingertip ---")
-        if not centerline_points:
-            centerline_points.append(Point3d(current_pos))
+        add_start_point_if_first()
         tip_brep = create_sphere(current_pos, tip_radius, tolerance)
         if tip_brep:
             components.append(tip_brep)
@@ -252,12 +263,16 @@ def create_finger_model(
             return None, None, None
     
     # Create centerline polyline
-    centerline = Polyline(centerline_points)
+    centerline = Polyline(centerline_points) if centerline_points else None
     log(f"\nCenterline: {len(centerline_points)} points")
     
     # Union all components
     log("\n--- Unioning Components ---")
     log(f"Component count: {len(components)}")
+    
+    if not components:
+        log("WARNING: No components to union")
+        return centerline, None, None
     
     finger_brep, success, method = robust_brep_union(components, tolerance, check_volumes=True)
     
@@ -266,7 +281,7 @@ def create_finger_model(
         return centerline, None, components if return_parts else None
     
     log(f"SUCCESS: Finger union complete via {method}")
-    log(f"Final finger volume: {finger_brep.GetVolume():.2f} mm³")
+    log(f"Final finger volume: {finger_brep.GetVolume():.2f} mm^3")
     log("=" * 60)
     
     return centerline, finger_brep, components if return_parts else None
