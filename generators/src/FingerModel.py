@@ -43,6 +43,11 @@ class FingerParams:
     pip_angle: float = 0.0
     dip_angle: float = 0.0
     
+    # Joint lateral angles (degrees) - positive = toward +Y (ulnar for right hand)
+    mcp_lateral: float = 0.0
+    pip_lateral: float = 0.0
+    dip_lateral: float = 0.0
+    
     # Metacarpal stub length (mm)
     metacarpal_len: float = 20.0
     
@@ -69,6 +74,91 @@ class FingerParams:
         return start_idx <= seg_idx <= end_idx
 
 
+def construct_next_joint_and_phalanx(
+    initial_plane: Plane,
+    phalanx_length: float,
+    lateral_degrees: float,
+    flexion_degrees: float,
+    joint_begin_radius: float,
+    joint_end_radius: float,
+    tolerance: float
+) -> Tuple[Plane, Line, rg.Brep, rg.Brep]:
+    """
+    Construct a joint sphere and phalanx cylinder from an initial plane.
+    
+    The plane's axes define the local coordinate system:
+    - X-axis: direction the phalanx extends
+    - Y-axis: flexion rotation axis (curl toward palm)
+    - Z-axis: lateral rotation axis (side-to-side deviation)
+    
+    Rotations are applied around the initial plane's axes (before any rotation),
+    with the rotation center at the initial plane's origin.
+    
+    Args:
+        initial_plane: Plane at joint center (origin) with orientation axes
+        phalanx_length: Length of the phalanx in mm
+        lateral_degrees: Lateral deviation angle (rotation around Z-axis)
+        flexion_degrees: Flexion angle (rotation around Y-axis)
+        joint_begin_radius: Radius at joint (start of phalanx)
+        joint_end_radius: Radius at end of phalanx
+        tolerance: Geometric tolerance for brep operations
+        
+    Returns:
+        (new_plane, new_line, joint_brep, phalanx_brep)
+        - new_plane: Plane at end of phalanx with updated orientation
+        - new_line: Centerline of the phalanx
+        - joint_brep: Sphere at joint center
+        - phalanx_brep: Tapered cylinder for phalanx
+    """
+    # Extract axes from initial plane (these remain fixed for rotation calculations)
+    origin = initial_plane.Origin
+    x_axis = initial_plane.XAxis
+    y_axis = initial_plane.YAxis
+    z_axis = initial_plane.ZAxis
+    
+    # Create the phalanx line starting at origin, extending along x-axis
+    phalanx_end = origin + x_axis * phalanx_length
+    new_line = Line(origin, phalanx_end)
+    
+    # Copy initial plane to new plane (will be rotated)
+    new_plane = Plane(initial_plane)
+    
+    # Apply flexion rotation (around initial Y-axis, centered at origin)
+    if flexion_degrees != 0:
+        flexion_xform = rg.Transform.Rotation(
+            math.radians(flexion_degrees), y_axis, origin
+        )
+        new_plane.Transform(flexion_xform)
+        # Transform the line's end point
+        end_pt = Point3d(new_line.To)
+        end_pt.Transform(flexion_xform)
+        new_line = Line(origin, end_pt)
+    
+    # Apply lateral rotation (around initial Z-axis, centered at origin)
+    if lateral_degrees != 0:
+        lateral_xform = rg.Transform.Rotation(
+            math.radians(lateral_degrees), z_axis, origin
+        )
+        new_plane.Transform(lateral_xform)
+        # Transform the line's end point
+        end_pt = Point3d(new_line.To)
+        end_pt.Transform(lateral_xform)
+        new_line = Line(origin, end_pt)
+    
+    # Move new_plane's origin to the end of the rotated line
+    new_plane.Origin = new_line.To
+    
+    # Create joint sphere at the line's start point (joint center)
+    joint_brep = create_sphere(new_line.From, joint_begin_radius, tolerance)
+    
+    # Create tapered phalanx cylinder
+    phalanx_brep = create_tapered_cylinder(
+        new_line, joint_begin_radius, joint_end_radius, tolerance
+    )
+    
+    return new_plane, new_line, joint_brep, phalanx_brep
+
+
 def create_finger_model(
     params: FingerParams,
     tolerance: Optional[float] = None,
@@ -79,6 +169,12 @@ def create_finger_model(
     
     Orientation: Finger along +X, palm faces -Z. Positive angles = flexion toward palm.
     Construction order: Metacarpal -> MCP -> Proximal -> PIP -> Middle -> DIP -> Distal -> Tip
+    
+    The current_plane tracks position and orientation through the finger:
+    - Origin: current joint/segment position
+    - X-axis: direction finger extends
+    - Y-axis: flexion rotation axis
+    - Z-axis: lateral rotation axis (palm normal)
     
     Position is always computed from origin through all segments, but geometry is only
     created for segments within start_at..end_at range. This ensures partial models
@@ -104,7 +200,8 @@ def create_finger_model(
     log(f"Joints - MCP:{params.mcp_circ}mm, PIP:{params.pip_circ}mm, DIP:{params.dip_circ}mm, Tip:{params.tip_circ}mm")
     log(f"Phalanges - Prox:{params.proximal_circ}mm, Mid:{params.middle_circ}mm, Dist:{params.distal_circ}mm")
     log(f"Lengths - Prox:{params.proximal_len}mm, Mid:{params.middle_len}mm, Dist:{params.distal_len}mm")
-    log(f"Angles - MCP:{params.mcp_angle}deg, PIP:{params.pip_angle}deg, DIP:{params.dip_angle}deg")
+    log(f"Flexion - MCP:{params.mcp_angle}deg, PIP:{params.pip_angle}deg, DIP:{params.dip_angle}deg")
+    log(f"Lateral - MCP:{params.mcp_lateral}deg, PIP:{params.pip_lateral}deg, DIP:{params.dip_lateral}deg")
     log(f"Metacarpal stub: {params.metacarpal_len}mm")
     log(f"Segment range: {params.start_at} -> {params.end_at}")
     if shell != 0:
@@ -122,32 +219,23 @@ def create_finger_model(
     components = []
     centerline_points = []
     
-    # Current position and direction (start at origin, along +X)
-    # Orientation: finger along +X, palm faces -Z, positive angles = flexion toward palm
-    current_pos = Point3d.Origin
-    current_dir = Vector3d.XAxis
-    
-    # Flexion rotation around +Y axis (curls finger toward -Z / palm)
-    def apply_flexion(angle_deg):
-        nonlocal current_dir
-        if angle_deg != 0:
-            rotation_xform = rg.Transform.Rotation(math.radians(angle_deg), Vector3d.YAxis, current_pos)
-            current_dir = Vector3d(current_dir)
-            current_dir.Transform(rotation_xform)
-            current_dir.Unitize()
-    
-    # Helper to check if this is the first rendered segment (for centerline start point)
-    def add_start_point_if_first():
+    # Helper to add start point on first rendered segment
+    def add_start_point_if_first(pt):
         if not centerline_points:
-            centerline_points.append(Point3d(current_pos))
+            centerline_points.append(Point3d(pt))
     
-    # --- METACARPAL STUB (cylinder) ---
-    metacarpal_end = current_pos + current_dir * params.metacarpal_len
+    # Initialize current_plane at origin
+    # X = finger direction, Y = flexion axis, Z = lateral axis (palm normal up)
+    current_plane = Plane(Point3d.Origin, Vector3d.XAxis, Vector3d.YAxis)
+    
+    # --- METACARPAL STUB (cylinder, no joint) ---
+    metacarpal_end = current_plane.Origin + current_plane.XAxis * params.metacarpal_len
     if params.includes_segment("metacarpal"):
         log("\n--- Metacarpal Stub ---")
-        add_start_point_if_first()
-        metacarpal_plane = Plane(current_pos, current_dir)
-        metacarpal_brep = create_cylinder(metacarpal_plane, mcp_radius, params.metacarpal_len, tolerance)
+        add_start_point_if_first(current_plane.Origin)
+        # Cylinder axis is the plane's normal, so create plane with XAxis as normal
+        metacarpal_axis_plane = Plane(current_plane.Origin, current_plane.XAxis)
+        metacarpal_brep = create_cylinder(metacarpal_axis_plane, mcp_radius, params.metacarpal_len, tolerance)
         if metacarpal_brep:
             components.append(metacarpal_brep)
             log(f"Metacarpal: length={params.metacarpal_len}mm, radius={mcp_radius:.2f}mm")
@@ -155,109 +243,117 @@ def create_finger_model(
             log("ERROR: Failed to create metacarpal stub")
             return None, None, None
         centerline_points.append(Point3d(metacarpal_end))
-    current_pos = metacarpal_end
     
-    # --- MCP JOINT (sphere) ---
-    # Always apply MCP angle for correct positioning
-    apply_flexion(params.mcp_angle)
+    # Move plane origin to end of metacarpal (MCP joint location)
+    current_plane.Origin = metacarpal_end
+    
+    # --- MCP JOINT + PROXIMAL PHALANX ---
+    log("\n--- MCP Joint + Proximal Phalanx ---")
+    new_plane, prox_line, mcp_brep, prox_brep = construct_next_joint_and_phalanx(
+        current_plane,
+        params.proximal_len,
+        params.mcp_lateral,
+        params.mcp_angle,
+        mcp_radius,
+        pip_radius,
+        tolerance
+    )
     
     if params.includes_segment("mcp"):
-        log("\n--- MCP Joint ---")
-        add_start_point_if_first()
-        mcp_brep = create_sphere(current_pos, mcp_radius, tolerance)
+        add_start_point_if_first(prox_line.From)
         if mcp_brep:
             components.append(mcp_brep)
-            log(f"MCP Joint: center={current_pos}, radius={mcp_radius:.2f}mm")
+            log(f"MCP Joint: center={prox_line.From}, radius={mcp_radius:.2f}mm")
         else:
             log("ERROR: Failed to create MCP joint")
             return None, None, None
     
-    # --- PROXIMAL PHALANX (tapered cylinder) ---
-    proximal_end = current_pos + current_dir * params.proximal_len
     if params.includes_segment("proximal"):
-        log("\n--- Proximal Phalanx ---")
-        add_start_point_if_first()
-        prox_line = Line(current_pos, proximal_end)
-        prox_brep = create_tapered_cylinder(prox_line, mcp_radius, pip_radius, tolerance)
+        add_start_point_if_first(prox_line.From)
         if prox_brep:
             components.append(prox_brep)
             log(f"Proximal Phalanx: length={params.proximal_len}mm, r1={mcp_radius:.2f}, r2={pip_radius:.2f}")
         else:
             log("ERROR: Failed to create proximal phalanx")
             return None, None, None
-        centerline_points.append(Point3d(proximal_end))
-    current_pos = proximal_end
+        centerline_points.append(Point3d(prox_line.To))
     
-    # --- PIP JOINT (sphere) ---
-    # Always apply PIP angle for correct positioning
-    apply_flexion(params.pip_angle)
+    current_plane = new_plane
+    
+    # --- PIP JOINT + MIDDLE PHALANX ---
+    log("\n--- PIP Joint + Middle Phalanx ---")
+    new_plane, mid_line, pip_brep, mid_brep = construct_next_joint_and_phalanx(
+        current_plane,
+        params.middle_len,
+        params.pip_lateral,
+        params.pip_angle,
+        pip_radius,
+        dip_radius,
+        tolerance
+    )
     
     if params.includes_segment("pip"):
-        log("\n--- PIP Joint ---")
-        add_start_point_if_first()
-        pip_brep = create_sphere(current_pos, pip_radius, tolerance)
+        add_start_point_if_first(mid_line.From)
         if pip_brep:
             components.append(pip_brep)
-            log(f"PIP Joint: center={current_pos}, radius={pip_radius:.2f}mm")
+            log(f"PIP Joint: center={mid_line.From}, radius={pip_radius:.2f}mm")
         else:
             log("ERROR: Failed to create PIP joint")
             return None, None, None
     
-    # --- MIDDLE PHALANX (tapered cylinder) ---
-    middle_end = current_pos + current_dir * params.middle_len
     if params.includes_segment("middle"):
-        log("\n--- Middle Phalanx ---")
-        add_start_point_if_first()
-        mid_line = Line(current_pos, middle_end)
-        mid_brep = create_tapered_cylinder(mid_line, pip_radius, dip_radius, tolerance)
+        add_start_point_if_first(mid_line.From)
         if mid_brep:
             components.append(mid_brep)
             log(f"Middle Phalanx: length={params.middle_len}mm, r1={pip_radius:.2f}, r2={dip_radius:.2f}")
         else:
             log("ERROR: Failed to create middle phalanx")
             return None, None, None
-        centerline_points.append(Point3d(middle_end))
-    current_pos = middle_end
+        centerline_points.append(Point3d(mid_line.To))
     
-    # --- DIP JOINT (sphere) ---
-    # Always apply DIP angle for correct positioning
-    apply_flexion(params.dip_angle)
+    current_plane = new_plane
+    
+    # --- DIP JOINT + DISTAL PHALANX ---
+    log("\n--- DIP Joint + Distal Phalanx ---")
+    new_plane, dist_line, dip_brep, dist_brep = construct_next_joint_and_phalanx(
+        current_plane,
+        params.distal_len,
+        params.dip_lateral,
+        params.dip_angle,
+        dip_radius,
+        tip_radius,
+        tolerance
+    )
     
     if params.includes_segment("dip"):
-        log("\n--- DIP Joint ---")
-        add_start_point_if_first()
-        dip_brep = create_sphere(current_pos, dip_radius, tolerance)
+        add_start_point_if_first(dist_line.From)
         if dip_brep:
             components.append(dip_brep)
-            log(f"DIP Joint: center={current_pos}, radius={dip_radius:.2f}mm")
+            log(f"DIP Joint: center={dist_line.From}, radius={dip_radius:.2f}mm")
         else:
             log("ERROR: Failed to create DIP joint")
             return None, None, None
     
-    # --- DISTAL PHALANX (tapered cylinder) ---
-    distal_end = current_pos + current_dir * params.distal_len
     if params.includes_segment("distal"):
-        log("\n--- Distal Phalanx ---")
-        add_start_point_if_first()
-        dist_line = Line(current_pos, distal_end)
-        dist_brep = create_tapered_cylinder(dist_line, dip_radius, tip_radius, tolerance)
+        add_start_point_if_first(dist_line.From)
         if dist_brep:
             components.append(dist_brep)
             log(f"Distal Phalanx: length={params.distal_len}mm, r1={dip_radius:.2f}, r2={tip_radius:.2f}")
         else:
             log("ERROR: Failed to create distal phalanx")
             return None, None, None
-        centerline_points.append(Point3d(distal_end))
-    current_pos = distal_end
+        centerline_points.append(Point3d(dist_line.To))
     
-    # --- FINGERTIP (sphere) ---
+    current_plane = new_plane
+    
+    # --- FINGERTIP (sphere at final position) ---
     if params.includes_segment("tip"):
         log("\n--- Fingertip ---")
-        add_start_point_if_first()
-        tip_brep = create_sphere(current_pos, tip_radius, tolerance)
+        add_start_point_if_first(current_plane.Origin)
+        tip_brep = create_sphere(current_plane.Origin, tip_radius, tolerance)
         if tip_brep:
             components.append(tip_brep)
-            log(f"Fingertip: center={current_pos}, radius={tip_radius:.2f}mm")
+            log(f"Fingertip: center={current_plane.Origin}, radius={tip_radius:.2f}mm")
         else:
             log("ERROR: Failed to create fingertip")
             return None, None, None
