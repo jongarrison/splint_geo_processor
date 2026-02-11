@@ -232,26 +232,25 @@ def create_cylinder(base_plane, radius, height, tolerance=None):
 
 def create_bulged_cylinder(center_line, radius_start, radius_mid, radius_end, tolerance=None):
     """
-    Create a solid tube with a bulge at the midpoint, with cylindrical ends.
+    Create a solid tube with a bulge (or waist) at the midpoint using surface of revolution.
     
-    Uses 5-hoop lofting with doubled hoops at each end to force tangent alignment,
-    ensuring clean joins with adjacent spheres.
+    Uses a quadratic bezier curve as the profile, revolved around the axis.
+    This approach is more robust than lofting circles.
     
-    Hoop layout:
-        begin  begin+e   middle   end-e    end
-          |       |        |        |       |
-          O-------O--------O--------O-------O
-          r1      r1      r_mid     r2      r2
+    The profile passes through three points:
+        - Start: (0, radius_start)
+        - Mid:   (length/2, radius_mid)  
+        - End:   (length, radius_end)
     
     Args:
         center_line: Line defining the tube axis
         radius_start: Radius at start of line
-        radius_mid: Radius at midpoint (bulge)
+        radius_mid: Radius at midpoint (can be larger or smaller than ends)
         radius_end: Radius at end of line
         tolerance: Optional tolerance (uses doc tolerance if None)
     
     Returns:
-        Brep: Capped bulged tube, or None if creation fails
+        Brep: Capped tube, or None if creation fails
     """
     try:
         if tolerance is None or tolerance <= 0:
@@ -268,71 +267,68 @@ def create_bulged_cylinder(center_line, radius_start, radius_mid, radius_end, to
         
         length = center_line.Length
         
-        # Calculate epsilon for doubled hoops (5% of length, capped at 1mm)
-        epsilon = min(length * 0.05, 1.0)
-        
-        # Ensure epsilon is not too large relative to length
-        if epsilon * 4 >= length:
-            epsilon = length * 0.1  # fallback to 10% if tube is very short
-        
         # Get line endpoints and direction
         pt_start = center_line.From
         pt_end = center_line.To
         axis_vector = rg.Vector3d(pt_end - pt_start)
         axis_vector.Unitize()
         
-        # Calculate hoop positions along the line
-        # t values: 0, epsilon/length, 0.5, 1-epsilon/length, 1
-        t_values = [
-            0.0,
-            epsilon / length,
-            0.5,
-            1.0 - epsilon / length,
-            1.0
-        ]
+        # Find a perpendicular vector to the axis (same logic as tapered cylinder)
+        if abs(axis_vector.Z) < 0.9:
+            perp = rg.Vector3d.CrossProduct(axis_vector, rg.Vector3d.ZAxis)
+        else:
+            perp = rg.Vector3d.CrossProduct(axis_vector, rg.Vector3d.XAxis)
+        perp.Unitize()
         
-        # Corresponding radii
-        radii = [
-            radius_start,
-            radius_start,  # doubled at start for tangent control
-            radius_mid,
-            radius_end,    # doubled at end for tangent control
-            radius_end
-        ]
+        # Create profile points in the axis-perpendicular plane
+        # Points are: start (at radius_start), mid (at radius_mid), end (at radius_end)
+        profile_start = pt_start + perp * radius_start
+        profile_mid = pt_start + axis_vector * (length / 2.0) + perp * radius_mid
+        profile_end = pt_end + perp * radius_end
         
-        # Create circles at each hoop position
-        curves = []
-        for t, r in zip(t_values, radii):
-            # Point along centerline
-            pt = pt_start + axis_vector * (t * length)
-            # Plane perpendicular to axis at this point
-            plane = rg.Plane(pt, axis_vector)
-            # Circle at this plane
-            circle = rg.Circle(plane, r)
-            curves.append(circle.ToNurbsCurve())
-        
-        # Loft the circles
-        loft_type = rg.LoftType.Normal
-        breps = rg.Brep.CreateFromLoft(
-            curves,
-            rg.Point3d.Unset,  # no start point
-            rg.Point3d.Unset,  # no end point
-            loft_type,
-            False  # not closed
+        # Create a quadratic bezier curve through the three points
+        # For a quadratic bezier passing through start, mid, end:
+        # We need to compute the control point
+        # B(0.5) = 0.25*P0 + 0.5*P1 + 0.25*P2 = mid_point
+        # So: P1 = 2*mid_point - 0.5*P0 - 0.5*P2
+        control_pt = rg.Point3d(
+            2.0 * profile_mid.X - 0.5 * profile_start.X - 0.5 * profile_end.X,
+            2.0 * profile_mid.Y - 0.5 * profile_start.Y - 0.5 * profile_end.Y,
+            2.0 * profile_mid.Z - 0.5 * profile_start.Z - 0.5 * profile_end.Z
         )
         
-        if not breps or len(breps) == 0:
-            log("ERROR: Loft failed to create brep")
+        # Create the bezier curve (degree 2 = quadratic)
+        bezier_points = [profile_start, control_pt, profile_end]
+        profile_curve = rg.NurbsCurve.Create(False, 2, bezier_points)
+        
+        if not profile_curve:
+            log("ERROR: Failed to create bezier profile curve")
             return None
         
-        brep = breps[0]
+        # Create revolution surface around the center line
+        rev_surface = rg.RevSurface.Create(
+            profile_curve,
+            center_line,
+            0.0,
+            2.0 * math.pi
+        )
         
-        # Cap planar holes
+        if not rev_surface:
+            log("ERROR: Failed to create revolution surface for bulged cylinder")
+            return None
+        
+        # Convert to brep
+        brep = rev_surface.ToBrep()
+        if not brep:
+            log("ERROR: Failed to convert revolution surface to brep")
+            return None
+        
+        # Cap both ends
         capped = brep.CapPlanarHoles(tolerance)
         
         if not brep.IsSolid:
-            # Try manual capping if auto-cap failed
-            log("  Bulged cylinder: trying manual planar caps...")
+            # Try manual capping
+            log("  Bulged cylinder (rev): trying manual planar caps...")
             start_plane = rg.Plane(pt_start, axis_vector)
             start_circle = rg.Circle(start_plane, radius_start)
             start_cap = rg.Brep.CreatePlanarBreps([start_circle.ToNurbsCurve()], tolerance)
@@ -346,7 +342,7 @@ def create_bulged_cylinder(center_line, radius_start, radius_mid, radius_end, to
                 joined = rg.Brep.JoinBreps(all_breps, tolerance)
                 if joined and len(joined) > 0:
                     brep = joined[0]
-                    log("  Joined loft surface with planar caps")
+                    log("  Joined revolution surface with planar caps")
         
         # Final validation
         if brep.IsSolid:
@@ -360,7 +356,7 @@ def create_bulged_cylinder(center_line, radius_start, radius_mid, radius_end, to
             
             if brep.IsSolid and brep.IsManifold:
                 naked_edges = sum(1 for e in brep.Edges if e.Valence == rg.EdgeAdjacency.Naked)
-                log("Created bulged cylinder: r1={:.3f}, r_mid={:.3f}, r2={:.3f}, length={:.3f}, faces={}, naked={}".format(
+                log("Created bulged cylinder (revolution): r1={:.3f}, r_mid={:.3f}, r2={:.3f}, length={:.3f}, faces={}, naked={}".format(
                     radius_start, radius_mid, radius_end, length, brep.Faces.Count, naked_edges))
                 return brep
             else:
