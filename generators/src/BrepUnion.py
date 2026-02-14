@@ -16,6 +16,14 @@ import Rhino.Geometry as rg
 import scriptcontext as sc
 from splintcommon import log
 
+class BrepUnionError(Exception):
+    """Raised when brep union operation fails after all strategies."""
+    pass
+
+
+class InvalidBrepError(Exception):
+    """Raised when input brep is None or invalid."""
+    pass
 def get_brep_volume(brep):
     """Get brep volume, handling different return formats"""
     try:
@@ -203,19 +211,26 @@ def robust_brep_union(breps, base_tolerance=None, check_volumes=True):
     if not isinstance(breps, list):
         breps = [breps]
     
+    if len(breps) == 0:
+        raise InvalidBrepError("No breps provided to union")
+    
     # Filter out None/invalid breps
     valid_breps = []
+    invalid_indices = []
     for i, brep in enumerate(breps):
         if brep is None:
             log("WARNING: Brep {} is None - skipping".format(i))
+            invalid_indices.append(i)
         elif not brep.IsValid:
             log("WARNING: Brep {} is invalid - skipping".format(i))
+            invalid_indices.append(i)
         else:
             valid_breps.append(brep)
     
     if len(valid_breps) == 0:
-        log("ERROR: No valid breps provided (all None or invalid)")
-        return None, False, "None"
+        raise InvalidBrepError(
+            "No valid breps provided (all None or invalid). Invalid indices: {}".format(invalid_indices)
+        )
     
     if len(valid_breps) != len(breps):
         log("WARNING: Filtered {} invalid breps, {} valid remain".format(len(breps) - len(valid_breps), len(valid_breps)))
@@ -524,4 +539,7 @@ def robust_brep_union(breps, base_tolerance=None, check_volumes=True):
     log("  3. Consider manual geometry repair in Rhino")
     log("=" * 60)
     
-    return None, False, "None"
+    raise BrepUnionError(
+        "Failed to union {} breps after all strategies. "
+        "Input breps may have geometry issues or insufficient overlap.".format(len(breps))
+    )

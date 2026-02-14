@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "start:prod": "node -r dotenv/config dist/index.js dotenv_config_path=.env.production",
-    "dev": "tsx src/index.ts",
+    "dev": "tsx --env-file=.env.local src/index.ts",
     "dev:prod": "tsx --env-file=.env.production src/index.ts"
   },
   "dependencies": {

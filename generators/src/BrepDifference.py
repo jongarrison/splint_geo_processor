@@ -9,6 +9,19 @@ import Rhino.Geometry as rg
 import scriptcontext as sc
 from splintcommon import log
 
+class BrepDifferenceError(Exception):
+    """Raised when brep difference operation fails after all strategies."""
+    pass
+
+
+class InvalidBrepError(Exception):
+    """Raised when input brep is None or invalid."""
+    pass
+
+
+class NoIntersectionError(Exception):
+    """Raised when subtrahend does not intersect minuend."""
+    pass
 
 def get_brep_volume(brep):
     """Get brep volume, handling different return formats"""
@@ -28,7 +41,26 @@ def get_brep_volume(brep):
     return None
 
 
-def validate_difference_result(result_brep, minuend_brep, subtrahend_brep, tolerance_pct=10.0):
+def compute_intersection_volume(brep_a, brep_b, tolerance):
+    """
+    Compute the volume of intersection between two breps.
+    Returns 0 if no intersection or on error.
+    """
+    try:
+        intersection = rg.Brep.CreateBooleanIntersection(brep_a, brep_b, tolerance)
+        if intersection and len(intersection) > 0:
+            total_vol = 0.0
+            for piece in intersection:
+                vol = get_brep_volume(piece)
+                if vol:
+                    total_vol += vol
+            return total_vol
+    except Exception as e:
+        log("  Intersection volume calc failed: {}".format(str(e)))
+    return 0.0
+
+
+def validate_difference_result(result_brep, minuend_brep, subtrahend_brep, intersection_vol=None, tolerance_pct=10.0):
     """
     Validate boolean difference result quality.
     
@@ -36,6 +68,7 @@ def validate_difference_result(result_brep, minuend_brep, subtrahend_brep, toler
         result_brep: The result of minuend - subtrahend
         minuend_brep: Original brep being subtracted from (shell)
         subtrahend_brep: Brep being subtracted (inner)
+        intersection_vol: Pre-computed intersection volume (optional)
         tolerance_pct: Allowed volume deviation percentage
     
     Returns:
@@ -56,18 +89,19 @@ def validate_difference_result(result_brep, minuend_brep, subtrahend_brep, toler
     if naked_count > 0:
         issues.append("NakedEdges={}".format(naked_count))
     
-    # Volume check: result should be less than minuend
+    # Volume checks
     result_vol = get_brep_volume(result_brep)
     minuend_vol = get_brep_volume(minuend_brep)
-    subtrahend_vol = get_brep_volume(subtrahend_brep)
     
     if result_vol and minuend_vol:
-        if result_vol >= minuend_vol:
-            issues.append("ResultNotSmaller")
+        # Result should be smaller than minuend (something was subtracted)
+        vol_diff = minuend_vol - result_vol
+        if vol_diff < 0.001:  # Less than 0.001 mm^3 removed
+            issues.append("NothingSubtracted")
         
-        # Expected: minuend_vol - subtrahend_vol (approximately)
-        if subtrahend_vol:
-            expected_vol = minuend_vol - subtrahend_vol
+        # If we have intersection volume, verify against expected
+        if intersection_vol is not None and intersection_vol > 0:
+            expected_vol = minuend_vol - intersection_vol
             if expected_vol > 0:
                 volume_ratio = result_vol / expected_vol
                 if volume_ratio < (1.0 - tolerance_pct / 100.0):
@@ -132,17 +166,13 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
     
     # Validate inputs
     if minuend is None:
-        log("ERROR: Minuend brep is None")
-        return None, False, "None"
+        raise InvalidBrepError("Minuend brep is None")
     if subtrahend is None:
-        log("ERROR: Subtrahend brep is None")
-        return None, False, "None"
+        raise InvalidBrepError("Subtrahend brep is None")
     if not minuend.IsValid:
-        log("ERROR: Minuend brep is invalid")
-        return None, False, "InvalidInput"
+        raise InvalidBrepError("Minuend brep is invalid (IsValid=False)")
     if not subtrahend.IsValid:
-        log("ERROR: Subtrahend brep is invalid")
-        return None, False, "InvalidInput"
+        raise InvalidBrepError("Subtrahend brep is invalid (IsValid=False)")
     
     # Use document tolerance if not specified
     if base_tolerance is None or base_tolerance <= 0:
@@ -154,10 +184,23 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
     
     minuend_vol = get_brep_volume(minuend)
     subtrahend_vol = get_brep_volume(subtrahend)
-    log("Minuend (shell) volume: {:.3f}".format(minuend_vol if minuend_vol else 0))
-    log("Subtrahend (inner) volume: {:.3f}".format(subtrahend_vol if subtrahend_vol else 0))
-    if minuend_vol and subtrahend_vol:
-        log("Expected result volume: ~{:.3f}".format(minuend_vol - subtrahend_vol))
+    log("Minuend volume: {:.3f}".format(minuend_vol if minuend_vol else 0))
+    log("Subtrahend volume: {:.3f}".format(subtrahend_vol if subtrahend_vol else 0))
+    
+    # Compute intersection volume - this is what actually gets subtracted
+    intersection_vol = compute_intersection_volume(minuend, subtrahend, base_tolerance)
+    log("Intersection volume: {:.3f}".format(intersection_vol))
+    
+    if intersection_vol < 0.001:
+        log("ERROR: No intersection between minuend and subtrahend!")
+        log("  The subtrahend does not overlap the minuend - nothing to subtract.")
+        raise NoIntersectionError(
+            "Subtrahend does not intersect minuend (intersection volume < 0.001 mm^3). "
+            "Check that both breps occupy overlapping regions."
+        )
+    
+    expected_result_vol = minuend_vol - intersection_vol
+    log("Expected result volume: ~{:.3f}  (minuend - intersection)".format(expected_result_vol))
     
     # Track best result across all attempts
     best_result = None
@@ -173,7 +216,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
     if result:
         result_vol = get_brep_volume(result)
         log("Result volume: {:.3f}".format(result_vol if result_vol else 0))
-        is_valid, issues = validate_difference_result(result, minuend, subtrahend)
+        is_valid, issues = validate_difference_result(result, minuend, subtrahend, intersection_vol)
         if is_valid:
             log("SUCCESS - Clean boolean difference")
             return result, True, "Difference(tol={:.6f})".format(base_tolerance)
@@ -194,7 +237,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
     if result:
         result_vol = get_brep_volume(result)
         log("Result volume: {:.3f}".format(result_vol if result_vol else 0))
-        is_valid, issues = validate_difference_result(result, minuend, subtrahend)
+        is_valid, issues = validate_difference_result(result, minuend, subtrahend, intersection_vol)
         if is_valid:
             log("SUCCESS - List-based difference")
             return result, True, "DifferenceList(tol={:.6f})".format(base_tolerance)
@@ -219,7 +262,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
         log("  Trying tolerance: {:.6f}".format(tol))
         result = attempt_boolean_difference(minuend, subtrahend, tol)
         if result:
-            is_valid, issues = validate_difference_result(result, minuend, subtrahend, tolerance_pct=15.0)
+            is_valid, issues = validate_difference_result(result, minuend, subtrahend, intersection_vol, tolerance_pct=15.0)
             if is_valid:
                 log("SUCCESS - Difference at higher tolerance")
                 return result, True, "Difference(tol={:.6f})".format(tol)
@@ -251,7 +294,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
                 
                 result = attempt_boolean_difference(minuend, jiggled_subtrahend, base_tolerance)
                 if result:
-                    is_valid, issues = validate_difference_result(result, minuend, subtrahend, tolerance_pct=15.0)
+                    is_valid, issues = validate_difference_result(result, minuend, subtrahend, intersection_vol, tolerance_pct=15.0)
                     if is_valid:
                         log("SUCCESS - Jiggle {:.4f}mm worked".format(offset_dist))
                         return result, True, "Jiggled({:.4f}mm)".format(offset_dist)
@@ -281,7 +324,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
         
         result = attempt_boolean_difference(fixed_minuend, fixed_subtrahend, base_tolerance * 10)
         if result:
-            is_valid, issues = validate_difference_result(result, minuend, subtrahend, tolerance_pct=20.0)
+            is_valid, issues = validate_difference_result(result, minuend, subtrahend, intersection_vol, tolerance_pct=20.0)
             if is_valid:
                 log("SUCCESS - Repaired inputs worked")
                 return result, True, "Repaired"
@@ -311,4 +354,9 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
     log("FAILED - All strategies exhausted")
     log("=" * 60)
     
-    return None, False, "AllFailed"
+    raise BrepDifferenceError(
+        "Failed to compute boolean difference after all strategies. "
+        "Minuend vol={:.1f}, Subtrahend vol={:.1f}, Intersection vol={:.1f}".format(
+            minuend_vol or 0, subtrahend_vol or 0, intersection_vol
+        )
+    )

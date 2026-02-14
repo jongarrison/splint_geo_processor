@@ -1,0 +1,11 @@
+{
+  "id": "cmllag8u90003jp2bss280e7q",
+  "algorithm": "InfinityFlex",
+  "params": "{\"interPhalanxDistanceMM\":30,\"rootCircumferenceMM\":51,\"midCircumferenceMM\":55,\"tipCircumferenceMM\":57,\"flexionDegrees\":5}",
+  "metadata": {
+    "GeometryName": "InfinityFlex",
+    "CustomerNote": null,
+    "CustomerID": "if1",
+    "objectID": "XWZV"
+  }
+}

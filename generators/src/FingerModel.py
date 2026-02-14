@@ -12,11 +12,26 @@ from dataclasses import dataclass
 from typing import Optional, List, Tuple
 from splintcommon import log
 
+class FingerModelError(Exception):
+    """Raised when finger model creation fails."""
+    pass
+
+
+class GeometryCreationError(Exception):
+    """Raised when a geometry primitive (sphere, cylinder, etc.) fails to create."""
+    pass
+
+
+class TrimError(Exception):
+    """Raised when trimming operation fails."""
+    pass
 import BrepGeneration
 reload(BrepGeneration)
 from BrepGeneration import create_tapered_cylinder, create_bulged_cylinder, create_sphere, create_cylinder
 
-from BrepUnion import robust_brep_union
+import BrepUnion
+reload(BrepUnion)
+from BrepUnion import robust_brep_union, BrepUnionError, InvalidBrepError
 
 
 # Segment names in order from base to tip (joints and phalanges as separate segments)
@@ -276,6 +291,10 @@ def trim_finger_model(
                     unioned = rg.Brep.CreateBooleanUnion(kept_pieces, tolerance)
                     if unioned and len(unioned) > 0:
                         trimmed_brep = unioned[0]
+                    else:
+                        raise TrimError(
+                            f"Failed to union {len(kept_pieces)} pieces after trim_start split"
+                        )
                 
                 # Cap the planar hole created by the split
                 capped = trimmed_brep.CapPlanarHoles(tolerance)
@@ -285,9 +304,13 @@ def trim_finger_model(
                 else:
                     log(f"Trim start applied (cap failed), kept {len(kept_pieces)} piece(s)")
             else:
-                log("WARNING: No pieces kept after trim_start split")
+                raise TrimError(
+                    f"No geometry pieces on positive side of trim_start plane at {params.trim_start}"
+                )
         else:
-            log("WARNING: Brep split for trim_start produced no result")
+            raise TrimError(
+                f"Brep.Split() returned no result for trim_start at {params.trim_start}"
+            )
     
     # Process trim_end (remove material after this plane)
     if params.trim_end is not None:
@@ -318,6 +341,10 @@ def trim_finger_model(
                     unioned = rg.Brep.CreateBooleanUnion(kept_pieces, tolerance)
                     if unioned and len(unioned) > 0:
                         trimmed_brep = unioned[0]
+                    else:
+                        raise TrimError(
+                            f"Failed to union {len(kept_pieces)} pieces after trim_end split"
+                        )
                 
                 # Cap the planar hole created by the split
                 capped = trimmed_brep.CapPlanarHoles(tolerance)
@@ -327,9 +354,13 @@ def trim_finger_model(
                 else:
                     log(f"Trim end applied (cap failed), kept {len(kept_pieces)} piece(s)")
             else:
-                log("WARNING: No pieces kept after trim_end split")
+                raise TrimError(
+                    f"No geometry pieces on negative side of trim_end plane at {params.trim_end}"
+                )
         else:
-            log("WARNING: Brep split for trim_end produced no result")
+            raise TrimError(
+                f"Brep.Split() returned no result for trim_end at {params.trim_end}"
+            )
     
     # Trim the centerline at the same points
     trimmed_centerline = centerline
@@ -596,8 +627,9 @@ def create_finger_model(
             components.append(metacarpal_brep)
             log(f"Metacarpal: length={params.metacarpal_len}mm, radius={mcp_radius:.2f}mm")
         else:
-            log("ERROR: Failed to create metacarpal stub")
-            return None, None, None
+            raise GeometryCreationError(
+                f"Failed to create metacarpal stub (len={params.metacarpal_len}, r={mcp_radius:.2f})"
+            )
         centerline_points.append(Point3d(metacarpal_end))
     
     # Move plane origin to end of metacarpal (MCP joint location)
@@ -634,8 +666,9 @@ def create_finger_model(
             components.append(mcp_brep)
             log(f"MCP Joint: center={prox_line.From}, radius={mcp_radius:.2f}mm")
         else:
-            log("ERROR: Failed to create MCP joint")
-            return None, None, None
+            raise GeometryCreationError(
+                f"Failed to create MCP joint sphere (center={prox_line.From}, r={mcp_radius:.2f})"
+            )
     
     if params.includes_segment("proximal"):
         add_start_point_if_first(prox_line.From)
@@ -643,8 +676,9 @@ def create_finger_model(
             components.append(prox_brep)
             log(f"Proximal Phalanx: length={params.proximal_len}mm, r1={mcp_radius:.2f}, r2={pip_radius:.2f}")
         else:
-            log("ERROR: Failed to create proximal phalanx")
-            return None, None, None
+            raise GeometryCreationError(
+                f"Failed to create proximal phalanx (len={params.proximal_len}, r1={mcp_radius:.2f}, r2={pip_radius:.2f})"
+            )
         centerline_points.append(Point3d(prox_line.To))
     
     current_plane = new_plane
@@ -680,8 +714,9 @@ def create_finger_model(
             components.append(pip_brep)
             log(f"PIP Joint: center={mid_line.From}, radius={pip_radius:.2f}mm")
         else:
-            log("ERROR: Failed to create PIP joint")
-            return None, None, None
+            raise GeometryCreationError(
+                f"Failed to create PIP joint sphere (center={mid_line.From}, r={pip_radius:.2f})"
+            )
     
     if params.includes_segment("middle"):
         add_start_point_if_first(mid_line.From)
@@ -689,8 +724,9 @@ def create_finger_model(
             components.append(mid_brep)
             log(f"Middle Phalanx: length={params.middle_len}mm, r1={pip_radius:.2f}, r2={dip_radius:.2f}")
         else:
-            log("ERROR: Failed to create middle phalanx")
-            return None, None, None
+            raise GeometryCreationError(
+                f"Failed to create middle phalanx (len={params.middle_len}, r1={pip_radius:.2f}, r2={dip_radius:.2f})"
+            )
         centerline_points.append(Point3d(mid_line.To))
     
     current_plane = new_plane
@@ -726,8 +762,9 @@ def create_finger_model(
             components.append(dip_brep)
             log(f"DIP Joint: center={dist_line.From}, radius={dip_radius:.2f}mm")
         else:
-            log("ERROR: Failed to create DIP joint")
-            return None, None, None
+            raise GeometryCreationError(
+                f"Failed to create DIP joint sphere (center={dist_line.From}, r={dip_radius:.2f})"
+            )
     
     if params.includes_segment("distal"):
         add_start_point_if_first(dist_line.From)
@@ -735,8 +772,9 @@ def create_finger_model(
             components.append(dist_brep)
             log(f"Distal Phalanx: length={params.distal_len}mm, r1={dip_radius:.2f}, r2={tip_radius:.2f}")
         else:
-            log("ERROR: Failed to create distal phalanx")
-            return None, None, None
+            raise GeometryCreationError(
+                f"Failed to create distal phalanx (len={params.distal_len}, r1={dip_radius:.2f}, r2={tip_radius:.2f})"
+            )
         centerline_points.append(Point3d(dist_line.To))
     
     current_plane = new_plane
@@ -752,8 +790,9 @@ def create_finger_model(
             components.append(tip_brep)
             log(f"Fingertip: center={current_plane.Origin}, radius={tip_radius:.2f}mm")
         else:
-            log("ERROR: Failed to create fingertip")
-            return None, None, None
+            raise GeometryCreationError(
+                f"Failed to create fingertip sphere (center={current_plane.Origin}, r={tip_radius:.2f})"
+            )
     
     # Create centerline polyline
     centerline = Polyline(centerline_points) if centerline_points else None
@@ -764,24 +803,19 @@ def create_finger_model(
     log(f"Component count: {len(components)}")
     
     if not components:
-        log("WARNING: No components to union")
-        return centerline, None, None, joint_positions
+        raise FingerModelError(
+            f"No components generated for segment range {params.start_at} to {params.end_at}"
+        )
     
+    # robust_brep_union will raise BrepUnionError on failure
     finger_brep, success, method = robust_brep_union(components, tolerance, check_volumes=True)
-    
-    if not success or finger_brep is None:
-        log(f"ERROR: Failed to union finger components (method attempted: {method})")
-        return centerline, None, components if return_parts else None, joint_positions
     
     log(f"SUCCESS: Finger union complete via {method}")
     log(f"Final finger volume: {finger_brep.GetVolume():.2f} mm^3")
     
-    # Apply trimming if specified
+    # Apply trimming if specified (trim_finger_model raises TrimError on failure)
     if params.trim_start is not None or params.trim_end is not None:
         finger_brep, centerline = trim_finger_model(finger_brep, centerline, params, joint_positions, tolerance)
-        if finger_brep is None:
-            log("ERROR: Trimming failed")
-            return None, None, components if return_parts else None, joint_positions
     
     log("=" * 60)
     

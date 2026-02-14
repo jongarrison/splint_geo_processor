@@ -105,11 +105,12 @@ def load_oldest_json_job_file(directory, algorithm_name):
     try:
         # Read and parse the JSON file
         with open(oldest_file, 'r', encoding='utf-8') as file:
-            data = json.load(file)
+            raw_data = file.read()
+            data = json.loads(raw_data)
         
         data["jobname"] = oldest_file.stem #name
         log("Successfully loaded JSON data.")
-        return data
+        return data, raw_data
     
     except json.JSONDecodeError as e:
         log(f"Error parsing JSON file {oldest_file.name}: {e}")
@@ -145,15 +146,17 @@ def get_next_geo_job(algorithm_name):
     try:
         log(f"get_next_geo_job {algorithm_name=}")
         # Process the oldest JSON file
-        json_data = load_oldest_json_job_file(splint_inbox_dir, algorithm_name)
+        json_data, raw_data = load_oldest_json_job_file(splint_inbox_dir, algorithm_name)
 
-        return extract_server_params_data(json_data)
+        return extract_server_params_data(json_data), raw_data
     except Exception as e:
         log(f"Exception in get_next_geo_job: {traceback.format_exc()}")
         return None
 
 def load_dev_data(geo_algorithm_name):
     dev_data_path = Path.joinpath(get_generator_filepath(), f"{geo_algorithm_name}.json")
+    raw_data = None
+
     log(f"Loading dev data from {dev_data_path}")
     if not dev_data_path.exists():
         log(f"Dev data file does not exist: {dev_data_path}")
@@ -161,17 +164,53 @@ def load_dev_data(geo_algorithm_name):
 
     try:
         with open(dev_data_path, 'r', encoding='utf-8') as file:
-            data = json.load(file)
+            raw_data = file.read()
+            data = json.loads(raw_data)
             data["jobname"] = dev_data_path.stem #name
 
             log(f"Loaded dev data from {dev_data_path}")
-            return extract_server_params_data(data)
+            return extract_server_params_data(data), raw_data
     except json.JSONDecodeError as e:
         log(f"Error parsing dev data JSON file {dev_data_path}: {e}")
         raise e
     except Exception as e:
         log(f"Error reading dev data file {dev_data_path}: {e}")
         raise e
+
+
+
+def load_job_data(is_production_mode, geo_algorithm_name):
+    jobname = "LocalDev"
+    objectID = "NONE"
+    job_data = None
+    root_filename_out = None
+
+
+    output_dir_out = splint_outbox_dir
+
+    if not is_production_mode:
+        log("DEV: Looking for available job data...")
+        job_data, raw_data = load_dev_data(geo_algorithm_name)
+        log(f"DEV: Received dev job_data={job_data}")
+
+        root_filename_out = f"DEV_{geo_algorithm_name}_{objectID}"
+        jobname = job_data["jobname"]
+        objectID = "LOCL"
+    else:
+        # We start hunting for files to see if work needs to be done.
+        log("PROD: Looking for available job data...")
+        job_data, raw_data = get_next_geo_job(geo_algorithm_name)
+        log(f"PROD:\n{job_data=}")
+
+        if job_data is None:
+            log("No Prod Job Data Available")
+            raise Exception(f"PROD: Failed to locate job data for {geo_algorithm_name}")
+        else:
+    
+            jobname = job_data["jobname"]
+            root_filename_out = jobname
+
+    return job_data, objectID, root_filename_out, output_dir_out, raw_data
 
 def checkGeometryExists(geo):
     """
