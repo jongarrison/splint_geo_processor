@@ -1,17 +1,18 @@
 """
-IdGun.py
-Emboss a text ID on the inside wall of a splint brep.
+TextGun.py
+Emboss text on the inside or outside wall of a brep.
 
 Algorithm:
-1. Get splint bounding box centroid
-2. Create text outline geometry centered at the centroid, on the XZ plane
-3. Rotate the text around the X axis by side_projection_angle_deg
-4. Extrude each letter to create solid breps
-5. For EACH letter separately:
+1. Get brep bounding box centroid
+2. Create text outline geometry centered at the centroid
+3. Orient the text to align with text_projection_vector
+4. If embossing outside, mirror text horizontally and move outward first
+5. Extrude each letter to create solid breps
+6. For EACH letter separately:
    - Get the letter's centroid
-   - Project from that centroid through the text plane until it hits the splint surface
-   - Move the letter down to that intersection point
-   - Subtract the letter from the splint
+   - Project from that centroid along projection vector until it hits the surface
+   - Move the letter to that intersection point
+   - Subtract the letter from the brep
 """
 
 import Rhino.Geometry as rg
@@ -22,8 +23,8 @@ import math
 from splintcommon import log
 
 
-class IdGunError(Exception):
-    """Raised when ID embossing operation fails."""
+class TextGunError(Exception):
+    """Raised when text embossing operation fails."""
     pass
 
 
@@ -32,149 +33,188 @@ class InvalidInputError(Exception):
     pass
 
 
-def emboss_id(
-    splint_brep,
-    object_id,
+def emboss_text(
+    target_brep,
+    text_content,
     wall_thickness_mm,
     text_size=3.3,
-    side_projection_angle_deg=-28.0,
-    extrusion_depth_factor=0.8
+    text_projection_vector=None,
+    extrusion_depth_factor=0.8,
+    emboss_inside=True
 ):
     """
-    Emboss a text ID on the inside wall of a splint brep.
+    Emboss text on the inside or outside wall of a brep.
     
     Args:
-        splint_brep: The finished splint Brep to emboss
-        object_id: Text string to emboss (typically 4 characters)
+        target_brep: The Brep to emboss text onto
+        text_content: Text string to emboss
         wall_thickness_mm: Wall thickness in mm
         text_size: Text height (default 3.3)
-        side_projection_angle_deg: Angle to rotate text plane around X axis (default -28)
+        text_projection_vector: Vector3d direction to project text onto surface.
+                               If None, defaults to (0, 0.883, -0.469) which is
+                               equivalent to the old -28 degree angle.
         extrusion_depth_factor: Fraction of wall thickness for extrusion depth (default 0.8)
+        emboss_inside: If True, emboss on inside surface (default).
+                      If False, emboss on outside surface (text will be mirrored).
     
     Returns:
-        Brep: The splint with embossed ID
+        Brep: The brep with embossed text
         
     Raises:
         InvalidInputError: If inputs are invalid
-        IdGunError: If embossing operation fails
+        TextGunError: If embossing operation fails
     """
     # Validate inputs
-    if splint_brep is None:
-        raise InvalidInputError("splint_brep is None")
-    if not splint_brep.IsValid:
-        raise InvalidInputError("splint_brep is not valid")
-    if not object_id or len(object_id.strip()) == 0:
-        raise InvalidInputError("object_id is empty")
+    if target_brep is None:
+        raise InvalidInputError("target_brep is None")
+    if not target_brep.IsValid:
+        raise InvalidInputError("target_brep is not valid")
+    if not text_content or len(text_content.strip()) == 0:
+        raise InvalidInputError("text_content is empty")
     if wall_thickness_mm <= 0:
         raise InvalidInputError("wall_thickness_mm must be positive")
     if text_size <= 0:
         raise InvalidInputError("text_size must be positive")
     
+    # Default projection vector (equivalent to old -28 degree angle around X axis)
+    if text_projection_vector is None:
+        # This matches: Y rotated -28 degrees around X axis
+        angle_rad = math.radians(-28.0)
+        text_projection_vector = rg.Vector3d(
+            0,
+            math.cos(angle_rad),
+            math.sin(angle_rad)
+        )
+    
+    # Ensure it's a unit vector
+    projection_direction = rg.Vector3d(text_projection_vector)
+    projection_direction.Unitize()
+    
     tolerance = 0.01  # Rhino document tolerance
     
-    log("IdGun: Starting emboss for ID '{}'".format(object_id))
+    log("TextGun: Starting emboss for '{}' (inside={})".format(text_content, emboss_inside))
     
-    # Step 1: Get bounding box centroid of the splint
-    bbox = splint_brep.GetBoundingBox(True)
+    # Step 1: Get bounding box centroid of the target brep
+    bbox = target_brep.GetBoundingBox(True)
     if not bbox.IsValid:
-        raise IdGunError("Failed to get bounding box of splint")
+        raise TextGunError("Failed to get bounding box of target brep")
     
     centroid = bbox.Center
-    log("  Splint centroid: ({:.2f}, {:.2f}, {:.2f})".format(centroid.X, centroid.Y, centroid.Z))
+    log("  Target centroid: ({:.2f}, {:.2f}, {:.2f})".format(centroid.X, centroid.Y, centroid.Z))
+    log("  Projection vector: ({:.3f}, {:.3f}, {:.3f})".format(
+        projection_direction.X, projection_direction.Y, projection_direction.Z))
     
-    # Step 2: Create text outline geometry centered at the centroid, on the XZ plane
-    # XZ plane at centroid: X is right, Z is up, Y is the normal
-    # For text to appear upright when facing +Y direction, we need:
-    # - Plane X axis = world X (text horizontal)
-    # - Plane Y axis = world -Z (text vertical, flipped so text reads correctly)
-    text_plane = rg.Plane(centroid, rg.Vector3d.XAxis, -rg.Vector3d.ZAxis)
+    # Step 2: Create text outline geometry centered at the centroid
+    # Create a plane perpendicular to the projection direction
+    # The plane's normal should be the projection direction
+    # X axis should be roughly world X (or perpendicular to projection in XY plane)
+    # Y axis (text vertical) should be roughly world Z
+    
+    # Build an orthonormal basis for the text plane
+    # We want text to be readable when looking along -projection_direction
+    plane_normal = projection_direction
+    
+    # Try to use world Z as the "up" reference for text
+    world_z = rg.Vector3d.ZAxis
+    
+    # If projection is nearly vertical, use world Y as reference instead
+    if abs(rg.Vector3d.Multiply(plane_normal, world_z)) > 0.9:
+        up_ref = rg.Vector3d.YAxis
+    else:
+        up_ref = world_z
+    
+    # Plane X axis = normal cross up_ref (horizontal direction, pointing right)
+    plane_x = rg.Vector3d.CrossProduct(plane_normal, up_ref)
+    plane_x.Unitize()
+    
+    # Plane Y axis = X cross normal (vertical direction for text, pointing up)
+    plane_y = rg.Vector3d.CrossProduct(plane_x, plane_normal)
+    plane_y.Unitize()
+    
+    # For text to read correctly, we may need to flip based on orientation
+    # Text plane: X = horizontal, Y = vertical (up for text)
+    text_plane = rg.Plane(centroid, plane_x, plane_y)
     
     log("  Text plane origin: ({:.2f}, {:.2f}, {:.2f})".format(
         text_plane.Origin.X, text_plane.Origin.Y, text_plane.Origin.Z))
     
     # Create text curves at this plane
-    text_curves = create_text_curves(object_id, text_plane, text_size, bold=True)
+    text_curves = create_text_curves(text_content, text_plane, text_size, bold=True)
     if not text_curves or len(text_curves) == 0:
-        raise IdGunError("Failed to create text curves")
+        raise TextGunError("Failed to create text curves")
     
     log("  Created {} text curves".format(len(text_curves)))
     
     # Step 2b: Center the text on the splint centroid
-    # Get combined bounding box of all text curves
     text_bbox = rg.BoundingBox.Empty
     for curve in text_curves:
         text_bbox.Union(curve.GetBoundingBox(True))
     
     if text_bbox.IsValid:
         text_center = text_bbox.Center
-        # Move all curves so text center = splint centroid
         center_offset = centroid - text_center
         for curve in text_curves:
             curve.Translate(center_offset)
         log("  Centered text by offset ({:.2f}, {:.2f}, {:.2f})".format(
             center_offset.X, center_offset.Y, center_offset.Z))
     
-    log("  Created {} text curves".format(len(text_curves)))
+    # Step 2c: If embossing outside, mirror text horizontally so it reads correctly
+    if not emboss_inside:
+        # Mirror across the YZ plane passing through centroid (flip X)
+        mirror_plane = rg.Plane(centroid, rg.Vector3d.XAxis)
+        mirror_xform = rg.Transform.Mirror(mirror_plane)
+        for curve in text_curves:
+            curve.Transform(mirror_xform)
+        log("  Mirrored text for outside embossing")
     
-    # Step 3: Rotate the text around the X axis by side_projection_angle_deg
-    # This tilts the text plane so it projects onto the angled surface
-    angle_rad = math.radians(side_projection_angle_deg)
-    rotation_axis = rg.Vector3d.XAxis
-    rotation_xform = rg.Transform.Rotation(angle_rad, rotation_axis, centroid)
-    
-    for curve in text_curves:
-        curve.Transform(rotation_xform)
-    
-    log("  Rotated text by {:.1f} degrees around X axis".format(side_projection_angle_deg))
-    
-    # Calculate the projection direction (the normal of the rotated text plane)
-    # Original plane normal was Y axis, after rotation it's rotated around X
-    projection_direction = rg.Vector3d.YAxis
-    projection_direction.Transform(rotation_xform)
-    projection_direction.Unitize()
-    
-    log("  Projection direction: ({:.3f}, {:.3f}, {:.3f})".format(
-        projection_direction.X, projection_direction.Y, projection_direction.Z))
-    
-    # Step 4: Create boundary surfaces from text curves, then extrude each letter
-    # Group curves by character (each closed curve or set of curves forming a letter)
+    # Step 3: Create boundary surfaces from text curves, then extrude each letter
     letter_surfaces = create_boundary_surfaces(text_curves, tolerance)
     if not letter_surfaces or len(letter_surfaces) == 0:
-        raise IdGunError("Failed to create letter surfaces from curves")
+        raise TextGunError("Failed to create letter surfaces from curves")
     
     log("  Created {} letter surfaces".format(len(letter_surfaces)))
     
-    # Calculate extrusion depth
+    # Calculate extrusion depth (handle None for extrusion_depth_factor)
+    if extrusion_depth_factor is None:
+        extrusion_depth_factor = 0.8
     extrusion_depth = wall_thickness_mm * extrusion_depth_factor
     log("  Extrusion depth: {:.2f} mm".format(extrusion_depth))
     
+    # Extrusion direction depends on inside vs outside
+    if emboss_inside:
+        extrusion_direction = projection_direction
+    else:
+        extrusion_direction = -projection_direction  # Extrude inward from outside
+    
     # Extrude each letter surface into a solid
-    # Extrusion direction is along the projection direction (into the splint)
     letter_breps = []
     for surf in letter_surfaces:
-        extruded = extrude_surface(surf, projection_direction, extrusion_depth, tolerance)
+        extruded = extrude_surface(surf, extrusion_direction, extrusion_depth, tolerance)
         if extruded:
             letter_breps.append(extruded)
     
     if len(letter_breps) == 0:
-        raise IdGunError("Failed to create any letter extrusions")
+        raise TextGunError("Failed to create any letter extrusions")
     
     log("  Created {} letter breps".format(len(letter_breps)))
     
-    # Create mesh from splint for ray intersection
+    # Create mesh from target brep for ray intersection
     mesh_params = rg.MeshingParameters.FastRenderMesh
-    meshes = rg.Mesh.CreateFromBrep(splint_brep, mesh_params)
+    meshes = rg.Mesh.CreateFromBrep(target_brep, mesh_params)
     if not meshes or len(meshes) == 0:
-        raise IdGunError("Failed to create mesh from splint brep")
+        raise TextGunError("Failed to create mesh from target brep")
     
-    splint_mesh = rg.Mesh()
+    target_mesh = rg.Mesh()
     for m in meshes:
-        splint_mesh.Append(m)
+        target_mesh.Append(m)
     
-    log("  Created mesh with {} faces for intersection".format(splint_mesh.Faces.Count))
+    log("  Created mesh with {} faces for intersection".format(target_mesh.Faces.Count))
     
-    # Step 5: For each letter, project it onto the splint surface and subtract
-    result_brep = splint_brep.DuplicateBrep()
+    # Step 4: For each letter, project it onto the surface and subtract
+    result_brep = target_brep.DuplicateBrep()
+    
+    # For outside embossing, we need to project from far outside back inward
+    outside_offset_distance = 1000.0  # mm
     
     for i, letter_brep in enumerate(letter_breps):
         # Get the letter's centroid
@@ -186,14 +226,23 @@ def emboss_id(
         log("  Letter {} centroid: ({:.2f}, {:.2f}, {:.2f})".format(
             i, letter_centroid.X, letter_centroid.Y, letter_centroid.Z))
         
-        # Project from letter centroid along projection direction to find splint surface
-        ray = rg.Ray3d(letter_centroid, projection_direction)
-        intersection_param = rg.Intersect.Intersection.MeshRay(splint_mesh, ray)
+        # Determine ray origin and direction based on inside/outside
+        if emboss_inside:
+            # Project outward from centroid to find inside surface
+            ray_origin = letter_centroid
+            ray_direction = projection_direction
+        else:
+            # Move far out along projection direction, then shoot back inward
+            ray_origin = letter_centroid + projection_direction * outside_offset_distance
+            ray_direction = -projection_direction
+        
+        ray = rg.Ray3d(ray_origin, ray_direction)
+        intersection_param = rg.Intersect.Intersection.MeshRay(target_mesh, ray)
         
         if intersection_param < 0:
-            # Try opposite direction
-            ray = rg.Ray3d(letter_centroid, -projection_direction)
-            intersection_param = rg.Intersect.Intersection.MeshRay(splint_mesh, ray)
+            # Try opposite direction as fallback
+            ray = rg.Ray3d(ray_origin, -ray_direction)
+            intersection_param = rg.Intersect.Intersection.MeshRay(target_mesh, ray)
         
         if intersection_param < 0:
             log("  Warning: Could not find intersection for letter {}, skipping".format(i))
@@ -205,8 +254,6 @@ def emboss_id(
             i, surface_point.X, surface_point.Y, surface_point.Z))
         
         # Calculate move vector to bring letter to surface
-        # We want the letter to be positioned so it cuts into the surface
-        # Move from current centroid to surface point
         move_vector = surface_point - letter_centroid
         
         # Move the letter brep
@@ -221,7 +268,6 @@ def emboss_id(
         
         if diff_result and len(diff_result) > 0:
             if len(diff_result) > 1:
-                # Use the largest piece
                 result_brep = max(diff_result, key=lambda b: get_brep_volume(b) or 0)
                 log("  Warning: Boolean difference produced {} pieces, using largest".format(len(diff_result)))
             else:
@@ -231,9 +277,9 @@ def emboss_id(
             log("  Warning: Boolean difference failed for letter {}".format(i))
     
     if not result_brep.IsValid:
-        raise IdGunError("Result brep is not valid")
+        raise TextGunError("Result brep is not valid")
     
-    log("IdGun: Successfully embossed ID '{}'".format(object_id))
+    log("TextGun: Successfully embossed '{}'".format(text_content))
     return result_brep
 
 
