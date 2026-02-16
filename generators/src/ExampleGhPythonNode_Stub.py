@@ -3,7 +3,7 @@
 
 from pathlib import Path
 import sys
-from importlib import reload #FOR DEV ONLY
+from importlib import reload #FOR DEV
 import time
 
 # In normal GH doc
@@ -21,7 +21,7 @@ if ghFileDir not in sys.path:
     sys.path.append(ghFileDir)
 
 import splintcommon
-reload(splintcommon) #FOR DEV ONLY
+reload(splintcommon) #FOR DEV
 
 #splintcommon module is now available for use in this GhPython component
 splintcommon.log(f'GhPython Node initialized at {time.ctime()}')
