@@ -1,0 +1,11 @@
+{
+  "id": "cmllag8u90003jp2bss280e7e",
+  "algorithm": "InfinityExtend",
+  "params": "{\"interPhalanxDistanceMM\":30,\"rootCircumferenceMM\":57,\"midCircumferenceMM\":55,\"tipCircumferenceMM\":51,\"flexionDegrees\":10}",
+  "metadata": {
+    "GeometryName": "InfinityExtend",
+    "CustomerNote": null,
+    "CustomerID": "ife1",
+    "objectID": "ATRZ"
+  }
+}

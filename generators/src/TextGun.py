@@ -39,6 +39,8 @@ def emboss_text(
     wall_thickness_mm,
     text_size=3.3,
     text_projection_vector=None,
+    text_up_vector=None,
+    projection_origin=None,
     extrusion_depth_factor=0.8,
     emboss_inside=True
 ):
@@ -53,15 +55,28 @@ def emboss_text(
         text_projection_vector: Vector3d direction to project text onto surface.
                                If None, defaults to (0, 0.883, -0.469) which is
                                equivalent to the old -28 degree angle.
+        text_up_vector: Vector3d hint for "up" direction of text.
+                       If None (default), computed via vector rejection of +Z
+                       from text_projection_vector (falls back to +Y if +Z is parallel).
+                       If provided, used directly without modification - this gives
+                       full control for special cases like text on vertical walls.
+        projection_origin: Point3d where text is centered before projection.
+                          If None, uses the bounding box center of target_brep.
         extrusion_depth_factor: Fraction of wall thickness for extrusion depth (default 0.8)
         emboss_inside: If True, emboss on inside surface (default).
                       If False, emboss on outside surface (text will be mirrored).
     
     Returns:
-        Brep: The brep with embossed text
+        tuple: (result_brep, text_breps_before_projection, projected_letter_breps, final_text_plane)
+            - result_brep: The brep with embossed text
+            - text_breps_before_projection: List of extruded letter Breps, centered and oriented
+                         but before projection to the surface (useful for debug)
+            - projected_letter_breps: List of letter Breps after projection to surface
+            - final_text_plane: The plane used for text orientation
         
     Raises:
-        InvalidInputError: If inputs are invalid
+        InvalidInputError: If inputs are invalid (including text_up_vector parallel
+                          to text_projection_vector)
         TextGunError: If embossing operation fails
     """
     # Validate inputs
@@ -76,127 +91,122 @@ def emboss_text(
     if text_size <= 0:
         raise InvalidInputError("text_size must be positive")
     
-    # Default projection vector (equivalent to old -28 degree angle around X axis)
-    if text_projection_vector is None:
-        # This matches: Y rotated -28 degrees around X axis
-        angle_rad = math.radians(-28.0)
-        text_projection_vector = rg.Vector3d(
-            0,
-            math.cos(angle_rad),
-            math.sin(angle_rad)
-        )
-    
-    # Ensure it's a unit vector
-    projection_direction = rg.Vector3d(text_projection_vector)
-    projection_direction.Unitize()
-    
-    tolerance = 0.01  # Rhino document tolerance
-    
-    log("TextGun: Starting emboss for '{}' (inside={})".format(text_content, emboss_inside))
-    
-    # Step 1: Get bounding box centroid of the target brep
-    bbox = target_brep.GetBoundingBox(True)
-    if not bbox.IsValid:
-        raise TextGunError("Failed to get bounding box of target brep")
-    
-    centroid = bbox.Center
-    log("  Target centroid: ({:.2f}, {:.2f}, {:.2f})".format(centroid.X, centroid.Y, centroid.Z))
-    log("  Projection vector: ({:.3f}, {:.3f}, {:.3f})".format(
-        projection_direction.X, projection_direction.Y, projection_direction.Z))
-    
-    # Step 2: Create text outline geometry centered at the centroid
-    # Create a plane perpendicular to the projection direction
-    # The plane's normal should be the projection direction
-    # X axis should be roughly world X (or perpendicular to projection in XY plane)
-    # Y axis (text vertical) should be roughly world Z
-    
-    # Build an orthonormal basis for the text plane
-    # We want text to be readable when looking along -projection_direction
-    plane_normal = projection_direction
-    
-    # Try to use world Z as the "up" reference for text
-    world_z = rg.Vector3d.ZAxis
-    
-    # If projection is nearly vertical, use world Y as reference instead
-    if abs(rg.Vector3d.Multiply(plane_normal, world_z)) > 0.9:
-        up_ref = rg.Vector3d.YAxis
-    else:
-        up_ref = world_z
-    
-    # Plane X axis = normal cross up_ref (horizontal direction, pointing right)
-    plane_x = rg.Vector3d.CrossProduct(plane_normal, up_ref)
-    plane_x.Unitize()
-    
-    # Plane Y axis = X cross normal (vertical direction for text, pointing up)
-    plane_y = rg.Vector3d.CrossProduct(plane_x, plane_normal)
-    plane_y.Unitize()
-    
-    # For text to read correctly, we may need to flip based on orientation
-    # Text plane: X = horizontal, Y = vertical (up for text)
-    text_plane = rg.Plane(centroid, plane_x, plane_y)
-    
-    log("  Text plane origin: ({:.2f}, {:.2f}, {:.2f})".format(
-        text_plane.Origin.X, text_plane.Origin.Y, text_plane.Origin.Z))
-    
-    # Create text curves at this plane
-    text_curves = create_text_curves(text_content, text_plane, text_size, bold=True)
-    if not text_curves or len(text_curves) == 0:
-        raise TextGunError("Failed to create text curves")
-    
-    log("  Created {} text curves".format(len(text_curves)))
-    
-    # Step 2b: Center the text on the splint centroid
-    text_bbox = rg.BoundingBox.Empty
-    for curve in text_curves:
-        text_bbox.Union(curve.GetBoundingBox(True))
-    
-    if text_bbox.IsValid:
-        text_center = text_bbox.Center
-        center_offset = centroid - text_center
-        for curve in text_curves:
-            curve.Translate(center_offset)
-        log("  Centered text by offset ({:.2f}, {:.2f}, {:.2f})".format(
-            center_offset.X, center_offset.Y, center_offset.Z))
-    
-    # Step 2c: If embossing outside, mirror text horizontally so it reads correctly
-    if not emboss_inside:
-        # Mirror across the YZ plane passing through centroid (flip X)
-        mirror_plane = rg.Plane(centroid, rg.Vector3d.XAxis)
-        mirror_xform = rg.Transform.Mirror(mirror_plane)
-        for curve in text_curves:
-            curve.Transform(mirror_xform)
-        log("  Mirrored text for outside embossing")
-    
-    # Step 3: Create boundary surfaces from text curves, then extrude each letter
-    letter_surfaces = create_boundary_surfaces(text_curves, tolerance)
-    if not letter_surfaces or len(letter_surfaces) == 0:
-        raise TextGunError("Failed to create letter surfaces from curves")
-    
-    log("  Created {} letter surfaces".format(len(letter_surfaces)))
-    
     # Calculate extrusion depth (handle None for extrusion_depth_factor)
     if extrusion_depth_factor is None:
         extrusion_depth_factor = 0.8
     extrusion_depth = wall_thickness_mm * extrusion_depth_factor
     log("  Extrusion depth: {:.2f} mm".format(extrusion_depth))
+
+    # Default projection vector (equivalent to old -28 degree angle around X axis)
+    if text_projection_vector is None:
+        raise InvalidInputError("text_projection_vector is None")
     
-    # Extrusion direction depends on inside vs outside
-    if emboss_inside:
-        extrusion_direction = projection_direction
+    # Ensure it's a unit vector
+    projection_direction = rg.Vector3d(text_projection_vector)
+    projection_direction.Unitize()
+    
+    # Determine actual_up vector for text orientation
+    if text_up_vector is None:
+        # Default: compute via vector rejection of +Z from projection_direction
+        # This automatically handles most cases and gracefully handles near-vertical projections
+        up_vec = rg.Vector3d.ZAxis
+        dot = rg.Vector3d.Multiply(up_vec, projection_direction)
+        actual_up = up_vec - projection_direction * dot
+        
+        # Check if +Z is parallel to projection (rejection is zero)
+        if actual_up.Length < 0.001:
+            # Fall back to +Y as the up hint
+            up_vec = rg.Vector3d.YAxis
+            dot = rg.Vector3d.Multiply(up_vec, projection_direction)
+            actual_up = up_vec - projection_direction * dot
+            
+            if actual_up.Length < 0.001:
+                raise InvalidInputError(
+                    "Cannot determine text orientation: projection is along both +Z and +Y")
+        
+        actual_up.Unitize()
+        log("text_up_vector: Using auto-computed text_up (from +Z rejection)")
     else:
-        extrusion_direction = -projection_direction  # Extrude inward from outside
+        # User provided explicit text_up_vector - use it directly without rejection
+        # This gives full control for special cases (e.g., text on vertical walls)
+        actual_up = rg.Vector3d(text_up_vector)
+        if actual_up.Length < 0.001:
+            raise InvalidInputError("text_up_vector has zero length")
+        actual_up.Unitize()
+        log("text_up_vector: Using user-provided text_up_vector directly")
     
-    # Extrude each letter surface into a solid
-    letter_breps = []
-    for surf in letter_surfaces:
-        extruded = extrude_surface(surf, extrusion_direction, extrusion_depth, tolerance)
-        if extruded:
-            letter_breps.append(extruded)
+    tolerance = 0.01  # Rhino document tolerance
     
-    if len(letter_breps) == 0:
-        raise TextGunError("Failed to create any letter extrusions")
+    log("TextGun: Starting emboss for '{}' (inside={})".format(text_content, emboss_inside))
     
-    log("  Created {} letter breps".format(len(letter_breps)))
+    # Step 1: Determine projection origin (text center point)
+    if projection_origin is not None:
+        centroid = rg.Point3d(projection_origin)
+        log("  Using provided projection_origin: ({:.2f}, {:.2f}, {:.2f})".format(
+            centroid.X, centroid.Y, centroid.Z))
+    else:
+        # Default to bounding box center
+        bbox = target_brep.GetBoundingBox(True)
+        if not bbox.IsValid:
+            raise TextGunError("Failed to get bounding box of target brep")
+        centroid = bbox.Center
+        log("  Using bbox center as projection_origin: ({:.2f}, {:.2f}, {:.2f})".format(
+            centroid.X, centroid.Y, centroid.Z))
+    
+    log("  Projection vector: ({:.3f}, {:.3f}, {:.3f})".format(
+        projection_direction.X, projection_direction.Y, projection_direction.Z))
+    log("  Text up vector (actual): ({:.3f}, {:.3f}, {:.3f})".format(
+        actual_up.X, actual_up.Y, actual_up.Z))
+    
+    # Step 2: Build text plane
+    plane_normal = projection_direction #Z analog
+    text_y =  actual_up
+    text_X = rg.Vector3d.CrossProduct(plane_normal, text_y)
+
+    text_plane = rg.Plane(centroid, text_X, text_y)
+    
+    log("text_plane: Origin=({:.2f}, {:.2f}, {:.2f}), X=({:.3f}, {:.3f}, {:.3f}), Y=({:.3f}, {:.3f}, {:.3f})".format(
+        text_plane.Origin.X, text_plane.Origin.Y, text_plane.Origin.Z,
+        text_plane.XAxis.X, text_plane.XAxis.Y, text_plane.XAxis.Z,
+        text_plane.YAxis.X, text_plane.YAxis.Y, text_plane.YAxis.Z))
+    
+    # Create text breps directly using CreatePolysurfacesGrouped
+    # Double the depth so letters are centered on the surface (extend equally on both sides)
+    final_text_plane = rg.Plane(text_plane)
+    letter_extrusion_depth = extrusion_depth * 2
+    
+    letter_breps = create_text_breps(text_content, text_plane, text_size, letter_extrusion_depth)
+    log("  Letter extrusion depth (2x): {:.2f} mm".format(letter_extrusion_depth))
+    
+    if not letter_breps or len(letter_breps) == 0:
+        raise TextGunError("Failed to create letter breps via CreatePolysurfacesGrouped")
+    
+    log("  Created {} letter breps via CreatePolysurfacesGrouped".format(len(letter_breps)))
+    
+    # Step 2b: Center the letter breps on the centroid
+    text_bbox = rg.BoundingBox.Empty
+    for brep in letter_breps:
+        text_bbox.Union(brep.GetBoundingBox(True))
+    
+    if text_bbox.IsValid:
+        text_center = text_bbox.Center
+        center_offset = centroid - text_center
+        for brep in letter_breps:
+            brep.Translate(center_offset)
+        log("  Centered letter breps by offset ({:.2f}, {:.2f}, {:.2f})".format(
+            center_offset.X, center_offset.Y, center_offset.Z))
+    
+    # Step 2c: If embossing outside, mirror text horizontally so it reads correctly
+    if not emboss_inside:
+        log(" =========== MIRRORING ===========")
+        mirror_plane = rg.Plane(centroid, rg.Vector3d.XAxis)
+        mirror_xform = rg.Transform.Mirror(mirror_plane)
+        for brep in letter_breps:
+            brep.Transform(mirror_xform)
+        log("  Mirrored letter breps for outside embossing")
+    
+    # Keep a copy of the centered/oriented text before projection
+    text_breps_before_projection = [b.DuplicateBrep() for b in letter_breps]
     
     # Create mesh from target brep for ray intersection
     mesh_params = rg.MeshingParameters.FastRenderMesh
@@ -212,6 +222,9 @@ def emboss_text(
     
     # Step 4: For each letter, project it onto the surface and subtract
     result_brep = target_brep.DuplicateBrep()
+    
+    # Collect projected letters for debug output
+    projected_letter_breps = []
     
     # For outside embossing, we need to project from far outside back inward
     outside_offset_distance = 1000.0  # mm
@@ -253,7 +266,8 @@ def emboss_text(
         log("  Letter {} surface point: ({:.2f}, {:.2f}, {:.2f})".format(
             i, surface_point.X, surface_point.Y, surface_point.Z))
         
-        # Calculate move vector to bring letter to surface
+        # Calculate move vector to bring letter centroid to surface
+        # Letters are extruded at 2x depth and centered, so they extend equally on both sides
         move_vector = surface_point - letter_centroid
         
         # Move the letter brep
@@ -263,16 +277,21 @@ def emboss_text(
         log("  Moved letter {} by ({:.2f}, {:.2f}, {:.2f})".format(
             i, move_vector.X, move_vector.Y, move_vector.Z))
         
+        # Fix inverted normals if volume is negative (required for boolean to work)
+        letter_volume = get_brep_volume(moved_letter)
+        if letter_volume and letter_volume < 0:
+            moved_letter.Flip()
+        
+        # Save for debug output
+        projected_letter_breps.append(moved_letter.DuplicateBrep())
+        
         # Subtract this letter from the result
         diff_result = rg.Brep.CreateBooleanDifference(result_brep, moved_letter, tolerance)
         
         if diff_result and len(diff_result) > 0:
-            if len(diff_result) > 1:
-                result_brep = max(diff_result, key=lambda b: get_brep_volume(b) or 0)
-                log("  Warning: Boolean difference produced {} pieces, using largest".format(len(diff_result)))
-            else:
-                result_brep = diff_result[0]
-            log("  Successfully subtracted letter {}".format(i))
+            # Select the largest piece (main brep with letter carved out)
+            result_brep = max(diff_result, key=lambda b: get_brep_volume(b) or 0)
+            log("  Subtracted letter {}".format(i))
         else:
             log("  Warning: Boolean difference failed for letter {}".format(i))
     
@@ -280,183 +299,89 @@ def emboss_text(
         raise TextGunError("Result brep is not valid")
     
     log("TextGun: Successfully embossed '{}'".format(text_content))
-    return result_brep
+    return (result_brep, text_breps_before_projection, projected_letter_breps, final_text_plane)
 
 
-def create_text_curves(text, plane, height, bold=True):
+def create_text_breps(text, plane, height, depth):
     """
-    Create curves from text using Rhino's TextEntity.
+    Create 3D letter breps directly using TextEntity.CreatePolysurfacesGrouped.
+    
+    Workaround for Rhino TextEntity orientation issues: create text on World XY
+    plane where it behaves predictably, then transform to the desired plane.
     
     Args:
         text: The text string
-        plane: Plane for text placement
+        plane: Plane for text placement (text will be centered on plane origin)
         height: Text height
-        bold: Whether to use bold font
+        depth: Extrusion depth for the letters
         
     Returns:
-        list of Curve geometry objects
+        list of Brep objects (one per letter/character group)
     """
-    result_curves = []
+    result_breps = []
     
-    # Try using Rhino.Geometry.TextEntity.CreateCurves
     try:
         doc = Rhino.RhinoDoc.ActiveDoc
         if doc:
             dim_style = doc.DimStyles.Current
+            
+            # Create text on World XY plane at origin (predictable behavior)
+            xy_plane = rg.Plane.WorldXY
+            log("create_text_breps: Creating TextEntity on World XY, will transform to target plane")
+            
             text_entity = rg.TextEntity.Create(
-                text, plane, dim_style, False, 0, 0
+                text, xy_plane, dim_style, False, 0, 0
             )
             if text_entity:
                 text_entity.TextHeight = height
-                curves = text_entity.CreateCurves(dim_style, False)
-                if curves and len(curves) > 0:
-                    log("  Created {} curves via TextEntity.CreateCurves".format(len(curves)))
-                    return list(curves)
-    except Exception as e:
-        log("  TextEntity.CreateCurves failed: {}".format(str(e)))
-    
-    # Fallback: Try rhinoscriptsyntax (may not work in GH context)
-    created_ids = []
-    try:
-        text_id = rs.AddText(
-            text,
-            plane,
-            height,
-            "Arial",
-            1 if bold else 0,  # font_style: 0=normal, 1=bold
-            2 + 65536  # center horizontal + middle vertical
-        )
-        
-        if text_id:
-            created_ids.append(text_id)
-            curve_ids = rs.ExplodeText(text_id, delete=False)
-            
-            if curve_ids:
-                for cid in curve_ids:
-                    created_ids.append(cid)
-                    curve_geom = rs.coercecurve(cid)
-                    if curve_geom:
-                        result_curves.append(curve_geom.DuplicateCurve())
+                log("  Text height set to: {:.2f}".format(height))
                 
-                log("  Created {} text curves via rs.ExplodeText".format(len(result_curves)))
+                # CreatePolysurfacesGrouped returns an array of Brep arrays
+                small_caps_scale = 1.0
+                spacing = 0.0
+                
+                brep_groups = text_entity.CreatePolysurfacesGrouped(
+                    dim_style, small_caps_scale, depth, spacing
+                )
+                
+                if brep_groups:
+                    for group in brep_groups:
+                        if group:
+                            for brep in group:
+                                if brep and brep.IsValid:
+                                    result_breps.append(brep)
+                    
+                    log("  Created {} breps on World XY".format(len(result_breps)))
+                    
+                    if len(result_breps) > 0:
+                        # Compute bounding box of all text breps
+                        text_bbox = rg.BoundingBox.Empty
+                        for brep in result_breps:
+                            text_bbox.Union(brep.GetBoundingBox(True))
+                        
+                        # Center point of text on XY plane
+                        text_center = text_bbox.Center
+                        log("  Text center on XY: ({:.2f}, {:.2f}, {:.2f})".format(
+                            text_center.X, text_center.Y, text_center.Z))
+                        
+                        # Build transform: XY plane centered at text_center -> target plane
+                        source_plane = rg.Plane(text_center, rg.Vector3d.XAxis, rg.Vector3d.YAxis)
+                        xform = rg.Transform.PlaneToPlane(source_plane, plane)
+                        
+                        # Apply transform to all breps
+                        for brep in result_breps:
+                            brep.Transform(xform)
+                        
+                        log("  Transformed text to target plane: Origin=({:.2f}, {:.2f}, {:.2f})".format(
+                            plane.Origin.X, plane.Origin.Y, plane.Origin.Z))
+                    
+                    return result_breps
+                else:
+                    log("  CreatePolysurfacesGrouped returned None or empty")
     except Exception as e:
-        log("  rs.AddText/ExplodeText failed: {}".format(str(e)))
-    finally:
-        for obj_id in created_ids:
-            try:
-                rs.DeleteObject(obj_id)
-            except:
-                pass
+        log("  TextEntity.CreatePolysurfacesGrouped failed: {}".format(str(e)))
     
-    return result_curves
-
-
-def create_boundary_surfaces(curves, tolerance):
-    """
-    Create planar surfaces from closed curves.
-    
-    Args:
-        curves: List of curves
-        tolerance: Document tolerance
-        
-    Returns:
-        list of Breps (planar surfaces)
-    """
-    surfaces = []
-    
-    # Try to create planar surfaces from each closed curve individually
-    for curve in curves:
-        if not curve.IsClosed:
-            if curve.IsClosable:
-                curve = curve.ToNurbsCurve()
-                curve.MakeClosed(tolerance)
-        
-        if curve.IsClosed:
-            breps = rg.Brep.CreatePlanarBreps([curve], tolerance)
-            if breps:
-                surfaces.extend(breps)
-    
-    # If individual curves didn't work, try all curves together
-    if len(surfaces) == 0:
-        breps = rg.Brep.CreatePlanarBreps(curves, tolerance)
-        if breps:
-            surfaces.extend(breps)
-    
-    return surfaces
-
-
-def extrude_surface(brep_surface, direction, depth, tolerance):
-    """
-    Extrude a planar brep surface along a direction to create a solid.
-    
-    Args:
-        brep_surface: A planar Brep (single face)
-        direction: Vector3d direction to extrude
-        depth: Extrusion depth
-        tolerance: Document tolerance
-        
-    Returns:
-        Brep solid or None
-    """
-    if brep_surface.Faces.Count == 0:
-        return None
-    
-    face = brep_surface.Faces[0]
-    
-    # Get the outer loop curve
-    outer_loop = face.OuterLoop
-    if outer_loop is None:
-        return None
-    
-    loop_curve = outer_loop.To3dCurve()
-    if loop_curve is None:
-        return None
-    
-    # Create extrusion vector
-    extrusion_vector = direction * depth
-    
-    # Method 1: Use Extrusion.Create
-    # This creates an extrusion in the curve's plane normal direction
-    # We need to check if the curve is planar and get its plane
-    is_planar, curve_plane = loop_curve.TryGetPlane(tolerance)
-    
-    if is_planar:
-        # Check if curve plane normal aligns with our desired direction
-        dot = abs(rg.Vector3d.Multiply(curve_plane.Normal, direction))
-        if dot > 0.9:  # Reasonably aligned
-            extrusion = rg.Extrusion.Create(loop_curve, depth, True)
-            if extrusion:
-                brep = extrusion.ToBrep()
-                if brep and brep.IsValid and brep.IsSolid:
-                    return brep
-    
-    # Method 2: Use surface offset/thickening approach
-    # Create a copy of the surface, offset it, and loft between them
-    try:
-        # Duplicate and move the curve
-        end_curve = loop_curve.DuplicateCurve()
-        end_curve.Translate(extrusion_vector)
-        
-        # Loft between the two curves
-        loft = rg.Brep.CreateFromLoft(
-            [loop_curve, end_curve],
-            rg.Point3d.Unset, rg.Point3d.Unset,
-            rg.LoftType.Straight,
-            False  # not closed
-        )
-        
-        if loft and len(loft) > 0:
-            # Cap the ends
-            result = loft[0]
-            capped = result.CapPlanarHoles(tolerance)
-            if capped and capped.IsValid and capped.IsSolid:
-                return capped
-            elif result.IsValid:
-                return result
-    except Exception as e:
-        log("  Loft extrusion failed: {}".format(str(e)))
-    
-    return None
+    return result_breps
 
 
 def get_brep_centroid(brep):
