@@ -323,18 +323,20 @@ def create_text_breps(text, plane, height, depth):
     try:
         doc = Rhino.RhinoDoc.ActiveDoc
         if doc:
-            dim_style = doc.DimStyles.Current
+            # Get dim_style and duplicate it to use our text height
+            base_style = doc.DimStyles.Current
+            dim_style = base_style.Duplicate()
+            dim_style.TextHeight = height
             
             # Create text on World XY plane at origin (predictable behavior)
             xy_plane = rg.Plane.WorldXY
-            log("create_text_breps: Creating TextEntity on World XY, will transform to target plane")
+            log("create_text_breps: Creating TextEntity on World XY, text_height={:.2f}".format(height))
             
             text_entity = rg.TextEntity.Create(
                 text, xy_plane, dim_style, False, 0, 0
             )
             if text_entity:
                 text_entity.TextHeight = height
-                log("  Text height set to: {:.2f}".format(height))
                 
                 # CreatePolysurfacesGrouped returns an array of Brep arrays
                 small_caps_scale = 1.0
