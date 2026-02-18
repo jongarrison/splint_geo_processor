@@ -357,3 +357,218 @@ def intersect_with_reference(target_brep, slice_surface, view_direction, up_vect
     
     log("FeatureIdentification.intersect_with_reference: Complete")
     return (result_curves, result_points)
+
+
+def rect2plane(rectangle):
+    """
+    Create a plane from a rectangular surface or brep.
+    
+    The plane origin is at the rectangle's centroid, with X and Y axes 
+    aligned to the rectangle's edges.
+    
+    Args:
+        rectangle: A planar rectangular Brep or Surface with 4 corners
+        
+    Returns:
+        Plane: A plane positioned at the rectangle's centroid
+        
+    Raises:
+        FeatureIdentificationError: If rectangle is invalid or not planar
+    """
+    if rectangle is None:
+        raise FeatureIdentificationError("rectangle is None")
+    
+    log("FeatureIdentification.rect2plane: Starting")
+    
+    # Get vertices from the rectangle
+    vertices = []
+    
+    if hasattr(rectangle, 'Vertices'):
+        # It's a Brep
+        for v in rectangle.Vertices:
+            vertices.append(v.Location)
+    elif hasattr(rectangle, 'Domain'):
+        # It's a Surface - get 4 corners from domain
+        u_domain = rectangle.Domain(0)
+        v_domain = rectangle.Domain(1)
+        vertices.append(rectangle.PointAt(u_domain.Min, v_domain.Min))
+        vertices.append(rectangle.PointAt(u_domain.Max, v_domain.Min))
+        vertices.append(rectangle.PointAt(u_domain.Max, v_domain.Max))
+        vertices.append(rectangle.PointAt(u_domain.Min, v_domain.Max))
+    else:
+        raise FeatureIdentificationError(
+            "rectangle must be a Brep or Surface, got {}".format(type(rectangle).__name__))
+    
+    if len(vertices) != 4:
+        raise FeatureIdentificationError(
+            "Expected 4 vertices for rectangle, got {}".format(len(vertices)))
+    
+    # Compute centroid
+    centroid = rg.Point3d(0, 0, 0)
+    for v in vertices:
+        centroid += rg.Point3d(v.X / 4.0, v.Y / 4.0, v.Z / 4.0)
+    
+    log("  Centroid: ({:.2f}, {:.2f}, {:.2f})".format(
+        centroid.X, centroid.Y, centroid.Z))
+    
+    # Create X axis from first edge (v0 to v1)
+    x_axis = vertices[1] - vertices[0]
+    x_axis.Unitize()
+    
+    # Create Y axis from second edge (v0 to v3 or v1 to v2)
+    y_axis = vertices[3] - vertices[0]
+    y_axis.Unitize()
+    
+    # Ensure orthogonality by computing normal then re-deriving Y
+    normal = rg.Vector3d.CrossProduct(x_axis, y_axis)
+    normal.Unitize()
+    y_axis = rg.Vector3d.CrossProduct(normal, x_axis)
+    y_axis.Unitize()
+    
+    # Create plane
+    plane = rg.Plane(centroid, x_axis, y_axis)
+    
+    log("  Plane X: ({:.3f}, {:.3f}, {:.3f})".format(
+        plane.XAxis.X, plane.XAxis.Y, plane.XAxis.Z))
+    log("  Plane Y: ({:.3f}, {:.3f}, {:.3f})".format(
+        plane.YAxis.X, plane.YAxis.Y, plane.YAxis.Z))
+    log("  Plane Normal: ({:.3f}, {:.3f}, {:.3f})".format(
+        plane.Normal.X, plane.Normal.Y, plane.Normal.Z))
+    
+    log("FeatureIdentification.rect2plane: Complete")
+    return plane
+
+
+def trim_surface_with_direction(trim_surfaces, input_surface, keep_direction):
+    """
+    Split a surface/brep with one or more cutting surfaces, keeping the portion
+    on the specified side each time.
+    
+    Applies each trim surface iteratively - the result of one split becomes
+    the input to the next.
+    
+    Args:
+        trim_surfaces: Single Brep/Surface or list of them used to cut input_surface
+        input_surface: Brep (preferred) or Surface to split.
+                       Must be passed as Brep to preserve trim curves.
+        keep_direction: Vector3d pointing toward the side to keep
+        
+    Returns:
+        tuple: (result_brep, input_brep) where input_brep is the initial converted input
+        
+    Raises:
+        FeatureIdentificationError: If splitting fails or no valid piece found
+    """
+    if trim_surfaces is None:
+        raise FeatureIdentificationError("trim_surfaces is None")
+    if input_surface is None:
+        raise FeatureIdentificationError("input_surface is None")
+    if keep_direction is None:
+        raise FeatureIdentificationError("keep_direction is None")
+    
+    # Normalize to list (accept single surface or list)
+    if not hasattr(trim_surfaces, '__iter__'):
+        trim_surfaces = [trim_surfaces]
+    else:
+        trim_surfaces = list(trim_surfaces)
+    
+    log("FeatureIdentification.trim_surface_with_direction: Starting ({} trim surface(s))".format(len(trim_surfaces)))
+    
+    # Normalize keep direction
+    keep_dir = rg.Vector3d(keep_direction)
+    keep_dir.Unitize()
+    
+    log("  keep_direction: ({:.3f}, {:.3f}, {:.3f})".format(
+        keep_dir.X, keep_dir.Y, keep_dir.Z))
+    
+    tolerance = 0.001
+    
+    # Convert input_surface to Brep
+    log("  Input type: {}, isinstance Brep: {}, isinstance BrepFace: {}, isinstance Surface: {}".format(
+        type(input_surface).__name__,
+        isinstance(input_surface, rg.Brep),
+        isinstance(input_surface, rg.BrepFace),
+        isinstance(input_surface, rg.Surface)))
+    
+    if isinstance(input_surface, rg.Brep):
+        input_brep = input_surface
+    elif isinstance(input_surface, rg.BrepFace):
+        input_brep = input_surface.DuplicateFace(False)
+        log("  Used DuplicateFace to preserve trims")
+    elif isinstance(input_surface, rg.Surface):
+        input_brep = input_surface.ToBrep()
+        log("  WARNING: Used ToBrep on raw Surface - trim curves are lost!")
+    else:
+        raise FeatureIdentificationError(
+            "input_surface must be a Brep, BrepFace, or Surface, got {}".format(type(input_surface).__name__))
+    
+    if input_brep is None or not input_brep.IsValid:
+        raise FeatureIdentificationError("input_brep is invalid")
+    
+    # Log trim loop diagnostics
+    for fi in range(input_brep.Faces.Count):
+        face = input_brep.Faces[fi]
+        log("  Input face {}: {} trim loop(s)".format(fi, face.Loops.Count))
+    
+    input_amp = rg.AreaMassProperties.Compute(input_brep)
+    if input_amp:
+        log("  Input centroid: ({:.2f}, {:.2f}, {:.2f}), area: {:.2f}".format(
+            input_amp.Centroid.X, input_amp.Centroid.Y, input_amp.Centroid.Z, input_amp.Area))
+    
+    # Save original for debug return
+    original_input_brep = input_brep
+    current = input_brep
+    
+    # Apply each trim surface iteratively
+    for ti, trim_surface in enumerate(trim_surfaces):
+        log("  --- Trim pass {}/{} ---".format(ti + 1, len(trim_surfaces)))
+        
+        # Convert trim_surface to Brep
+        if isinstance(trim_surface, rg.Brep):
+            trim_brep = trim_surface.DuplicateBrep()
+        elif isinstance(trim_surface, rg.BrepFace):
+            trim_brep = trim_surface.DuplicateFace(False)
+        elif isinstance(trim_surface, rg.Surface):
+            trim_brep = trim_surface.ToBrep()
+        else:
+            raise FeatureIdentificationError(
+                "trim_surface must be a Brep, BrepFace, or Surface, got {}".format(type(trim_surface).__name__))
+        
+        if trim_brep is None or not trim_brep.IsValid:
+            raise FeatureIdentificationError("trim_brep {} is invalid".format(ti))
+        
+        # Split current with trim surface
+        split_results = current.Split(trim_brep, tolerance)
+        
+        if split_results is None or len(split_results) == 0:
+            log("    Split returned no results, trying with larger tolerance")
+            split_results = current.Split(trim_brep, tolerance * 10)
+        
+        if split_results is None or len(split_results) == 0:
+            log("    Split {} returned no results".format(ti))
+            raise FeatureIdentificationError("Split {} produced no pieces".format(ti))
+        
+        log("    Split produced {} piece(s)".format(len(split_results)))
+        
+        # Pick the piece most in keep_direction from the trim surface
+        trim_amp = rg.AreaMassProperties.Compute(trim_brep)
+        ref_point = trim_amp.Centroid if trim_amp else rg.Point3d.Origin
+        
+        best_piece = None
+        best_dot = -float('inf')
+        for i, piece in enumerate(split_results):
+            amp = rg.AreaMassProperties.Compute(piece)
+            if amp:
+                to_piece = amp.Centroid - ref_point
+                dot = rg.Vector3d.Multiply(to_piece, keep_dir)
+                log("    Piece {}: centroid ({:.2f}, {:.2f}, {:.2f}), area: {:.2f}, dot: {:.3f}".format(
+                    i, amp.Centroid.X, amp.Centroid.Y, amp.Centroid.Z, amp.Area, dot))
+                if dot > best_dot:
+                    best_dot = dot
+                    best_piece = piece
+        
+        current = best_piece if best_piece else split_results[0]
+    
+    log("FeatureIdentification.trim_surface_with_direction: Complete")
+    return current
+
