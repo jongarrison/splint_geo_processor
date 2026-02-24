@@ -21,6 +21,7 @@ import rhinoscriptsyntax as rs
 import scriptcontext as sc
 import math
 from splintcommon import log
+from BrepDifference import robust_brep_difference
 
 
 class TextGunError(Exception):
@@ -289,14 +290,26 @@ def emboss_text(
         diff_result = rg.Brep.CreateBooleanDifference(result_brep, moved_letter, tolerance)
         
         if diff_result and len(diff_result) > 0:
-            # Select the largest piece (main brep with letter carved out)
             result_brep = max(diff_result, key=lambda b: get_brep_volume(b) or 0)
             log("  Subtracted letter {}".format(i))
         else:
-            log("  Warning: Boolean difference failed for letter {}".format(i))
+            # Fall through to robust boolean difference
+            log("  Simple boolean failed for letter {}, trying robust fallback".format(i))
+            try:
+                robust_result, success, method = robust_brep_difference(result_brep, moved_letter, tolerance)
+                if success:
+                    result_brep = robust_result
+                    log("  Subtracted letter {} via {}".format(i, method))
+                else:
+                    log("  Warning: Robust difference also failed for letter {}, skipping".format(i))
+            except Exception as e:
+                log("  Warning: Robust difference raised {} for letter {}, skipping".format(type(e).__name__, i))
     
     if not result_brep.IsValid:
-        raise TextGunError("Result brep is not valid")
+        # Try to repair before giving up
+        result_brep.Repair(tolerance)
+        if not result_brep.IsValid:
+            raise TextGunError("Result brep is not valid after all subtractions")
     
     log("TextGun: Successfully embossed '{}'".format(text_content))
     return (result_brep, text_breps_before_projection, projected_letter_breps, final_text_plane)
@@ -327,6 +340,8 @@ def create_text_breps(text, plane, height, depth):
             base_style = doc.DimStyles.Current
             dim_style = base_style.Duplicate()
             dim_style.TextHeight = height
+            dim_style.TextHorizontalAlignment = Rhino.DocObjects.TextHorizontalAlignment.Center
+            dim_style.TextVerticalAlignment = Rhino.DocObjects.TextVerticalAlignment.Top
             
             # Create text on World XY plane at origin (predictable behavior)
             xy_plane = rg.Plane.WorldXY

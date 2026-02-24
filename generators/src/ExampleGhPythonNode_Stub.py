@@ -6,13 +6,11 @@ import sys
 from importlib import reload #FOR DEV
 import time
 
-# In normal GH doc
-ghFileDir = None
-try:
-    ghFileDir = str(Path.joinpath(Path(ghenv.Component.OnPingDocument().FilePath).resolve().parents[0], "src"))
-except:
-    # In GH Cluster
-    ghFileDir = str(Path.joinpath(Path(ghenv.Component.OnPingDocument().Owner.OnPingDocument().FilePath).resolve().parents[0], "src"))
+# Walk up through nested clusters to find the root GH document (necessary for use in nested clusters)
+doc = ghenv.Component.OnPingDocument()
+while not doc.FilePath and doc.Owner:
+    doc = doc.Owner.OnPingDocument()
+ghFileDir = str(Path(doc.FilePath).resolve().parent / "src")
 
 print(f"{ghFileDir=}")
 

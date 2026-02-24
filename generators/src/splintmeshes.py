@@ -1,6 +1,8 @@
 """
-Shared mesh export functionality for Rhino/Grasshopper
-This module provides functions to export meshes to various formats (STL, OBJ, 3MF)
+splintmeshes.py
+Mesh export for Rhino/Grasshopper.
+Exports one or more meshes to a single STL, OBJ, or 3MF file
+via Rhino's bake-select-export pipeline.
 """
 
 import scriptcontext as sc
@@ -11,98 +13,57 @@ import string
 import os
 import time
 from pathlib import Path
+from splintcommon import log
 
 
-def add_layer(layer_name=None, layer_color=None):
-    """Adds a new layer to the active Rhino document.
-    
-    Args:
-      layer_name (str): An optional layer name.
-      layer_color (System.Drawing.Color): An optional layer color.
-    Returns:
-      The index of the new layer.
-    """
+class MeshExportError(Exception):
+    """Raised when mesh export fails."""
+    pass
+
+
+def _add_layer(layer_name):
+    """Add a temporary layer to the active Rhino document."""
     sc.doc = Rhino.RhinoDoc.ActiveDoc
-    if layer_name != None:
-        # Check whether the layer name is valid
-        if not Rhino.DocObjects.Layer.IsValidName(layer_name):
-            raise ValueError("{} is not a valid layer name.".format(layer_name))
-        # Check whether a layer with the same name already exists
-        layer_index = sc.doc.Layers.Find(layer_name, True)
-        if layer_index >= 0:
-            raise ValueError("A layer with the name {} already exists.".format(layer_name))
-    else:
-        layer_name = sc.doc.Layers.GetUnusedLayerName(False)
-    
-    # Check whether the layer color is valid
-    if layer_color != None:
-        if not isinstance(layer_color, System.Drawing.Color):
-            raise ValueError("{} is not a valid layer color.".format(layer_color))
-    else:
-        layer_color = System.Drawing.Color.Black # default layer color
-    
-    # Add a new layer to the active document
-    layer_index = sc.doc.Layers.Add(layer_name, layer_color)
+    if not Rhino.DocObjects.Layer.IsValidName(layer_name):
+        raise MeshExportError("'{}' is not a valid layer name".format(layer_name))
+    layer_index = sc.doc.Layers.Find(layer_name, True)
+    if layer_index >= 0:
+        raise MeshExportError("Layer '{}' already exists".format(layer_name))
+    layer_index = sc.doc.Layers.Add(layer_name, System.Drawing.Color.Black)
     if layer_index < 0:
-        raise ValueError("Unable to add layer {} to document.".format(layer_name))
+        raise MeshExportError("Unable to add layer '{}'".format(layer_name))
     return layer_index
 
 
-def delete_layer(layer):
-    """Deletes an existing layer from the active Rhino document. 
-    The layer to be removed cannot be the current layer and 
-    it will be deleted even if it contains objects.
-    
-    Args:
-      layer (str\id): A name or id of an existing layer.
-    Returns:
-      True or False, indicating success or failure.
-    """
+def _delete_layer(layer_name):
+    """Delete a layer and all its objects from the active Rhino document."""
     sc.doc = Rhino.RhinoDoc.ActiveDoc
-    layer_index = sc.doc.Layers.Find(layer, True)
+    layer_index = sc.doc.Layers.Find(layer_name, True)
     if layer_index < 0:
-        raise ValueError("The layer {} does not exist.".format(layer))
+        log("  Warning: layer '{}' not found during cleanup".format(layer_name))
+        return False
     rc = sc.doc.Layers.Purge(layer_index, True)
     sc.doc.Views.Redraw()
     return rc
 
 
-def bake_mesh(layer, mesh, mesh_name=None):
-    """Bakes a mesh object to the active Rhino document.
-    
-    Args:
-      layer (str\id): The name or id of an existing layer.
-      mesh (Rhino.Geometry.Mesh): A mesh object to bake.
-      mesh_name (str): An optional mesh object name.
-    Returns:
-      The GUID of the baked mesh.
-    """
+def _bake_mesh(layer_name, mesh, mesh_name=None):
+    """Bake a mesh object onto a layer in the active Rhino document."""
     sc.doc = Rhino.RhinoDoc.ActiveDoc
-    # Check whether the mesh is a mesh object
     if mesh.ObjectType != Rhino.DocObjects.ObjectType.Mesh:
-        raise ValueError("{} is not a mesh.".format(mesh))
-    # Create the mesh object attributes
+        raise MeshExportError("Object is not a mesh: {}".format(type(mesh).__name__))
     attr = Rhino.DocObjects.ObjectAttributes()
-    # Set the mesh object layer index attribute
-    layer_index = sc.doc.Layers.Find(layer, True)
+    layer_index = sc.doc.Layers.Find(layer_name, True)
     if layer_index < 0:
-        if layer == "Default":
-            raise ValueError("The layer {} can't be baked to.".format(layer))
-        else:
-            raise ValueError("The layer {} does not exist.".format(layer))    
-    else:
-        attr.LayerIndex = layer_index
-    # Set the mesh object name attribute
-    if mesh_name != None:
+        raise MeshExportError("Layer '{}' does not exist".format(layer_name))
+    attr.LayerIndex = layer_index
+    if mesh_name is not None:
         attr.Name = mesh_name
-    # Bake the mesh to the active Rhino documemnt
-    mesh_id = sc.doc.Objects.AddMesh(mesh, attr)
-    return mesh_id
+    return sc.doc.Objects.AddMesh(mesh, attr)
 
 
-def get_obj_settings():
-    """Returns the settings for the OBJ export command as a string."""
-    # Formatting options
+def _get_obj_settings():
+    """OBJ export command-line settings."""
     cfg = "_Geometry=_Mesh "
     cfg += "_EndOfLine=CRLF "
     cfg += "_ExportRhinoObjectNames=_ExportObjectsAsOBJGroups "
@@ -116,13 +77,11 @@ def get_obj_settings():
     cfg += "_VertexWelding=_Unmodified "
     cfg += "_WritePrecision=4 "
     cfg += "_Enter "
-    # Detailed options
     cfg += "_DetailedOptions "
     cfg += "_JaggedSeams=_No "
     cfg += "_PackTextures=_No "
     cfg += "_Refine=_No "
     cfg += "_SimplePlane=_No "
-    # Advanced options
     cfg += "_AdvancedOptions "
     cfg += "_Angle=0 "
     cfg += "_AspectRatio=0 "
@@ -135,182 +94,149 @@ def get_obj_settings():
     return cfg, "obj"
 
 
-def get_stl_settings_default():
-    """Returns default STL export settings."""
-    #[ANGLE,ASPECT RATIO,MAX DIST TO SRF,GRID,DENSITY,MAX EDGE LEN,MIN EDGE LEN]
-    setting_list=[15,0,0.01,16,0,0,0.001]   
-    return get_stl_settings(*setting_list)
-
-
-def get_stl_settings(ang,ar,dist,grid,den,maxL=0,minL=.0001):
-    """Returns the settings for binary STL export command as a string."""
+def _get_stl_settings():
+    """Binary STL export command-line settings."""
     e_str = "_ExportFileAs=_Binary "
-    e_str+= "_ExportUnfinishedObjects=_Yes "
-    e_str+= "_UseSimpleDialog=_No "
-    e_str+= "_Enter _DetailedOptions "
-    e_str+= "_JaggedSeams=_No "
-    e_str+= "_PackTextures=_No "
-    e_str+= "_Refine=_Yes "
-    e_str+= "_SimplePlane=_Yes "
-    e_str+= "_Enter _Enter"
+    e_str += "_ExportUnfinishedObjects=_Yes "
+    e_str += "_UseSimpleDialog=_No "
+    e_str += "_Enter _DetailedOptions "
+    e_str += "_JaggedSeams=_No "
+    e_str += "_PackTextures=_No "
+    e_str += "_Refine=_Yes "
+    e_str += "_SimplePlane=_Yes "
+    e_str += "_Enter _Enter"
     return e_str, "stl"
 
 
-def get_3mf_settings():
-    """Returns the settings for 3MF export command as a string."""
+def _get_3mf_settings():
+    """3MF export command-line settings."""
     e_str = "_ExportUnfinishedObjects=_Yes "
-    e_str+= "_UseSimpleDialog=_No "
-    e_str+= "_Enter"
+    e_str += "_UseSimpleDialog=_No "
+    e_str += "_Enter"
     return e_str, "3mf"
 
 
-def export_mesh_files(meshes, path, filename, logger=None, debug=False, format_type="stl"):
-    """Exports a collection of meshes to a file.
+def save_mesh(input_meshes, directory, root_filename, format_type="stl"):
+    """Export one or more meshes to a single file.
+    
+    Uses Rhino's bake-select-export pipeline: bakes meshes to a temp layer,
+    selects them, runs the export command, then cleans up.
     
     Args:
-      meshes (list): A list of Rhino.Geometry.Mesh objects.
-      path (str): An absolute path pointing to a directory.
-      filename (str): A filename (without extension).
-      logger (callable): Optional logging function that takes a string message.
-      debug (bool): Optional True to print debug information.
-      format_type (str): Export format - "stl", "obj", or "3mf". Default is "stl".
+        input_meshes: A single Rhino.Geometry.Mesh or a list of them.
+                      All meshes are combined into one output file.
+        directory: Directory path (no dots allowed).
+        root_filename: Base filename without extension (no dots allowed).
+        format_type: "stl" (default), "obj", or "3mf".
+        
     Returns:
-      True or False, indicating success or failure.
+        bool: True if export succeeded.
+        
+    Raises:
+        MeshExportError: If export fails.
+        ValueError: If inputs are invalid.
     """
-    
-    def log(msg):
-        if logger:
-            logger(msg)
-        else:
-            print(msg)
-    
+    # Normalize single mesh to list
+    if not hasattr(input_meshes, '__iter__'):
+        meshes = [input_meshes]
+    else:
+        meshes = list(input_meshes)
+
+    log("save_mesh: {} mesh(es), format={}, filename='{}'".format(
+        len(meshes), format_type.upper(), root_filename))
+    log("save_mesh: directory='{}'".format(directory))
+
+    if len(meshes) == 0:
+        raise ValueError("No meshes provided")
+    for i, m in enumerate(meshes):
+        if m is None:
+            raise ValueError("Mesh {} is None".format(i))
+        log("  mesh {}: type={}, vertices={}, faces={}".format(
+            i, type(m).__name__,
+            m.Vertices.Count if hasattr(m, 'Vertices') else '?',
+            m.Faces.Count if hasattr(m, 'Faces') else '?'))
+
+    if directory is None or root_filename is None:
+        raise ValueError("directory and root_filename are required")
+    if "." in directory or "." in root_filename:
+        raise ValueError("directory and root_filename must not contain dots")
+
+    # Pick export settings
+    fmt = format_type.lower()
+    if fmt == "obj":
+        export_config, export_extension = _get_obj_settings()
+    elif fmt == "3mf":
+        export_config, export_extension = _get_3mf_settings()
+    else:
+        export_config, export_extension = _get_stl_settings()
+    log("  Using {} export settings".format(fmt.upper()))
+
+    export_fname = "{}.{}".format(root_filename, export_extension)
+    export_fpath = Path(os.path.join(directory, export_fname))
+    log("  Output path: {}".format(export_fpath))
+
+    t_start = time.process_time()
     sc.doc = Rhino.RhinoDoc.ActiveDoc
     sc.doc.Views.RedrawEnabled = True
-    if debug: 
-        now = time.process_time()
-        elapsed = 0.0
-        
-    # Create a temporary layer
-    log(f"export_mesh_files: Creating temp layer")
-    layer = "".join(random.choice(string.ascii_uppercase) for _ in range(9))
-    layer_index = add_layer(layer)
-    if debug: 
-        then, now = now, time.process_time()
-        elapsed += now - then
-        log("Creating temporary layer: {0:.4f} seconds".format(now-then))
-        
-    # Bake the temporary mesh(es)
-    log(f"export_mesh_files: Baking temp mesh(es)")
-    mesh_ids = [bake_mesh(layer, mesh) for mesh in meshes]
-    if debug: 
-        then, now = now, time.process_time()
-        elapsed += now - then
-        log("Creating temporary mesh(es): {0:.4f} seconds".format(now-then))
-    
-    # Unselect all objects in the scene
-    sc.doc.Objects.UnselectAll()
-    # Select the baked mesh object(s)
-    for mid in mesh_ids:
-        sc.doc.Objects.Select(mid)
-    if debug: 
-        then, now = now, time.process_time()
-        elapsed += now - then
-        log("Unselecting and selecting: {0:.4f} seconds".format(now-then))
-    
-    # Export the selected mesh object(s) to mesh file
-    log(f"export_mesh_files: Exporting to {format_type.upper()} format")
-    
-    # Get export settings based on format
-    if format_type.lower() == "obj":
-        export_config, export_extension = get_obj_settings()
-        log("Using OBJ mesh settings")
-    elif format_type.lower() == "3mf":
-        export_config, export_extension = get_3mf_settings()
-        log("Using 3MF mesh settings")
-    else:  # Default to STL
-        export_config, export_extension = get_stl_settings_default()
-        log("Using STL mesh settings")
-    
-    export_fname = "{}.{}".format(filename, export_extension)
-    export_fpath = Path(os.path.join(path, export_fname))
-    log(f"export_mesh_files: Export Values: {export_fname=} {export_fpath=}")
-    
-    if export_fpath.exists():
-        log(f"export_mesh_files: REMOVING EXISTING MESH FILE: {export_fpath}")
-        export_fpath.unlink()
-        time.sleep(1.0)
-        log(f"export_mesh_files: testing... MeshStillExists:{export_fpath.exists()}")
+    temp_layer = None
 
-    log(f"export_mesh_files: Exporting to file")
+    try:
+        # Create temp layer
+        temp_layer = "".join(random.choice(string.ascii_uppercase) for _ in range(9))
+        _add_layer(temp_layer)
+        t_layer = time.process_time()
+        log("  Created temp layer '{}' ({:.4f}s)".format(temp_layer, t_layer - t_start))
 
-    cmd = '_-Export _Pause "{}" {} _Enter'.format(export_fpath, export_config)
-    log(f"export_mesh_files: RUNNING cmd: '{cmd}'")
-    
-    rc = Rhino.RhinoApp.RunScript(cmd, True)
+        # Bake all meshes
+        mesh_ids = []
+        for i, mesh in enumerate(meshes):
+            mid = _bake_mesh(temp_layer, mesh)
+            mesh_ids.append(mid)
+        t_bake = time.process_time()
+        log("  Baked {} mesh(es) ({:.4f}s)".format(len(mesh_ids), t_bake - t_layer))
 
-    log(f"export_mesh_files: Completion {rc=}")
-    
-    if debug: 
-        then, now = now, time.process_time()
-        elapsed += now - then
-        log("Exporting Mesh Result: {0:.4f} seconds result={1}".format(now-then, rc))
-    
-    # Delete the temporary layer and meshes
-    log(f"export_mesh_files: Cleaning up temp layer")
-    delete_layer(layer)
-    
-    if debug: 
-        then, now = now, time.process_time()
-        elapsed += now - then
-        log("Cleaning up: {0:.4f} seconds\n".format(now-then))
-        log("Total elapsed: {0:.4f} seconds".format(elapsed))
+        # Select only the baked meshes
+        sc.doc.Objects.UnselectAll()
+        for mid in mesh_ids:
+            sc.doc.Objects.Select(mid)
+        t_select = time.process_time()
+        log("  Selected mesh(es) ({:.4f}s)".format(t_select - t_bake))
 
-    sc.doc.Views.RedrawEnabled = True
+        # Remove existing file if present
+        if export_fpath.exists():
+            log("  Removing existing file: {}".format(export_fpath))
+            export_fpath.unlink()
+            time.sleep(1.0)
+            if export_fpath.exists():
+                raise MeshExportError("Failed to remove existing file: {}".format(export_fpath))
 
-    log(f"export_mesh_files: Returning result: {rc=}")
+        # Run the Rhino export command
+        cmd = '_-Export _Pause "{}" {} _Enter'.format(export_fpath, export_config)
+        log("  Running export command...")
+        rc = Rhino.RhinoApp.RunScript(cmd, True)
+        t_export = time.process_time()
+        log("  Export RunScript returned: {} ({:.4f}s)".format(rc, t_export - t_select))
 
-    return rc
+        # RunScript return value is unreliable -- verify by checking the file
+        if not export_fpath.exists():
+            raise MeshExportError("Export file not found after RunScript: {}".format(export_fpath))
 
+        file_size = os.path.getsize(str(export_fpath))
+        if file_size < 100:
+            raise MeshExportError("Export file suspiciously small ({} bytes): {}".format(
+                file_size, export_fpath))
+        log("  File created: {} ({} bytes)".format(export_fpath.name, file_size))
 
-def save_mesh(input_mesh, directory, root_filename, logger=None, format_type="stl"):
-    """High-level function to save a mesh to a file.
-    
-    Args:
-      input_mesh (Rhino.Geometry.Mesh): The mesh to export.
-      directory (str): Directory path where file will be saved.
-      root_filename (str): Base filename (without extension).
-      logger (callable): Optional logging function.
-      format_type (str): Export format - "stl", "obj", or "3mf". Default is "stl".
-    
-    Returns:
-      bool: True if successful, False otherwise.
-    
-    Raises:
-      ValueError: If inputs are invalid or export fails.
-    """
-    
-    def log(msg):
-        if logger:
-            logger(msg)
-        else:
-            print(msg)
-    
-    log(f"save_mesh: inputMesh type: {type(input_mesh)}")
-    log(f"save_mesh: {directory=}")
-    log(f"save_mesh: {root_filename=}")
-    log(f"save_mesh: {format_type=}")
-    
-    if input_mesh is None or directory is None or root_filename is None:        
-        raise ValueError("Missing required inputs for saving file")
-
-    # Validate the path (no dots in directory or filename for safety)
-    if "." in directory or "." in root_filename:
-        raise ValueError(f"Path must not contain dot character: {directory}")
-
-    result = export_mesh_files([input_mesh], directory, root_filename, logger=logger, debug=True, format_type=format_type)
-
-    if not result:
-        raise ValueError(f"FAIL: mesh export failed. {result=}")
-    else:
-        log(f'SUCCESS: Saved {format_type.upper()} to {root_filename} in {directory}')
+        t_total = time.process_time() - t_start
+        log("save_mesh: Complete ({:.4f}s total)".format(t_total))
         return True
+
+    finally:
+        # Always clean up the temp layer
+        if temp_layer is not None:
+            try:
+                _delete_layer(temp_layer)
+                log("  Cleaned up temp layer")
+            except Exception as cleanup_err:
+                log("  Warning: cleanup failed: {}".format(cleanup_err))
+        sc.doc.Views.RedrawEnabled = True

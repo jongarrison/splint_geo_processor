@@ -1,0 +1,11 @@
+{
+  "id": "cmlg40leo0001l904p031jqj1",
+  "algorithm": "InfinityFlex",
+  "params": "{\"rootCircumferenceMM\":54,\"midCircumferenceMM\":54,\"tipCircumferenceMM\":52,\"interPhalanxDistanceMM\":28,\"flexionDegrees\":25}",
+  "metadata": {
+    "GeometryName": "InfinityFlex",
+    "CustomerNote": null,
+    "CustomerID": null,
+    "objectID": "E5TP"
+  }
+}

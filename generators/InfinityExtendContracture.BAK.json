@@ -1,0 +1,12 @@
+{
+  "id": "cmlslq4pg0001kz043b7kux7l",
+  "algorithm": "InfinityExtend",
+  "note": "4 Contracture splints at once",
+  "params": "{\"root_circumference_mm\":67,\"mid_circumference_mm\":64,\"tip_circumference_mm\":56,\"inter_phalanx_distance_mm\":33,\"contracture_flexion_start\":40,\"contracture_flexion_end\":0,\"contracture_flexion_count\":4}",
+  "metadata": {
+    "GeometryName": "Infinity Extend Contracture",
+    "CustomerNote": null,
+    "CustomerID": "ContractureT1",
+    "objectID": "ZQXA"
+  }
+}

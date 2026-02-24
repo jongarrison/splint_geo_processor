@@ -537,6 +537,26 @@ def trim_surface_with_direction(trim_surfaces, input_surface, keep_direction):
         if trim_brep is None or not trim_brep.IsValid:
             raise FeatureIdentificationError("trim_brep {} is invalid".format(ti))
         
+        # Log trim surface location for debugging
+        trim_amp = rg.AreaMassProperties.Compute(trim_brep)
+        trim_centroid = trim_amp.Centroid if trim_amp else rg.Point3d.Origin
+        current_amp = rg.AreaMassProperties.Compute(current)
+        current_centroid = current_amp.Centroid if current_amp else rg.Point3d.Origin
+        log("    Trim centroid: ({:.2f}, {:.2f}, {:.2f})".format(
+            trim_centroid.X, trim_centroid.Y, trim_centroid.Z))
+        log("    Current centroid: ({:.2f}, {:.2f}, {:.2f})".format(
+            current_centroid.X, current_centroid.Y, current_centroid.Z))
+        
+        # Check if bounding boxes overlap before attempting split
+        trim_bbox = trim_brep.GetBoundingBox(True)
+        current_bbox = current.GetBoundingBox(True)
+        bbox_intersects = rg.BoundingBox.Intersection(trim_bbox, current_bbox).IsValid if trim_bbox.IsValid and current_bbox.IsValid else False
+        log("    Bounding boxes overlap: {}".format(bbox_intersects))
+        
+        if not bbox_intersects:
+            log("    Skipping trim {} - no bounding box overlap".format(ti))
+            continue
+        
         # Split current with trim surface
         split_results = current.Split(trim_brep, tolerance)
         
@@ -545,14 +565,13 @@ def trim_surface_with_direction(trim_surfaces, input_surface, keep_direction):
             split_results = current.Split(trim_brep, tolerance * 10)
         
         if split_results is None or len(split_results) == 0:
-            log("    Split {} returned no results".format(ti))
-            raise FeatureIdentificationError("Split {} produced no pieces".format(ti))
+            log("    Split {} returned no results, skipping (trim may not intersect current surface)".format(ti))
+            continue
         
         log("    Split produced {} piece(s)".format(len(split_results)))
         
         # Pick the piece most in keep_direction from the trim surface
-        trim_amp = rg.AreaMassProperties.Compute(trim_brep)
-        ref_point = trim_amp.Centroid if trim_amp else rg.Point3d.Origin
+        ref_point = trim_centroid
         
         best_piece = None
         best_dot = -float('inf')
