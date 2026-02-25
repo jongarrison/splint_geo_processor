@@ -8,6 +8,7 @@ import Rhino.Geometry as rg
 from Rhino.Geometry import Point3d, Vector3d, Line, Plane, Polyline
 import scriptcontext as sc
 import math
+import time
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
 from splintcommon import log
@@ -83,6 +84,11 @@ class FingerParams:
     
     # Augment joint sphere radii to improve boolean union reliability (mm)
     augment_joint_spheres: float = 0.2
+    
+    # Pad rise: shifts volar (palm-side) vertices dorsally from DIP to tip
+    # 0.0 = symmetric (current behavior), 0.3-0.5 = realistic fingertip shape
+    # Value is fraction of tip radius used as max dorsal shift at the tip
+    pad_rise: float = 0.0
     
     # Trim region specification: (joint_name, offset_mm)
     # offset is negative for before joint, positive for after
@@ -526,6 +532,148 @@ def create_joint_and_phalanx(
     return joint_brep, phalanx_brep
 
 
+class PadRiseMorph(rg.SpaceMorph):
+    """SpaceMorph that reshapes the fingertip sphere region for anatomical realism.
+    
+    Five influences control the deformation, all shifts are in the dorsal
+    (nail/upward) direction:
+    
+    1. Axial ramp: 0 at 2*R behind tip center, raised-cosine ramp to 1.0
+       at the very tip (+R). Ensures the phalanx tube is unaffected while
+       the tip sphere and its transition get the full effect.
+    
+    2. North (nail) hemisphere profile: cos falloff from 1.0 at the equator
+       to 0.0 at the north pole (pi/2 range). Keeps the nail surface flat.
+    
+    3. South (pad) hemisphere profile: gentler cos falloff from 1.0 at the
+       equator to 0.5 at the south pole (pi/3 range). The pad bottom still
+       rises substantially, producing the characteristic fingertip shape.
+    
+    4. Lateral falloff: quadratic reduction (1.0 center to 0.7 at full
+       lateral extent). The lateral nail edges sit slightly lower than the
+       nail midline, matching real anatomy.
+    
+    5. North pole cap: hard limit preventing any point from shifting above
+       the original north pole position.
+    """
+    
+    def __init__(self, tip_center, finger_dir, dorsal, tip_radius, pad_rise, tolerance):
+        rg.SpaceMorph.__init__(self)
+        self.Tolerance = tolerance
+        self._tip_center = tip_center
+        self._finger_dir = finger_dir  # unit vector along finger axis
+        self._dorsal = dorsal
+        self._lateral = rg.Vector3d.CrossProduct(finger_dir, dorsal)
+        self._lateral.Unitize()
+        self._tip_radius = tip_radius
+        self._max_shift = pad_rise * tip_radius
+    
+    def MorphPoint(self, point):
+        v = rg.Vector3d(point - self._tip_center)
+        R = self._tip_radius
+        
+        # Decompose into axial, dorsal, and lateral components
+        axial_dist = rg.Vector3d.Multiply(v, self._finger_dir)
+        dorsal_comp = rg.Vector3d.Multiply(v, self._dorsal)
+        lateral_comp = rg.Vector3d.Multiply(v, self._lateral)
+        
+        # Skip points outside the influence zone
+        if axial_dist < -R * 2.0 or axial_dist > R * 1.5:
+            return point
+        
+        # 1. Axial ramp: 0 at -2R, 1.0 at +R (raised cosine)
+        t = (axial_dist + 2.0 * R) / (3.0 * R)
+        t = max(0.0, min(1.0, t))
+        axial_factor = 0.5 * (1.0 - math.cos(math.pi * t))
+        
+        # 2. Equatorial influence (asymmetric by hemisphere)
+        if dorsal_comp >= 0:
+            # North (nail) hemisphere: standard falloff to zero at north pole
+            eq_t = min(dorsal_comp / R, 1.0)
+            equatorial_factor = math.cos(eq_t * math.pi / 2.0)
+        else:
+            # South (pad) hemisphere: gentler falloff, keeps influence deeper
+            # cos(60 deg) = 0.5 at south pole, so pad bottom still rises
+            eq_t = min(abs(dorsal_comp) / R, 1.0)
+            equatorial_factor = math.cos(eq_t * math.pi / 3.0)
+        
+        # 3. Lateral falloff: gently reduce at sides
+        lat_t = min(abs(lateral_comp) / R, 1.0)
+        lateral_factor = 1.0 - 0.3 * lat_t * lat_t  # quadratic, subtle
+        
+        shift = self._max_shift * axial_factor * equatorial_factor * lateral_factor
+        
+        # 4. North pole cap: never shift above original north pole
+        if shift > 0 and dorsal_comp + shift > R:
+            shift = max(0.0, R - dorsal_comp)
+        
+        if shift <= 0:
+            return point
+        
+        return rg.Point3d(
+            point.X + self._dorsal.X * shift,
+            point.Y + self._dorsal.Y * shift,
+            point.Z + self._dorsal.Z * shift
+        )
+
+
+def apply_pad_rise(finger_brep, joint_positions, tip_radius, pad_rise, tolerance):
+    """
+    Reshape the fingertip region for realistic pad-rise anatomy.
+    
+    Applies a SpaceMorph that shifts volar control points dorsally in the
+    tip sphere zone only. The dorsal (nail) surface stays flat, the volar
+    (pad) surface rises toward the tip. Smooth falloff draws up the distal
+    phalanx edge naturally.
+    
+    Works directly on brep NURBS control points -- no mesh conversion.
+    
+    Args:
+        finger_brep: Input brep to deform
+        joint_positions: Dict with position/direction info
+        tip_radius: Radius at fingertip (defines deformation zone)
+        pad_rise: Shift fraction (0.0 = no-op, 0.3-0.5 typical)
+        tolerance: Geometric tolerance
+        
+    Returns:
+        Brep: Deformed brep, or original if not applicable
+    """
+    if pad_rise <= 0:
+        return finger_brep
+    
+    if "tip" not in joint_positions:
+        log("pad_rise: tip position not available, skipping")
+        return finger_brep
+    
+    tip_center = joint_positions["tip"][0]
+    finger_dir = joint_positions["tip"][1]  # direction at tip
+    finger_dir.Unitize()
+    
+    # Dorsal direction: perpendicular to finger axis, away from palm (+Z approx)
+    up_candidate = rg.Vector3d.ZAxis
+    if abs(rg.Vector3d.Multiply(up_candidate, finger_dir)) > 0.95:
+        up_candidate = rg.Vector3d.YAxis
+    dorsal = up_candidate - finger_dir * rg.Vector3d.Multiply(up_candidate, finger_dir)
+    dorsal.Unitize()
+    
+    max_shift = pad_rise * tip_radius
+    log(f"pad_rise: tip_r={tip_radius:.2f}, shift={max_shift:.2f}mm, center={tip_center}")
+    
+    morph = PadRiseMorph(tip_center, finger_dir, dorsal, tip_radius, pad_rise, tolerance)
+    
+    t0 = time.time()
+    deformed = finger_brep.Duplicate()
+    success = morph.Morph(deformed)
+    elapsed = time.time() - t0
+    
+    if success and deformed.IsValid:
+        log(f"pad_rise: morph succeeded in {elapsed:.3f}s, volume={deformed.GetVolume():.2f} mm^3")
+        return deformed
+    
+    log(f"pad_rise: morph failed after {elapsed:.3f}s, returning original")
+    return finger_brep
+
+
 def create_finger_model(
     params: FingerParams,
     tolerance: Optional[float] = None,
@@ -560,6 +708,8 @@ def create_finger_model(
     if tolerance is None:
         tolerance = sc.doc.ModelAbsoluteTolerance
     
+    start_time = time.time()
+    
     # Validate parameters for the specified segment range
     validation_errors = params.validate_for_segment_range()
     if validation_errors:
@@ -581,6 +731,8 @@ def create_finger_model(
     log(f"Segment range: {params.start_at} -> {params.end_at}")
     if shell != 0:
         log(f"Shell thickness: {shell}mm")
+    if params.pad_rise != 0:
+        log(f"Pad rise: {params.pad_rise}")
     
     # Convert endpoint circumferences to radii, add shell thickness
     mcp_radius = params.mcp_circ / (2 * math.pi) + shell
@@ -817,6 +969,12 @@ def create_finger_model(
     if params.trim_start is not None or params.trim_end is not None:
         finger_brep, centerline = trim_finger_model(finger_brep, centerline, params, joint_positions, tolerance)
     
+    # Apply pad rise deformation (no-op when pad_rise=0.0)
+    if params.pad_rise > 0 and params.includes_segment("tip"):
+        finger_brep = apply_pad_rise(finger_brep, joint_positions, tip_radius, params.pad_rise, tolerance)
+    
+    elapsed = time.time() - start_time
+    log(f"create_finger_model completed in {elapsed:.3f}s")
     log("=" * 60)
     
     return centerline, finger_brep, components if return_parts else None, joint_positions

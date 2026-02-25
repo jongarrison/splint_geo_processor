@@ -10,10 +10,82 @@ import scriptcontext as sc
 import math
 from splintcommon import log
 
+
+def _revolve_profile(profile_curve, axis_line, radius_start, radius_end, tolerance):
+    """Create a capped solid of revolution from a profile curve.
+    
+    Args:
+        profile_curve: NurbsCurve to revolve
+        axis_line: Line defining the revolution axis
+        radius_start: Radius at start (for manual cap fallback)
+        radius_end: Radius at end (for manual cap fallback)
+        tolerance: Geometric tolerance
+        
+    Returns:
+        Brep: Capped solid, or None on failure
+    """
+    pt_start = axis_line.From
+    pt_end = axis_line.To
+    axis_vector = rg.Vector3d(pt_end - pt_start)
+    axis_vector.Unitize()
+    
+    rev_surface = rg.RevSurface.Create(profile_curve, axis_line, 0.0, 2.0 * math.pi)
+    if not rev_surface:
+        log("ERROR: Failed to create revolution surface")
+        return None
+    
+    brep = rev_surface.ToBrep()
+    if not brep:
+        log("ERROR: Failed to convert revolution surface to brep")
+        return None
+    
+    # CapPlanarHoles returns a NEW brep
+    capped = brep.CapPlanarHoles(tolerance)
+    if capped and capped.IsSolid:
+        brep = capped
+    
+    # Fallback: manual planar caps
+    if not brep.IsSolid:
+        log("  Trying manual planar caps...")
+        start_plane = rg.Plane(pt_start, axis_vector)
+        start_circle = rg.Circle(start_plane, radius_start)
+        start_cap = rg.Brep.CreatePlanarBreps([start_circle.ToNurbsCurve()], tolerance)
+        
+        end_plane = rg.Plane(pt_end, axis_vector)
+        end_circle = rg.Circle(end_plane, radius_end)
+        end_cap = rg.Brep.CreatePlanarBreps([end_circle.ToNurbsCurve()], tolerance)
+        
+        if start_cap and len(start_cap) > 0 and end_cap and len(end_cap) > 0:
+            all_breps = [brep, start_cap[0], end_cap[0]]
+            joined = rg.Brep.JoinBreps(all_breps, tolerance)
+            if joined and len(joined) > 0:
+                brep = joined[0]
+                log("  Joined with manual planar caps")
+    
+    if not brep.IsSolid:
+        log("ERROR: Revolution brep not solid after capping")
+        return None
+    
+    # Cleanup
+    brep.Faces.SplitKinkyFaces(sc.doc.ModelAngleToleranceRadians, True)
+    brep.Compact()
+    brep.MergeCoplanarFaces(tolerance)
+    
+    if not brep.IsValid:
+        log("  Attempting repair (IsValid=False)...")
+        brep.Repair(tolerance)
+    
+    if brep.IsSolid and brep.IsManifold:
+        return brep
+    
+    log("ERROR: Revolution brep failed final validation")
+    log("  IsValid: {}, IsSolid: {}, IsManifold: {}".format(
+        brep.IsValid, brep.IsSolid, brep.IsManifold))
+    return None
+
 def create_tapered_cylinder(center_line, radius_start, radius_end, tolerance=None):
     """
     Create a clean tapered cylinder using surface of revolution.
-    More reliable than lofting - avoids seam misalignment and self-intersections.
     
     Args:
         center_line: Line defining the cylinder axis
@@ -28,7 +100,6 @@ def create_tapered_cylinder(center_line, radius_start, radius_end, tolerance=Non
         if tolerance is None or tolerance <= 0:
             tolerance = sc.doc.ModelAbsoluteTolerance
         
-        # Validate inputs
         if not center_line or center_line.Length < tolerance:
             log("ERROR: Invalid center line (too short or None)")
             return None
@@ -37,113 +108,28 @@ def create_tapered_cylinder(center_line, radius_start, radius_end, tolerance=Non
             log("ERROR: Invalid radii (must be > 0)")
             return None
         
-        # Get line endpoints
         pt_start = center_line.From
         pt_end = center_line.To
-        
-        # Create axis vector
         axis_vector = rg.Vector3d(pt_end - pt_start)
         axis_vector.Unitize()
         
-        # Find a perpendicular vector to the axis
-        # Use a robust method that works for any axis orientation
         if abs(axis_vector.Z) < 0.9:
-            # Axis is not vertical - use Z cross product
             perp = rg.Vector3d.CrossProduct(axis_vector, rg.Vector3d.ZAxis)
         else:
-            # Axis is vertical - use X cross product
             perp = rg.Vector3d.CrossProduct(axis_vector, rg.Vector3d.XAxis)
-        
         perp.Unitize()
         
-        # Create profile line (outer edge of cone/cylinder)
         profile_start = pt_start + perp * radius_start
         profile_end = pt_end + perp * radius_end
-        profile_line = rg.Line(profile_start, profile_end)
+        profile_curve = rg.Line(profile_start, profile_end).ToNurbsCurve()
         
-        # Create revolution surface
-        rev_surface = rg.RevSurface.Create(
-            profile_line.ToNurbsCurve(),
-            center_line,
-            0.0,  # start angle
-            2.0 * math.pi  # end angle (full circle)
-        )
+        brep = _revolve_profile(profile_curve, center_line, radius_start, radius_end, tolerance)
         
-        if not rev_surface:
-            log("ERROR: Failed to create revolution surface")
-            log("  Profile line: {} to {}".format(profile_start, profile_end))
-            log("  Axis: {} to {}".format(pt_start, pt_end))
-            log("  Radii: r1={:.3f}, r2={:.3f}".format(radius_start, radius_end))
-            return None
-        
-        # Convert to brep
-        brep = rev_surface.ToBrep()
-        if not brep:
-            log("ERROR: Failed to convert revolution surface to brep")
-            return None
-        
-        # Cap both ends to create solid
-        # Method 1: Try CapPlanarHoles
-        capped = brep.CapPlanarHoles(tolerance)
-        
-        # Method 2: If still not solid, try adding planar caps manually
-        if not brep.IsSolid:
-            log("  Trying manual planar caps...")
-            # Create planar caps at each end
-            # Start cap - create plane at start with axis as normal
-            start_plane = rg.Plane(pt_start, axis_vector)
-            start_circle = rg.Circle(start_plane, radius_start)
-            start_curve = start_circle.ToNurbsCurve()
-            start_cap = rg.Brep.CreatePlanarBreps([start_curve], tolerance)
-            
-            # End cap - create plane at end with axis as normal
-            end_plane = rg.Plane(pt_end, axis_vector)
-            end_circle = rg.Circle(end_plane, radius_end)
-            end_curve = end_circle.ToNurbsCurve()
-            end_cap = rg.Brep.CreatePlanarBreps([end_curve], tolerance)
-            
-            if start_cap and len(start_cap) > 0 and end_cap and len(end_cap) > 0:
-                # Join all breps
-                all_breps = [brep, start_cap[0], end_cap[0]]
-                joined = rg.Brep.JoinBreps(all_breps, tolerance)
-                if joined and len(joined) > 0:
-                    brep = joined[0]
-                    log("  Joined revolution surface with planar caps")
-        
-        # Final cleanup and validation
-        if brep.IsSolid:
-            # Clean up the brep
-            brep.Faces.SplitKinkyFaces(sc.doc.ModelAngleToleranceRadians, True)
-            brep.Compact()
-            
-            # Try to remove any micro-edges or degeneracies
-            brep.MergeCoplanarFaces(tolerance)
-            
-            # If not valid, try to repair
-            if not brep.IsValid:
-                log("  Attempting repair (IsValid=False)...")
-                repaired = brep.Repair(tolerance)
-                if repaired:
-                    log("  Repair successful")
-                else:
-                    log("  Repair failed, but continuing anyway")
-            
-            # Final validation - accept if solid and manifold, even if repair needed
-            if brep.IsSolid and brep.IsManifold:
-                naked_edges = sum(1 for e in brep.Edges if e.Valence == rg.EdgeAdjacency.Naked)
-                log("Created tapered cylinder: r1={:.3f}, r2={:.3f}, length={:.3f}, faces={}, edges={}, naked={}, valid={}".format(
-                    radius_start, radius_end, center_line.Length, brep.Faces.Count, brep.Edges.Count, naked_edges, brep.IsValid))
-                return brep
-            else:
-                log("ERROR: Tapered cylinder failed final validation")
-                log("  IsValid: {}, IsSolid: {}, IsManifold: {}".format(
-                    brep.IsValid, brep.IsSolid, brep.IsManifold))
-                return None
-        else:
-            log("ERROR: Tapered cylinder not solid after capping attempts")
-            log("  IsValid: {}, IsSolid: {}, Faces: {}".format(
-                brep.IsValid, brep.IsSolid, brep.Faces.Count))
-            return None
+        if brep:
+            naked_edges = sum(1 for e in brep.Edges if e.Valence == rg.EdgeAdjacency.Naked)
+            log("Created tapered cylinder: r1={:.3f}, r2={:.3f}, length={:.3f}, faces={}, edges={}, naked={}, valid={}".format(
+                radius_start, radius_end, center_line.Length, brep.Faces.Count, brep.Edges.Count, naked_edges, brep.IsValid))
+        return brep
             
     except Exception as e:
         log("ERROR creating tapered cylinder: {}".format(str(e)))
@@ -235,12 +221,6 @@ def create_bulged_cylinder(center_line, radius_start, radius_mid, radius_end, to
     Create a solid tube with a bulge (or waist) at the midpoint using surface of revolution.
     
     Uses a quadratic bezier curve as the profile, revolved around the axis.
-    This approach is more robust than lofting circles.
-    
-    The profile passes through three points:
-        - Start: (0, radius_start)
-        - Mid:   (length/2, radius_mid)  
-        - End:   (length, radius_end)
     
     Args:
         center_line: Line defining the tube axis
@@ -256,7 +236,6 @@ def create_bulged_cylinder(center_line, radius_start, radius_mid, radius_end, to
         if tolerance is None or tolerance <= 0:
             tolerance = sc.doc.ModelAbsoluteTolerance
         
-        # Validate inputs
         if not center_line or center_line.Length < tolerance:
             log("ERROR: Invalid center line (too short or None)")
             return None
@@ -266,107 +245,40 @@ def create_bulged_cylinder(center_line, radius_start, radius_mid, radius_end, to
             return None
         
         length = center_line.Length
-        
-        # Get line endpoints and direction
         pt_start = center_line.From
         pt_end = center_line.To
         axis_vector = rg.Vector3d(pt_end - pt_start)
         axis_vector.Unitize()
         
-        # Find a perpendicular vector to the axis (same logic as tapered cylinder)
         if abs(axis_vector.Z) < 0.9:
             perp = rg.Vector3d.CrossProduct(axis_vector, rg.Vector3d.ZAxis)
         else:
             perp = rg.Vector3d.CrossProduct(axis_vector, rg.Vector3d.XAxis)
         perp.Unitize()
         
-        # Create profile points in the axis-perpendicular plane
-        # Points are: start (at radius_start), mid (at radius_mid), end (at radius_end)
         profile_start = pt_start + perp * radius_start
         profile_mid = pt_start + axis_vector * (length / 2.0) + perp * radius_mid
         profile_end = pt_end + perp * radius_end
         
-        # Create a quadratic bezier curve through the three points
-        # For a quadratic bezier passing through start, mid, end:
-        # We need to compute the control point
-        # B(0.5) = 0.25*P0 + 0.5*P1 + 0.25*P2 = mid_point
-        # So: P1 = 2*mid_point - 0.5*P0 - 0.5*P2
+        # Quadratic bezier control point so curve passes through profile_mid at t=0.5
         control_pt = rg.Point3d(
             2.0 * profile_mid.X - 0.5 * profile_start.X - 0.5 * profile_end.X,
             2.0 * profile_mid.Y - 0.5 * profile_start.Y - 0.5 * profile_end.Y,
             2.0 * profile_mid.Z - 0.5 * profile_start.Z - 0.5 * profile_end.Z
         )
         
-        # Create the bezier curve (degree 2 = quadratic)
-        bezier_points = [profile_start, control_pt, profile_end]
-        profile_curve = rg.NurbsCurve.Create(False, 2, bezier_points)
-        
+        profile_curve = rg.NurbsCurve.Create(False, 2, [profile_start, control_pt, profile_end])
         if not profile_curve:
             log("ERROR: Failed to create bezier profile curve")
             return None
         
-        # Create revolution surface around the center line
-        rev_surface = rg.RevSurface.Create(
-            profile_curve,
-            center_line,
-            0.0,
-            2.0 * math.pi
-        )
+        brep = _revolve_profile(profile_curve, center_line, radius_start, radius_end, tolerance)
         
-        if not rev_surface:
-            log("ERROR: Failed to create revolution surface for bulged cylinder")
-            return None
-        
-        # Convert to brep
-        brep = rev_surface.ToBrep()
-        if not brep:
-            log("ERROR: Failed to convert revolution surface to brep")
-            return None
-        
-        # Cap both ends
-        capped = brep.CapPlanarHoles(tolerance)
-        
-        if not brep.IsSolid:
-            # Try manual capping
-            log("  Bulged cylinder (rev): trying manual planar caps...")
-            start_plane = rg.Plane(pt_start, axis_vector)
-            start_circle = rg.Circle(start_plane, radius_start)
-            start_cap = rg.Brep.CreatePlanarBreps([start_circle.ToNurbsCurve()], tolerance)
-            
-            end_plane = rg.Plane(pt_end, axis_vector)
-            end_circle = rg.Circle(end_plane, radius_end)
-            end_cap = rg.Brep.CreatePlanarBreps([end_circle.ToNurbsCurve()], tolerance)
-            
-            if start_cap and len(start_cap) > 0 and end_cap and len(end_cap) > 0:
-                all_breps = [brep, start_cap[0], end_cap[0]]
-                joined = rg.Brep.JoinBreps(all_breps, tolerance)
-                if joined and len(joined) > 0:
-                    brep = joined[0]
-                    log("  Joined revolution surface with planar caps")
-        
-        # Final validation
-        if brep.IsSolid:
-            brep.Faces.SplitKinkyFaces(sc.doc.ModelAngleToleranceRadians, True)
-            brep.Compact()
-            brep.MergeCoplanarFaces(tolerance)
-            
-            if not brep.IsValid:
-                log("  Attempting repair (IsValid=False)...")
-                brep.Repair(tolerance)
-            
-            if brep.IsSolid and brep.IsManifold:
-                naked_edges = sum(1 for e in brep.Edges if e.Valence == rg.EdgeAdjacency.Naked)
-                log("Created bulged cylinder (revolution): r1={:.3f}, r_mid={:.3f}, r2={:.3f}, length={:.3f}, faces={}, naked={}".format(
-                    radius_start, radius_mid, radius_end, length, brep.Faces.Count, naked_edges))
-                return brep
-            else:
-                log("ERROR: Bulged cylinder failed final validation")
-                log("  IsValid: {}, IsSolid: {}, IsManifold: {}".format(
-                    brep.IsValid, brep.IsSolid, brep.IsManifold))
-                return None
-        else:
-            log("ERROR: Bulged cylinder not solid after capping")
-            return None
+        if brep:
+            naked_edges = sum(1 for e in brep.Edges if e.Valence == rg.EdgeAdjacency.Naked)
+            log("Created bulged cylinder (revolution): r1={:.3f}, r_mid={:.3f}, r2={:.3f}, length={:.3f}, faces={}, naked={}".format(
+                radius_start, radius_mid, radius_end, length, brep.Faces.Count, naked_edges))
+        return brep
             
     except Exception as e:
         log("ERROR creating bulged cylinder: {}".format(str(e)))

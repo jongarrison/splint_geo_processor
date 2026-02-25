@@ -7,6 +7,7 @@ Primary use case: Subtracting inner finger model from shell to create hollow spl
 
 import Rhino.Geometry as rg
 import scriptcontext as sc
+import math
 from splintcommon import log
 
 class BrepDifferenceError(Exception):
@@ -191,20 +192,42 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
     intersection_vol = compute_intersection_volume(minuend, subtrahend, base_tolerance)
     log("Intersection volume: {:.3f}".format(intersection_vol))
     
+    # If intersection volume is 0, check bounding box overlap before giving up.
+    # CreateBooleanIntersection can fail on self-intersecting breps even when
+    # the geometry clearly overlaps (e.g. concentric finger models).
+    skip_volume_validation = False
     if intersection_vol < 0.001:
-        log("ERROR: No intersection between minuend and subtrahend!")
-        log("  The subtrahend does not overlap the minuend - nothing to subtract.")
-        raise NoIntersectionError(
-            "Subtrahend does not intersect minuend (intersection volume < 0.001 mm^3). "
-            "Check that both breps occupy overlapping regions."
+        bb_a = minuend.GetBoundingBox(True)
+        bb_b = subtrahend.GetBoundingBox(True)
+        bb_overlap = not (
+            bb_a.Min.X > bb_b.Max.X or bb_b.Min.X > bb_a.Max.X or
+            bb_a.Min.Y > bb_b.Max.Y or bb_b.Min.Y > bb_a.Max.Y or
+            bb_a.Min.Z > bb_b.Max.Z or bb_b.Min.Z > bb_a.Max.Z
         )
+        if bb_overlap:
+            log("WARNING: Intersection volume=0 but bounding boxes overlap.")
+            log("  Likely caused by self-intersecting input breps.")
+            log("  Proceeding with difference (volume validation disabled).")
+            skip_volume_validation = True
+        else:
+            log("ERROR: No intersection between minuend and subtrahend!")
+            log("  Bounding boxes do not overlap - nothing to subtract.")
+            raise NoIntersectionError(
+                "Subtrahend does not intersect minuend (intersection volume < 0.001 mm^3, "
+                "bounding boxes disjoint). Check that both breps occupy overlapping regions."
+            )
     
-    expected_result_vol = minuend_vol - intersection_vol
-    log("Expected result volume: ~{:.3f}  (minuend - intersection)".format(expected_result_vol))
+    expected_result_vol = minuend_vol - intersection_vol if not skip_volume_validation else None
+    if expected_result_vol is not None:
+        log("Expected result volume: ~{:.3f}  (minuend - intersection)".format(expected_result_vol))
     
     # Track best result across all attempts
     best_result = None
     best_issues = None
+    
+    # When volume validation is skipped, pass None so validate_difference_result
+    # doesn't try to check against a bogus intersection volume
+    validation_vol = None if skip_volume_validation else intersection_vol
     
     # STRATEGY 1: Direct difference at base tolerance
     log("")
@@ -216,7 +239,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
     if result:
         result_vol = get_brep_volume(result)
         log("Result volume: {:.3f}".format(result_vol if result_vol else 0))
-        is_valid, issues = validate_difference_result(result, minuend, subtrahend, intersection_vol)
+        is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol)
         if is_valid:
             log("SUCCESS - Clean boolean difference")
             return result, True, "Difference(tol={:.6f})".format(base_tolerance)
@@ -237,7 +260,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
     if result:
         result_vol = get_brep_volume(result)
         log("Result volume: {:.3f}".format(result_vol if result_vol else 0))
-        is_valid, issues = validate_difference_result(result, minuend, subtrahend, intersection_vol)
+        is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol)
         if is_valid:
             log("SUCCESS - List-based difference")
             return result, True, "DifferenceList(tol={:.6f})".format(base_tolerance)
@@ -262,7 +285,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
         log("  Trying tolerance: {:.6f}".format(tol))
         result = attempt_boolean_difference(minuend, subtrahend, tol)
         if result:
-            is_valid, issues = validate_difference_result(result, minuend, subtrahend, intersection_vol, tolerance_pct=15.0)
+            is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol, tolerance_pct=15.0)
             if is_valid:
                 log("SUCCESS - Difference at higher tolerance")
                 return result, True, "Difference(tol={:.6f})".format(tol)
@@ -294,7 +317,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
                 
                 result = attempt_boolean_difference(minuend, jiggled_subtrahend, base_tolerance)
                 if result:
-                    is_valid, issues = validate_difference_result(result, minuend, subtrahend, intersection_vol, tolerance_pct=15.0)
+                    is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol, tolerance_pct=15.0)
                     if is_valid:
                         log("SUCCESS - Jiggle {:.4f}mm worked".format(offset_dist))
                         return result, True, "Jiggled({:.4f}mm)".format(offset_dist)
@@ -324,7 +347,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
         
         result = attempt_boolean_difference(fixed_minuend, fixed_subtrahend, base_tolerance * 10)
         if result:
-            is_valid, issues = validate_difference_result(result, minuend, subtrahend, intersection_vol, tolerance_pct=20.0)
+            is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol, tolerance_pct=20.0)
             if is_valid:
                 log("SUCCESS - Repaired inputs worked")
                 return result, True, "Repaired"
@@ -336,7 +359,70 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
     except Exception as e:
         log("Repair failed: {}".format(str(e)))
     
-    # STRATEGY 6: Return best imperfect result if we have one
+    # STRATEGY 6: Mesh boolean difference
+    # Convert both breps to meshes and use mesh boolean, which is much more
+    # robust when brep booleans fail due to self-intersecting NURBS trim curves
+    log("")
+    log("-" * 60)
+    log("STRATEGY 6: Mesh boolean difference")
+    log("-" * 60)
+    
+    try:
+        mesh_params = rg.MeshingParameters.DefaultAnalysisMesh
+        
+        minuend_meshes = rg.Mesh.CreateFromBrep(minuend, mesh_params)
+        subtrahend_meshes = rg.Mesh.CreateFromBrep(subtrahend, mesh_params)
+        
+        if minuend_meshes and subtrahend_meshes:
+            # Join mesh arrays into single meshes
+            mesh_a = rg.Mesh()
+            for m in minuend_meshes:
+                mesh_a.Append(m)
+            mesh_a.Weld(math.pi)
+            
+            mesh_b = rg.Mesh()
+            for m in subtrahend_meshes:
+                mesh_b.Append(m)
+            mesh_b.Weld(math.pi)
+            
+            log("  Minuend mesh: {} vertices, {} faces".format(
+                mesh_a.Vertices.Count, mesh_a.Faces.Count))
+            log("  Subtrahend mesh: {} vertices, {} faces".format(
+                mesh_b.Vertices.Count, mesh_b.Faces.Count))
+            
+            diff_meshes = rg.Mesh.CreateBooleanDifference(
+                [mesh_a], [mesh_b]
+            )
+            
+            if diff_meshes and len(diff_meshes) > 0:
+                result_mesh = diff_meshes[0]
+                if len(diff_meshes) > 1:
+                    for dm in diff_meshes[1:]:
+                        result_mesh.Append(dm)
+                
+                result_mesh.Weld(math.pi)
+                result_mesh.RebuildNormals()
+                
+                log("  Result mesh: {} vertices, {} faces".format(
+                    result_mesh.Vertices.Count, result_mesh.Faces.Count))
+                
+                # Convert back to brep for consistent return type
+                result_brep = rg.Brep.CreateFromMesh(result_mesh, True)
+                if result_brep:
+                    log("SUCCESS - Mesh boolean difference")
+                    return result_brep, True, "MeshBoolean"
+                else:
+                    log("  Mesh boolean succeeded but conversion to brep failed")
+                    log("  Returning mesh wrapped as brep")
+                    # Last resort: return the mesh-as-brep even if imperfect
+            else:
+                log("  Mesh boolean returned no results")
+        else:
+            log("  Failed to create meshes from input breps")
+    except Exception as e:
+        log("  Mesh boolean failed: {}".format(str(e)))
+    
+    # STRATEGY 7: Return best imperfect result if we have one
     if best_result is not None:
         log("")
         log("-" * 60)

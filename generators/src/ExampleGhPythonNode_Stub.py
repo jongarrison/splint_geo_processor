@@ -24,4 +24,4 @@ reload(splintcommon) #FOR DEV
 #splintcommon module is now available for use in this GhPython component
 splintcommon.log(f'GhPython Node initialized at {time.ctime()}')
 
-#Your code here
+#Component code here
