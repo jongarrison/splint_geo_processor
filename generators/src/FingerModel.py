@@ -38,6 +38,18 @@ from BrepUnion import robust_brep_union, BrepUnionError, InvalidBrepError
 # Segment names in order from base to tip (joints and phalanges as separate segments)
 SEGMENT_ORDER = ["metacarpal", "mcp", "proximal", "pip", "middle", "dip", "distal", "tip"]
 
+# Phalanx and joint names for perp frame lookups
+PHALANX_NAMES = ["metacarpal", "proximal", "middle", "distal"]
+JOINT_NAMES = ["mcp", "pip", "dip", "tip"]
+
+# Maps each joint to (proximal_phalanx, distal_phalanx) for perp frame resolution
+JOINT_ADJACENCY = {
+    "mcp": ("metacarpal", "proximal"),
+    "pip": ("proximal", "middle"),
+    "dip": ("middle", "distal"),
+    "tip": ("distal", None),
+}
+
 
 @dataclass
 class FingerParams:
@@ -56,7 +68,8 @@ class FingerParams:
     middle_mid_circ: Optional[float] = None
     distal_mid_circ: Optional[float] = None
     
-    # Phalanx lengths (mm) - from base to tip
+    # Phalanx lengths (mm) - measured joint-to-joint
+    # distal_len is DIP-to-fingertip end (tip sphere radius subtracted internally)
     proximal_len: float = 0.0
     middle_len: float = 0.0
     distal_len: float = 0.0
@@ -185,14 +198,15 @@ def get_trim_point_and_plane(
     # Target distance along centerline
     target_dist = joint_dist + offset
     
-    # Find which segment this falls in and compute the point
-    # Segments: origin->mcp (metacarpal), mcp->pip (proximal), pip->dip (middle), dip->tip (distal)
-    segments = [
-        ("origin", "mcp", params.metacarpal_len),
-        ("mcp", "pip", params.proximal_len),
-        ("pip", "dip", params.middle_len),
-        ("dip", "tip", params.distal_len),
-    ]
+    # Derive segment lengths from actual joint positions
+    # This accounts for tip sphere adjustment (distal_bone_len != distal_len)
+    segment_pairs = [("origin", "mcp"), ("mcp", "pip"), ("pip", "dip"), ("dip", "tip")]
+    segments = []
+    for s_joint, e_joint in segment_pairs:
+        if s_joint in joint_positions and e_joint in joint_positions:
+            s_pos = joint_positions[s_joint][0]
+            e_pos = joint_positions[e_joint][0]
+            segments.append((s_joint, e_joint, s_pos.DistanceTo(e_pos)))
     
     cumulative = 0.0
     for start_joint, end_joint, seg_len in segments:
@@ -674,35 +688,219 @@ def apply_pad_rise(finger_brep, joint_positions, tip_radius, pad_rise, tolerance
     return finger_brep
 
 
-def create_finger_model(
+class FingerModelResult:
+    """Wraps finger model output and enables perp frame / cross-section queries.
+    
+    Location names for get_perp_frame / get_cross_section:
+    
+    Phalanx names: "metacarpal", "proximal", "middle", "distal"
+        offset 0.0 = proximal end (toward metacarpal)
+        offset 1.0 = distal end (toward tip)
+        Perp frame normal = phalanx centerline direction
+    
+    Joint names: "mcp", "pip", "dip", "tip"
+        offset 0.0 = bisector of adjoining phalanx directions
+        offset > 0 = distal phalanx (toward tip), maps to that phalanx offset
+        offset < 0 = proximal phalanx (toward metacarpal), offset = 1.0 + value
+        "tip" with offset > 0 extends along distal direction into tip sphere
+    
+    Perp frame axes: ZAxis = finger direction, YAxis = dorsal, XAxis = lateral.
+    """
+    
+    def __init__(self, params, tolerance, finger_brep, centerline,
+                 components, joint_positions, phalanx_lines, radii,
+                 distal_bone_len=None):
+        self.params = params
+        self.tolerance = tolerance
+        self.finger_brep = finger_brep
+        self.centerline = centerline
+        self.components = components
+        self.joint_positions = joint_positions
+        self.phalanx_lines = phalanx_lines  # dict: phalanx name -> Line
+        self.radii = radii  # dict: joint name -> float
+        self.distal_bone_len = distal_bone_len  # distal_len minus tip_radius
+        self._mesh = None  # lazy-cached mesh for cross-section queries
+    
+    def get_perp_frame(self, name, offset=0.0):
+        """Get a perpendicular frame (plane) at a named location.
+        
+        Args:
+            name: Phalanx name ("metacarpal", "proximal", "middle", "distal")
+                  or joint name ("mcp", "pip", "dip", "tip")
+            offset: For phalanx: 0.0 (proximal end) to 1.0 (distal end)
+                    For joint: 0.0 = bisector, positive = toward tip,
+                    negative = toward metacarpal. Range: -1.0 to 1.0
+        
+        Returns:
+            Plane with ZAxis = finger direction, YAxis = dorsal, XAxis = lateral.
+            None if location is outside the generated geometry.
+        """
+        name = name.lower()
+        
+        if name in PHALANX_NAMES:
+            return self._phalanx_perp_frame(name, offset)
+        elif name in JOINT_NAMES:
+            return self._joint_perp_frame(name, offset)
+        else:
+            raise ValueError(
+                f"Unknown location '{name}'. "
+                f"Valid: phalanx {PHALANX_NAMES}, joint {JOINT_NAMES}"
+            )
+    
+    def get_cross_section(self, name, offset=0.0):
+        """Get the cross-section curve at a named location.
+        
+        Intersects finger_brep with the perpendicular frame plane and
+        returns a single joined closed planar curve.
+        
+        Uses mesh-plane intersection for robustness -- avoids NURBS seam
+        and self-intersection artifacts that fragment BrepPlane results.
+        
+        Args:
+            name: Location name (see get_perp_frame)
+            offset: Offset parameter (see get_perp_frame)
+        
+        Returns:
+            A single closed Curve, or None if the plane does not
+            intersect the brep.
+        """
+        plane = self.get_perp_frame(name, offset)
+        if plane is None:
+            log(f"get_cross_section('{name}', {offset}): perp frame is None")
+            return None
+        
+        mesh = self._get_mesh()
+        if mesh is None:
+            log(f"get_cross_section('{name}', {offset}): failed to mesh brep")
+            return None
+        
+        # MeshPlane returns clean closed Polyline[]
+        polylines = rg.Intersect.Intersection.MeshPlane(mesh, plane)
+        if not polylines or len(polylines) == 0:
+            log(f"get_cross_section('{name}', {offset}): MeshPlane returned no polylines")
+            return None
+        
+        log(f"get_cross_section('{name}', {offset}): {len(polylines)} polyline(s)")
+        
+        # Pick the longest closed polyline
+        best = None
+        best_len = 0
+        for pl in polylines:
+            if pl.IsClosed and pl.Length > best_len:
+                best = pl
+                best_len = pl.Length
+        
+        if best is None:
+            log(f"get_cross_section('{name}', {offset}): no closed polylines")
+            return None
+        
+        # Convert polyline to NURBS curve for consistent return type
+        crv = best.ToNurbsCurve()
+        log(f"get_cross_section('{name}', {offset}): returning closed curve, "
+            f"length={crv.GetLength():.2f}mm, {best.Count} points")
+        return crv
+    
+    def _get_mesh(self):
+        """Lazy-create and cache a mesh of finger_brep for cross-section queries."""
+        if self._mesh is None:
+            mesh_params = rg.MeshingParameters.DefaultAnalysisMesh
+            meshes = rg.Mesh.CreateFromBrep(self.finger_brep, mesh_params)
+            if meshes:
+                self._mesh = rg.Mesh()
+                for m in meshes:
+                    self._mesh.Append(m)
+                log(f"Cached mesh: {self._mesh.Faces.Count} faces, "
+                    f"{self._mesh.Vertices.Count} vertices")
+        return self._mesh
+    
+    def _phalanx_perp_frame(self, name, offset):
+        """Perp frame at a point along a phalanx centerline."""
+        if name not in self.phalanx_lines:
+            return None
+        
+        line = self.phalanx_lines[name]
+        offset = max(0.0, min(1.0, offset))
+        
+        point = line.PointAt(offset)
+        direction = Vector3d(line.Direction)
+        direction.Unitize()
+        
+        return self._make_dorsal_plane(point, direction)
+    
+    def _joint_perp_frame(self, name, offset):
+        """Perp frame at a joint: bisector at 0, resolved to phalanx otherwise."""
+        if name not in self.joint_positions:
+            return None
+        
+        prox_name, dist_name = JOINT_ADJACENCY[name]
+        
+        # "tip" only supports offset=0.0 (sphere center, not a true joint)
+        if name == "tip" and offset != 0.0:
+            raise ValueError(
+                "Tip does not support offset. Use ('distal', offset) "
+                "to get cross-sections along the distal phalanx and tip sphere."
+            )
+        
+        if offset == 0.0:
+            # Bisector of adjoining phalanx directions
+            joint_pos = self.joint_positions[name][0]
+            
+            if name == "tip":
+                # Only one adjoining phalanx, use its direction
+                if prox_name not in self.phalanx_lines:
+                    return None
+                direction = Vector3d(self.phalanx_lines[prox_name].Direction)
+                direction.Unitize()
+            else:
+                # Average the two adjoining phalanx directions
+                if prox_name not in self.phalanx_lines or dist_name not in self.phalanx_lines:
+                    return None
+                d1 = Vector3d(self.phalanx_lines[prox_name].Direction)
+                d1.Unitize()
+                d2 = Vector3d(self.phalanx_lines[dist_name].Direction)
+                d2.Unitize()
+                direction = d1 + d2
+                if direction.Length < 1e-10:
+                    direction = Vector3d(d1)  # parallel case
+                direction.Unitize()
+            
+            return self._make_dorsal_plane(joint_pos, direction)
+        
+        elif offset > 0:
+            # Positive offset resolves to distal phalanx
+            return self._phalanx_perp_frame(dist_name, offset)
+        
+        else:
+            # Negative offset resolves to proximal phalanx at 1.0 + offset
+            if prox_name not in self.phalanx_lines:
+                return None
+            return self._phalanx_perp_frame(prox_name, 1.0 + offset)
+    
+    def _make_dorsal_plane(self, origin, normal):
+        """Construct perp frame: ZAxis = normal (finger dir), YAxis = dorsal."""
+        up = Vector3d.ZAxis
+        if abs(Vector3d.Multiply(up, normal)) > 0.95:
+            up = Vector3d.YAxis
+        # Project up onto the plane perpendicular to normal
+        dorsal = up - normal * Vector3d.Multiply(up, normal)
+        dorsal.Unitize()
+        # XAxis = lateral, completing right-hand frame (X cross Y = Z = normal)
+        lateral = Vector3d.CrossProduct(dorsal, normal)
+        lateral.Unitize()
+        return Plane(origin, lateral, dorsal)
+
+
+def _build_finger_model(
     params: FingerParams,
     tolerance: Optional[float] = None,
-    return_parts: bool = True
 ):
-    """
-    Generate a finger model from anatomical measurements.
+    """Internal: build finger model and return FingerModelResult.
     
     Orientation: Finger along +X, palm faces -Z. Positive angles = flexion toward palm.
     Construction order: Metacarpal -> MCP -> Proximal -> PIP -> Middle -> DIP -> Distal -> Tip
     
-    The current_plane tracks position and orientation through the finger:
-    - Origin: current joint/segment position
-    - X-axis: direction finger extends
-    - Y-axis: flexion rotation axis
-    - Z-axis: lateral rotation axis (palm normal)
-    
     Position is always computed from origin through all segments, but geometry is only
-    created for segments within start_at..end_at range. This ensures partial models
-    align with full models for boolean operations.
-    
-    Args:
-        params: FingerParams dataclass with all measurements and options
-        tolerance: Geometric tolerance for operations (defaults to document tolerance)
-        return_parts: Whether to include component breps in return
-        
-    Returns:
-        (centerline_polyline, finger_brep, component_breps, joint_positions)
-        joint_positions maps joint names to (position, direction, cumulative_distance)
+    created for segments within start_at..end_at range.
     """
     
     if tolerance is None:
@@ -738,14 +936,27 @@ def create_finger_model(
     mcp_radius = params.mcp_circ / (2 * math.pi) + shell
     pip_radius = params.pip_circ / (2 * math.pi) + shell
     dip_radius = params.dip_circ / (2 * math.pi) + shell
-    tip_radius = params.tip_circ / (2 * math.pi) + shell
+    base_tip_radius = params.tip_circ / (2 * math.pi)  # anatomical radius before shell
+    tip_radius = base_tip_radius + shell
     
     # Convert phalanx mid-circumferences to radii (None = use tapered cylinder)
     proximal_mid_radius = (params.proximal_mid_circ / (2 * math.pi) + shell) if params.proximal_mid_circ else None
     middle_mid_radius = (params.middle_mid_circ / (2 * math.pi) + shell) if params.middle_mid_circ else None
     distal_mid_radius = (params.distal_mid_circ / (2 * math.pi) + shell) if params.distal_mid_circ else None
     
-    log(f"Radii - MCP:{mcp_radius:.2f}, PIP:{pip_radius:.2f}, DIP:{dip_radius:.2f}, Tip:{tip_radius:.2f}")
+    log(f"Radii - MCP:{mcp_radius:.2f}, PIP:{pip_radius:.2f}, DIP:{dip_radius:.2f}, Tip:{tip_radius:.2f} (base:{base_tip_radius:.2f})")
+    
+    # Distal bone length: measured distal_len includes tip sphere
+    # Use base_tip_radius (not shell-augmented) so sphere center stays at the
+    # same anatomical position regardless of shell_thickness. This ensures
+    # uniform wall thickness at the fingertip after boolean difference.
+    distal_bone_len = params.distal_len - base_tip_radius
+    if (params.includes_segment("distal") or params.includes_segment("tip")) and distal_bone_len <= 0:
+        raise ValueError(
+            f"distal_len ({params.distal_len}mm) must be greater than "
+            f"base tip_radius ({base_tip_radius:.2f}mm) derived from tip_circ ({params.tip_circ}mm)"
+        )
+    log(f"Distal bone: {distal_bone_len:.2f}mm (measured {params.distal_len}mm - base_tip_r {base_tip_radius:.2f}mm)")
     
     # Track components and centerline points
     components = []
@@ -769,6 +980,7 @@ def create_finger_model(
     
     # --- METACARPAL STUB (cylinder, no joint) ---
     metacarpal_end = current_plane.Origin + current_plane.XAxis * params.metacarpal_len
+    metacarpal_line = Line(Point3d(current_plane.Origin), metacarpal_end)
     if params.includes_segment("metacarpal"):
         log("\n--- Metacarpal Stub ---")
         add_start_point_if_first(current_plane.Origin)
@@ -887,10 +1099,10 @@ def create_finger_model(
     
     # --- DIP JOINT + DISTAL PHALANX ---
     log("\n--- DIP Joint + Distal Phalanx ---")
-    # Always advance the plane (coordinate math only)
+    # advance_to_next_joint uses distal_bone_len (to sphere center, not fingertip)
     new_plane, dist_line = advance_to_next_joint(
         current_plane,
-        params.distal_len,
+        distal_bone_len,
         params.dip_lateral,
         params.dip_flex
     )
@@ -922,16 +1134,24 @@ def create_finger_model(
         add_start_point_if_first(dist_line.From)
         if dist_brep:
             components.append(dist_brep)
-            log(f"Distal Phalanx: length={params.distal_len}mm, r1={dip_radius:.2f}, r2={tip_radius:.2f}")
+            log(f"Distal Phalanx: bone_len={distal_bone_len:.2f}mm (measured={params.distal_len}mm), r1={dip_radius:.2f}, r2={tip_radius:.2f}")
         else:
             raise GeometryCreationError(
-                f"Failed to create distal phalanx (len={params.distal_len}, r1={dip_radius:.2f}, r2={tip_radius:.2f})"
+                f"Failed to create distal phalanx (len={distal_bone_len:.2f}, r1={dip_radius:.2f}, r2={tip_radius:.2f})"
             )
-        centerline_points.append(Point3d(dist_line.To))
     
     current_plane = new_plane
-    cumulative_dist += params.distal_len
+    cumulative_dist += distal_bone_len
     joint_positions["tip"] = (Point3d(current_plane.Origin), Vector3d(dist_line.Direction), cumulative_dist)
+    
+    # Fingertip end point: sphere center + tip_radius along distal direction
+    tip_dir = Vector3d(dist_line.Direction)
+    tip_dir.Unitize()
+    tip_end_point = Point3d(current_plane.Origin) + tip_dir * tip_radius
+    
+    # Add tip endpoint to centerline (full measured distal_len from DIP)
+    if params.includes_segment("distal") or params.includes_segment("tip"):
+        centerline_points.append(Point3d(tip_end_point))
     
     # --- FINGERTIP (sphere at final position) ---
     if params.includes_segment("tip"):
@@ -970,11 +1190,67 @@ def create_finger_model(
         finger_brep, centerline = trim_finger_model(finger_brep, centerline, params, joint_positions, tolerance)
     
     # Apply pad rise deformation (no-op when pad_rise=0.0)
+    # Use tip_radius (includes shell) so morph influence zone matches actual
+    # sphere geometry. This avoids a groove artifact where the morph's zone
+    # boundary falls inside the outer shell's sphere surface.
     if params.pad_rise > 0 and params.includes_segment("tip"):
         finger_brep = apply_pad_rise(finger_brep, joint_positions, tip_radius, params.pad_rise, tolerance)
+    
+    # Collect phalanx centerlines and radii for perp frame queries
+    # distal_full_line spans DIP to fingertip end (full measured distal_len)
+    distal_full_line = Line(dist_line.From, tip_end_point)
+    phalanx_lines = {
+        "metacarpal": metacarpal_line,
+        "proximal": prox_line,
+        "middle": mid_line,
+        "distal": distal_full_line,
+    }
+    radii = {
+        "mcp": mcp_radius,
+        "pip": pip_radius,
+        "dip": dip_radius,
+        "tip": tip_radius,
+    }
     
     elapsed = time.time() - start_time
     log(f"create_finger_model completed in {elapsed:.3f}s")
     log("=" * 60)
     
-    return centerline, finger_brep, components if return_parts else None, joint_positions
+    return FingerModelResult(
+        params=params,
+        tolerance=tolerance,
+        finger_brep=finger_brep,
+        centerline=centerline,
+        components=components,
+        joint_positions=joint_positions,
+        phalanx_lines=phalanx_lines,
+        radii=radii,
+        distal_bone_len=distal_bone_len,
+    )
+
+
+def create_finger_model_result(
+    params: FingerParams,
+    tolerance: Optional[float] = None,
+) -> 'FingerModelResult':
+    """Generate a finger model, returning a FingerModelResult for further queries.
+    
+    See _build_finger_model for full documentation.
+    """
+    return _build_finger_model(params, tolerance)
+
+
+def create_finger_model(
+    params: FingerParams,
+    tolerance: Optional[float] = None,
+    return_parts: bool = True,
+):
+    """Generate a finger model from anatomical measurements (backward-compatible).
+    
+    Returns:
+        (centerline_polyline, finger_brep, component_breps, joint_positions)
+        joint_positions maps joint names to (position, direction, cumulative_distance)
+    """
+    result = _build_finger_model(params, tolerance)
+    return (result.centerline, result.finger_brep,
+            result.components if return_parts else None, result.joint_positions)

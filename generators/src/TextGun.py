@@ -34,7 +34,7 @@ class InvalidInputError(Exception):
     pass
 
 
-def emboss_text(
+def _emboss_text_impl(
     target_brep,
     text_content,
     wall_thickness_mm,
@@ -43,7 +43,8 @@ def emboss_text(
     text_up_vector=None,
     projection_origin=None,
     extrusion_depth_factor=0.8,
-    emboss_inside=True
+    emboss_inside=True,
+    compute_protection_curves=False,
 ):
     """
     Emboss text on the inside or outside wall of a brep.
@@ -66,14 +67,19 @@ def emboss_text(
         extrusion_depth_factor: Fraction of wall thickness for extrusion depth (default 0.8)
         emboss_inside: If True, emboss on inside surface (default).
                       If False, emboss on outside surface (text will be mirrored).
+        compute_protection_curves: If True, also compute and return 2D text
+                      outline curves projected near the brep surface.
     
     Returns:
-        tuple: (result_brep, text_breps_before_projection, projected_letter_breps, final_text_plane)
+        tuple: (result_brep, text_breps_before_projection,
+                projected_letter_breps, final_text_plane,
+                protection_curves)
             - result_brep: The brep with embossed text
-            - text_breps_before_projection: List of extruded letter Breps, centered and oriented
-                         but before projection to the surface (useful for debug)
+            - text_breps_before_projection: List of extruded letter Breps before projection
             - projected_letter_breps: List of letter Breps after projection to surface
             - final_text_plane: The plane used for text orientation
+            - protection_curves: List of Curve objects near the brep surface
+              outlining text characters (empty if compute_protection_curves=False)
         
     Raises:
         InvalidInputError: If inputs are invalid (including text_up_vector parallel
@@ -185,6 +191,7 @@ def emboss_text(
     log("  Created {} letter breps via CreatePolysurfacesGrouped".format(len(letter_breps)))
     
     # Step 2b: Center the letter breps on the centroid
+    center_offset = rg.Vector3d.Zero
     text_bbox = rg.BoundingBox.Empty
     for brep in letter_breps:
         text_bbox.Union(brep.GetBoundingBox(True))
@@ -311,8 +318,120 @@ def emboss_text(
         if not result_brep.IsValid:
             raise TextGunError("Result brep is not valid after all subtractions")
     
+    # -- Protection curves (projected text outlines near brep surface) --------
+    protection_curves = []
+    if compute_protection_curves:
+        outline_curves = _create_text_outline_curves(
+            text_content, text_plane, text_size)
+        if outline_curves:
+            # Same centering offset applied to letter breps
+            for crv in outline_curves:
+                crv.Translate(center_offset)
+
+            # Mirror for outside embossing (same as letter breps)
+            if not emboss_inside:
+                m_plane = rg.Plane(centroid, rg.Vector3d.XAxis)
+                m_xform = rg.Transform.Mirror(m_plane)
+                for crv in outline_curves:
+                    crv.Transform(m_xform)
+
+            # Project each curve to surface via the same mesh ray-cast
+            for crv in outline_curves:
+                crv_bb = crv.GetBoundingBox(True)
+                if not crv_bb.IsValid:
+                    continue
+                crv_center = crv_bb.Center
+
+                if emboss_inside:
+                    ray = rg.Ray3d(crv_center, projection_direction)
+                else:
+                    ray_origin = crv_center + projection_direction * 1000.0
+                    ray = rg.Ray3d(ray_origin, -projection_direction)
+
+                hit_t = rg.Intersect.Intersection.MeshRay(target_mesh, ray)
+                if hit_t < 0:
+                    opp_dir = rg.Vector3d(
+                        -ray.Direction.X, -ray.Direction.Y, -ray.Direction.Z)
+                    ray = rg.Ray3d(ray.Position, opp_dir)
+                    hit_t = rg.Intersect.Intersection.MeshRay(target_mesh, ray)
+
+                if hit_t >= 0:
+                    surface_pt = ray.PointAt(hit_t)
+                    move_vec = surface_pt - crv_center
+                    moved_crv = crv.DuplicateCurve()
+                    moved_crv.Translate(move_vec)
+                    protection_curves.append(moved_crv)
+
+            log("  Protection curves: {} of {} projected to surface".format(
+                len(protection_curves), len(outline_curves)))
+
     log("TextGun: Successfully embossed '{}'".format(text_content))
-    return (result_brep, text_breps_before_projection, projected_letter_breps, final_text_plane)
+    return (result_brep, text_breps_before_projection, projected_letter_breps,
+            final_text_plane, protection_curves)
+
+
+def emboss_text(
+    target_brep,
+    text_content,
+    wall_thickness_mm,
+    text_size=3.3,
+    text_projection_vector=None,
+    text_up_vector=None,
+    projection_origin=None,
+    extrusion_depth_factor=0.8,
+    emboss_inside=True,
+):
+    """Emboss text on a brep wall (backward-compatible 4-tuple return).
+
+    See emboss_text_with_protection for full documentation.
+    """
+    result = _emboss_text_impl(
+        target_brep, text_content, wall_thickness_mm,
+        text_size=text_size,
+        text_projection_vector=text_projection_vector,
+        text_up_vector=text_up_vector,
+        projection_origin=projection_origin,
+        extrusion_depth_factor=extrusion_depth_factor,
+        emboss_inside=emboss_inside,
+        compute_protection_curves=False,
+    )
+    return result[:4]
+
+
+def emboss_text_with_protection(
+    target_brep,
+    text_content,
+    wall_thickness_mm,
+    text_size=3.3,
+    text_projection_vector=None,
+    text_up_vector=None,
+    projection_origin=None,
+    extrusion_depth_factor=0.8,
+    emboss_inside=True,
+):
+    """Emboss text and return protection curves for ventilation clearance.
+
+    Same as emboss_text but also returns 2D text outline curves
+    projected onto the brep surface, suitable for use as
+    protected_curves in BrepVentilation.ventilate_brep().
+
+    Returns:
+        tuple: (result_brep, text_breps_before_projection,
+                projected_letter_breps, final_text_plane,
+                protection_curves)
+            - protection_curves: List of Curve objects near the brep
+              surface outlining each text character.
+    """
+    return _emboss_text_impl(
+        target_brep, text_content, wall_thickness_mm,
+        text_size=text_size,
+        text_projection_vector=text_projection_vector,
+        text_up_vector=text_up_vector,
+        projection_origin=projection_origin,
+        extrusion_depth_factor=extrusion_depth_factor,
+        emboss_inside=emboss_inside,
+        compute_protection_curves=True,
+    )
 
 
 def create_text_breps(text, plane, height, depth):
@@ -399,6 +518,58 @@ def create_text_breps(text, plane, height, depth):
         log("  TextEntity.CreatePolysurfacesGrouped failed: {}".format(str(e)))
     
     return result_breps
+
+
+def _create_text_outline_curves(text, plane, height):
+    """Create 2D text outline curves, transformed to the target plane.
+
+    Uses TextEntity.CreateCurves() to get glyph outlines on World XY,
+    then applies the same PlaneToPlane transform used by create_text_breps.
+    """
+    try:
+        doc = Rhino.RhinoDoc.ActiveDoc
+        if not doc:
+            return []
+
+        base_style = doc.DimStyles.Current
+        dim_style = base_style.Duplicate()
+        dim_style.TextHeight = height
+        dim_style.TextHorizontalAlignment = Rhino.DocObjects.TextHorizontalAlignment.Center
+        dim_style.TextVerticalAlignment = Rhino.DocObjects.TextVerticalAlignment.Top
+
+        xy_plane = rg.Plane.WorldXY
+        text_entity = rg.TextEntity.Create(
+            text, xy_plane, dim_style, False, 0, 0)
+        if not text_entity:
+            return []
+
+        text_entity.TextHeight = height
+        curves = text_entity.CreateCurves(dim_style, False)
+        if not curves or len(curves) == 0:
+            return []
+
+        result = [c for c in curves if c and c.IsValid]
+        if not result:
+            return []
+
+        # Same centering + PlaneToPlane transform as create_text_breps
+        crv_bbox = rg.BoundingBox.Empty
+        for c in result:
+            crv_bbox.Union(c.GetBoundingBox(True))
+
+        if crv_bbox.IsValid:
+            source_center = crv_bbox.Center
+            source_plane = rg.Plane(
+                source_center, rg.Vector3d.XAxis, rg.Vector3d.YAxis)
+            xform = rg.Transform.PlaneToPlane(source_plane, plane)
+            for c in result:
+                c.Transform(xform)
+
+        log("  Created {} text outline curves".format(len(result)))
+        return result
+    except Exception as e:
+        log("  _create_text_outline_curves failed: {}".format(str(e)))
+        return []
 
 
 def get_brep_centroid(brep):
