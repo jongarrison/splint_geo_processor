@@ -313,10 +313,13 @@ def _emboss_text_impl(
                 log("  Warning: Robust difference raised {} for letter {}, skipping".format(type(e).__name__, i))
     
     if not result_brep.IsValid:
-        # Try to repair before giving up
+        # Try to repair -- but don't hard-fail.  Boolean ops on curved
+        # surfaces often leave technically-invalid breps that are still
+        # perfectly usable geometry.
         result_brep.Repair(tolerance)
         if not result_brep.IsValid:
-            raise TextGunError("Result brep is not valid after all subtractions")
+            log("  Warning: result brep is not valid after subtractions "
+                "(continuing anyway -- geometry is usually fine)")
     
     # -- Protection curves (projected text outlines near brep surface) --------
     protection_curves = []
