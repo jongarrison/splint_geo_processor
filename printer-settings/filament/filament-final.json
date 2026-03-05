@@ -160,10 +160,10 @@
     "100%"
   ],
   "hot_plate_temp": [
-    "57"
+    "60"
   ],
   "hot_plate_temp_initial_layer": [
-    "57"
+    "60"
   ],
   "nozzle_temperature_range_low": [
     "190"
@@ -214,10 +214,10 @@
     "45"
   ],
   "textured_plate_temp": [
-    "57"
+    "60"
   ],
   "textured_plate_temp_initial_layer": [
-    "57"
+    "60"
   ],
   "counter_coef_1": [
     "0"
