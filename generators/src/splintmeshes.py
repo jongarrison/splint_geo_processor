@@ -11,9 +11,10 @@ import Rhino
 import random
 import string
 import os
+import json
 import time
 from pathlib import Path
-from splintcommon import log
+from splintcommon import log, get_generation_elapsed
 
 
 class MeshExportError(Exception):
@@ -226,6 +227,34 @@ def save_mesh(input_meshes, directory, root_filename, format_type="stl"):
             raise MeshExportError("Export file suspiciously small ({} bytes): {}".format(
                 file_size, export_fpath))
         log("  File created: {} ({} bytes)".format(export_fpath.name, file_size))
+
+        # Collect per-mesh metadata
+        mesh_meta_list = []
+        for i, mesh in enumerate(meshes):
+            bbox = mesh.GetBoundingBox(True)
+            dims = [bbox.Max.X - bbox.Min.X, bbox.Max.Y - bbox.Min.Y, bbox.Max.Z - bbox.Min.Z]
+            mesh_meta_list.append({
+                "index": i,
+                "volume_mm3": round(mesh.Volume(), 4) if hasattr(mesh, 'Volume') else None,
+                "is_closed": bool(mesh.IsClosed) if hasattr(mesh, 'IsClosed') else None,
+                "bbox_dimensions": [round(d, 4) for d in dims],
+            })
+
+        elapsed = get_generation_elapsed()
+        metadata = {
+            "mesh_count": len(meshes),
+            "meshes": mesh_meta_list,
+            "file_size_bytes": file_size,
+            "elapsed_time_seconds": round(elapsed, 2) if elapsed is not None else None,
+        }
+
+        meta_path = Path(os.path.join(directory, "{}.meta.json".format(root_filename)))
+        try:
+            with open(str(meta_path), 'w', encoding='utf-8') as mf:
+                json.dump(metadata, mf, indent=2)
+            log("  Metadata written: {}".format(meta_path.name))
+        except Exception as meta_err:
+            log("  Warning: failed to write metadata: {}".format(meta_err))
 
         t_total = time.process_time() - t_start
         log("save_mesh: Complete ({:.4f}s total)".format(t_total))

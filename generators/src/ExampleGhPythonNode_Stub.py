@@ -20,6 +20,8 @@ if ghFileDir not in sys.path:
 
 import splintcommon
 reload(splintcommon) #FOR DEV
+from splintcommon import mark_generation_start
+mark_generation_start()
 
 #splintcommon module is now available for use in this GhPython component
 splintcommon.log(f'GhPython Node initialized at {time.ctime()}')

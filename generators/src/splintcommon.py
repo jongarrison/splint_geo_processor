@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from pathlib import Path
 import traceback
 import rhinoscriptsyntax as rs
@@ -19,6 +20,22 @@ Path(splint_archive_dir).mkdir(parents=True, exist_ok=True)
 
 def inclusionTest():
     log("You got it!")
+
+
+_STICKY_START_TIME_KEY = "SF_GENERATION_START_TIME"
+
+def mark_generation_start():
+    """Record the generation start time in sc.sticky for later elapsed time calculation.
+    Call this early in your Grasshopper script, before geometry generation begins."""
+    sc.sticky[_STICKY_START_TIME_KEY] = time.time()
+    log("mark_generation_start: recorded start time")
+
+def get_generation_elapsed():
+    """Return elapsed seconds since mark_generation_start() was called, or None if not set."""
+    start = sc.sticky.get(_STICKY_START_TIME_KEY)
+    if start is None:
+        return None
+    return time.time() - start
 
 def get_output_mesh_filename(jobname, extension):
     return os.path.join(splint_outbox_dir, f"{jobname}.{extension}") #extension is probably obj
