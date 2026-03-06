@@ -207,7 +207,9 @@ export class Processor {
           continue;
         }
         if (resp.status !== 200) {
-          this.logger.warn({ status: resp.status, data: resp.data }, `[${env}] Unexpected response from next-job`);
+          // Truncate response body to avoid dumping entire HTML error pages into logs
+          const preview = typeof resp.data === 'string' ? resp.data.slice(0, 200) : resp.data;
+          this.logger.warn({ status: resp.status, data: preview }, `[${env}] Unexpected response from next-job`);
           await sleep(intervalMs);
           continue;
         }
