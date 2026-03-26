@@ -94,7 +94,7 @@
   "infill_lock_depth": "1.0",
   "skin_infill_depth": "2.0",
   "skeleton_infill_line_width": "0.45",
-  "sparse_infill_pattern": "grid",
+  "sparse_infill_pattern": "rectilinear",
   "sparse_infill_speed": [
     "270"
   ],
