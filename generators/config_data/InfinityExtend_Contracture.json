@@ -1,0 +1,51 @@
+[
+  {
+    "InputName": "root_circumference_mm",
+    "InputDescription": "Circumference (mm) at the midpoint of the proximal phalanx. ",
+    "InputType": "Float",
+    "NumberMin": 25,
+    "NumberMax": 120
+  },
+  {
+    "InputName": "mid_circumference_mm",
+    "InputDescription": "Circumference (mm) at the proximal interphalangeal (PIP) joint. ",
+    "InputType": "Float",
+    "NumberMin": 25,
+    "NumberMax": 120
+  },
+  {
+    "InputName": "tip_circumference_mm",
+    "InputDescription": "Circumference (mm) at the midpoint of the middle phalanx. ",
+    "InputType": "Float",
+    "NumberMin": 25,
+    "NumberMax": 120
+  },
+  {
+    "InputName": "inter_phalanx_distance_mm",
+    "InputDescription": "Interphalangeal length (mm) - Midpoint of the proximal phalanx to midpoint of the middle phalanx. ",
+    "InputType": "Float",
+    "NumberMin": 25,
+    "NumberMax": 70
+  },
+  {
+    "InputName": "contracture_flexion_start",
+    "InputDescription": "Contracture flexion sequence start angle (degrees)",
+    "InputType": "Float",
+    "NumberMin": -15,
+    "NumberMax": 45
+  },
+  {
+    "InputName": "contracture_flexion_end",
+    "InputDescription": "Contracture flexion sequence end angle (degrees)",
+    "InputType": "Float",
+    "NumberMin": -15,
+    "NumberMax": 45
+  },
+  {
+    "InputName": "contracture_flexion_count",
+    "InputDescription": "Contracture flexion sequence count. This will be the number of splints printed.",
+    "InputType": "Float",
+    "NumberMin": 2,
+    "NumberMax": 5
+  }
+]

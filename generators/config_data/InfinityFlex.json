@@ -1,0 +1,37 @@
+[
+  {
+    "InputName": "root_circumference_mm",
+    "InputDescription": "Circumference (mm) at the midpoint of the proximal phalanx. ",
+    "InputType": "Float",
+    "NumberMin": 25,
+    "NumberMax": 120
+  },
+  {
+    "InputName": "mid_circumference_mm",
+    "InputDescription": "Circumference (mm) at the proximal interphalangeal (PIP) joint. ",
+    "InputType": "Float",
+    "NumberMin": 25,
+    "NumberMax": 120
+  },
+  {
+    "InputName": "tip_circumference_mm",
+    "InputDescription": "Circumference (mm) at the midpoint of the middle phalanx. ",
+    "InputType": "Float",
+    "NumberMin": 25,
+    "NumberMax": 120
+  },
+  {
+    "InputName": "inter_phalanx_distance_mm",
+    "InputDescription": "Interphalangeal length (mm) - Midpoint of the proximal phalanx to midpoint of the middle phalanx. ",
+    "InputType": "Float",
+    "NumberMin": 25,
+    "NumberMax": 70
+  },
+  {
+    "InputName": "flexion_degrees",
+    "InputDescription": "Angle (degrees) of desired flexion. ",
+    "InputType": "Float",
+    "NumberMin": -45,
+    "NumberMax": 45
+  }
+]

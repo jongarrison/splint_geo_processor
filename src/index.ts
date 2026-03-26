@@ -14,6 +14,15 @@ async function main() {
     pollIntervalMs: config.pollIntervalMs 
   }, 'Loaded config');
   const processor = new Processor(logger, config);
+
+  // Check for inspect mode: npm run inspect -- <objectID or UUID>
+  const inspectId = process.argv[2];
+  if (inspectId) {
+    logger.info({ inspectId }, 'Inspect mode: fetching job and launching Grasshopper');
+    await processor.inspect(inspectId);
+    return;
+  }
+
   await processor.run();
 }
 

@@ -268,4 +268,38 @@ def save_mesh(input_meshes, directory, root_filename, format_type="stl"):
                 log("  Cleaned up temp layer")
             except Exception as cleanup_err:
                 log("  Warning: cleanup failed: {}".format(cleanup_err))
-        sc.doc.Views.RedrawEnabled = True
+
+
+def save_job_output(input_meshes, directory, root_filename, format_type="stl", custom_metadata=None):
+    """Export meshes and attach arbitrary per-job metadata.
+
+    Calls save_mesh, then merges custom_metadata into the .meta.json file
+    under a "custom" key. The extra data rides through the existing pipeline
+    with no changes to the processor or server.
+
+    Args:
+        input_meshes, directory, root_filename, format_type: passed to save_mesh.
+        custom_metadata: Optional dict of arbitrary key/value pairs to include
+                         in the metadata JSON (e.g. wall thicknesses, angles).
+
+    Returns:
+        bool: True if export succeeded.
+
+    Raises:
+        Same as save_mesh.
+    """
+    result = save_mesh(input_meshes, directory, root_filename, format_type)
+
+    if custom_metadata and isinstance(custom_metadata, dict):
+        meta_path = Path(os.path.join(directory, "{}.meta.json".format(root_filename)))
+        try:
+            with open(str(meta_path), 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+            metadata["custom"] = custom_metadata
+            with open(str(meta_path), 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2)
+            log("  Custom metadata merged ({} keys)".format(len(custom_metadata)))
+        except Exception as err:
+            log("  Warning: failed to merge custom metadata: {}".format(err))
+
+    return result

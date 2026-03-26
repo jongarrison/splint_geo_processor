@@ -65,6 +65,35 @@ def log_clear(message=""):
 
 log(f"Splint Home Dirs verified: {splint_home_dir=}")
 
+
+# -- GH Python data transit utilities --
+# Python objects passing through GH wires get wrapped in GH_ObjectWrapper.
+# Use gh_encode on output and gh_decode on input for reliable round-tripping.
+
+def _gh_unwrap_item(item):
+    """Unwrap a single item from its GH wrapper if needed."""
+    try:
+        from Grasshopper.Kernel.Types import GH_ObjectWrapper
+        if isinstance(item, GH_ObjectWrapper):
+            return item.Value
+    except ImportError:
+        pass
+    return item
+
+def gh_decode(data):
+    """Decode GH input to a list of Python objects.
+
+    Handles all common GH input shapes:
+      - Single item (Item Access): returns [unwrapped_item]
+      - List of items (List Access, possibly flattened tree): returns [unwrapped, ...]
+      - Already a plain Python list/tuple: unwraps each element
+
+    Use with List Access input + Flatten for best results.
+    """
+    if isinstance(data, (list, tuple)):
+        return [_gh_unwrap_item(item) for item in data]
+    return [_gh_unwrap_item(data)]
+
 def confirm_job_is_processed_and_exit(jobname, is_success, message):
     job_path = Path(get_inbox_job_filepath(jobname))
 

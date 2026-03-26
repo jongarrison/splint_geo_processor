@@ -1,0 +1,58 @@
+[
+  {
+    "InputName": "distal_phalange_l_mm",
+    "InputDescription": "Distal Phalange Length (mm)",
+    "InputType": "Float",
+    "NumberMin": 10,
+    "NumberMax": 100
+  },
+  {
+    "InputName": "middle_phalange_l_mm",
+    "InputDescription": "Middle Phalange Length (mm)",
+    "InputType": "Float",
+    "NumberMin": 10,
+    "NumberMax": 100
+  },
+  {
+    "InputName": "tip_circumference_mm",
+    "InputDescription": "Tip Circumference (mm)",
+    "InputType": "Float",
+    "NumberMin": 10,
+    "NumberMax": 120
+  },
+  {
+    "InputName": "dip_circumference_mm",
+    "InputDescription": "DIP Circumference (mm)",
+    "InputType": "Float",
+    "NumberMin": 10,
+    "NumberMax": 120
+  },
+  {
+    "InputName": "mid_phalange_circumference_mm",
+    "InputDescription": "Mid Phalange Circumference (mm)",
+    "InputType": "Float",
+    "NumberMin": 10,
+    "NumberMax": 120
+  },
+  {
+    "InputName": "pip_circumference_mm",
+    "InputDescription": "PIP Circumference (mm)",
+    "InputType": "Float",
+    "NumberMin": 10,
+    "NumberMax": 120
+  },
+  {
+    "InputName": "flexion_degrees",
+    "InputDescription": "Flexion Degrees (Positive Contracts)",
+    "InputType": "Float",
+    "NumberMin": -15,
+    "NumberMax": 15
+  },
+  {
+    "InputName": "lateral_flexion_degrees",
+    "InputDescription": "Lateral Flexion Degrees (Positive is Right, Negative is Left)",
+    "InputType": "Float",
+    "NumberMin": -15,
+    "NumberMax": 15
+  }
+]

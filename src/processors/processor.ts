@@ -39,133 +39,6 @@ export class Processor {
     fs.mkdirSync(this.outbox, { recursive: true});
   }
 
-  private async handleDebugRequest(job: any) {
-    try {
-      const idPart = job?.id ?? `debug_${Date.now()}`;
-      const algoPart = job?.GeometryAlgorithmName || 'algorithm';
-      const baseName = `${algoPart}_${idPart}`.replace(/[^a-zA-Z0-9._-]/g, '_');
-      
-      this.logger.info({ 
-        id: idPart, 
-        algorithm: algoPart,
-        params: job?.GeometryInputParameterData
-      }, 'Debug: Launching Rhino/Grasshopper');
-
-      // Clean up any existing JSON files for this algorithm in the inbox
-      try {
-        const existingFiles = fs.readdirSync(this.inbox);
-        const algoPrefix = `${algoPart}_`;
-        const filesToClean = existingFiles.filter(f => f.startsWith(algoPrefix) && f.endsWith('.json'));
-        if (filesToClean.length > 0) {
-          this.logger.info({ count: filesToClean.length, files: filesToClean }, 'Debug: Cleaning up stale inbox JSON files');
-          for (const file of filesToClean) {
-            fs.unlinkSync(path.join(this.inbox, file));
-          }
-        }
-      } catch (err: any) {
-        this.logger.warn({ error: err?.message }, 'Debug: Failed to clean up inbox files (continuing)');
-      }
-
-      // Write input JSON to inbox for manual debugging (same as normal flow)
-      const inboxJson = path.join(this.inbox, `${baseName}.json`);
-      const inputPayload = {
-        id: idPart,
-        algorithm: job?.GeometryAlgorithmName,
-        params: job?.GeometryInputParameterData,
-        metadata: {
-          GeometryName: job?.GeometryName,
-          CustomerNote: job?.CustomerNote,
-          CustomerID: job?.CustomerID,
-          objectID: job?.objectID
-        }
-      };
-      fs.writeFileSync(inboxJson, JSON.stringify(inputPayload, null, 2), 'utf8');
-      this.logger.info({ inboxJson, objectID: job?.objectID }, 'Debug: Wrote input JSON to inbox (manual cleanup required)');
-
-      // Resolve Grasshopper script path
-      const ghScript = path.join(this.config.ghScriptsDir, `${algoPart}.gh`);
-      const ghScriptAbs = path.resolve(ghScript);
-      
-      if (!fs.existsSync(ghScriptAbs)) {
-        this.logger.error({ ghScript: ghScriptAbs }, 'Debug: Grasshopper script not found');
-        await this.reportResult(idPart, false, `Grasshopper script not found: ${ghScriptAbs}`);
-        return;
-      }
-
-      if (!this.config.rhinoCodeCli || !this.config.rhinoCli) {
-        this.logger.error('Debug: RHINOCODE_CLI or RHINO_CLI not configured');
-        await this.reportResult(idPart, false, 'RHINOCODE_CLI or RHINO_CLI not configured');
-        return;
-      }
-
-      // Ensure Rhino is running
-      this.logger.info('Debug: Ensuring Rhino is running');
-      const rhinoRunning = await ensureRhinoRunning(
-        this.config.rhinoCodeCli,
-        this.config.rhinoCli,
-        this.logger
-      );
-
-      if (!rhinoRunning) {
-        this.logger.error('Debug: Failed to start Rhino');
-        await this.reportResult(idPart, false, 'Failed to start Rhino');
-        return;
-      }
-
-      // Wait for Rhino to fully initialize before sending Grasshopper command
-      // Without this delay, commands sent immediately after launch may not be processed correctly
-      this.logger.info('Debug: Waiting for Rhino to fully initialize');
-      await new Promise(resolve => setTimeout(resolve, 3000));
-
-      // Prime Grasshopper by opening the window first
-      // This establishes the right command context for subsequent file open commands
-      this.logger.info('Debug: Opening Grasshopper window to prime command context');
-      try {
-        await executeRhinoCommand(
-          this.config.rhinoCodeCli, 
-          '-_Grasshopper _Window _Show _EnterEnd', 
-          { timeout: 10000 }, 
-          this.logger
-        );
-      } catch (err: any) {
-        this.logger.warn({ error: err?.message }, 'Debug: Grasshopper window open command completed');
-      }
-
-      // Brief pause to let Grasshopper window initialize
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
-      // Execute command to open Grasshopper with the script
-      // Format: -_Grasshopper _Document _Open /path _EnterEnd
-      // No ! prefix, no quotes on path, _EnterEnd closes the command cleanly
-      const commandString = `-_Grasshopper _Document _Open ${ghScriptAbs} _EnterEnd`;
-      this.logger.info({ commandString }, 'Debug: Opening Grasshopper script');
-      
-      try {
-        await executeRhinoCommand(this.config.rhinoCodeCli, commandString, {}, this.logger);
-        this.logger.info('Debug: Grasshopper script opened successfully');
-      } catch (err: any) {
-        this.logger.warn({ error: err?.message }, 'Debug: Command completed (may need manual verification)');
-      }
-
-      // Mark the debug job as "complete" so it doesn't block the queue
-      // Note: Debug jobs are auto-deleted after pickup, so 404 is expected and not an error
-      try {
-        await this.reportResult(idPart, true, undefined, 'Debug request completed - Grasshopper opened with script');
-      } catch (err: any) {
-        // Suppress 404 errors for debug jobs - they're auto-deleted after pickup
-        if (err?.response?.status !== 404) {
-          this.logger.warn({ error: err?.message }, 'Failed to report debug result (non-404 error)');
-        }
-      }
-      
-      this.logger.info({ id: idPart }, 'Debug request complete - Grasshopper is open for manual debugging');
-    } catch (err: any) {
-      this.logger.error({ error: err?.message }, 'Debug request failed');
-      // Still mark as complete to not block queue
-      await this.reportResult(job?.id || 'unknown', false, err?.message);
-    }
-  }
-
   async run() {
     const env = this.config.environment === 'production' ? 'prod' : 
                 this.config.environment === 'local' ? 'local' : 
@@ -218,37 +91,25 @@ export class Processor {
         this.logger.info({ 
           apiUrl: this.config.apiUrl, 
           jobId: job?.id ?? job?.ID ?? job?.Id,
-          isDebug: job?.isDebugRequest || false
         }, `[${env}] Job received from factory`);
         
-        // Mark job as started (unless it's a debug request)
-        if (!job?.isDebugRequest) {
-          try {
-            const markStartedResp = await this.http.post('/api/geometry-processing/mark-started', {
-              jobId: job?.id
-            });
-            if (markStartedResp.status === 200) {
-              this.logger.info({ jobId: job?.id }, 'Marked job as started');
-            } else {
-              this.logger.warn({ 
-                jobId: job?.id, 
-                status: markStartedResp.status 
-              }, 'Failed to mark job as started (continuing anyway)');
-            }
-          } catch (markErr: any) {
+        try {
+          const markStartedResp = await this.http.post('/api/geometry-processing/mark-started', {
+            jobId: job?.id
+          });
+          if (markStartedResp.status === 200) {
+            this.logger.info({ jobId: job?.id }, 'Marked job as started');
+          } else {
             this.logger.warn({ 
               jobId: job?.id, 
-              error: markErr?.message 
-            }, 'Error marking job as started (continuing anyway)');
+              status: markStartedResp.status 
+            }, 'Failed to mark job as started (continuing anyway)');
           }
-        }
-        
-        // Handle debug requests differently
-        if (job?.isDebugRequest) {
-          this.logger.info({ jobId: job.id }, 'Debug request detected - launching Grasshopper and exiting');
-          await this.handleDebugRequest(job);
-          this.logger.info('Debug workflow complete - exiting processor');
-          process.exit(0);
+        } catch (markErr: any) {
+          this.logger.warn({ 
+            jobId: job?.id, 
+            error: markErr?.message 
+          }, 'Error marking job as started (continuing anyway)');
         }
         
         try {
@@ -773,5 +634,131 @@ export class Processor {
     }
 
     this.logger.info({ destDir }, 'Archived job files');
+  }
+
+  /**
+   * Inspect mode: fetch a job by objectID or UUID from the server,
+   * write its data to the inbox, launch Rhino/Grasshopper, and exit.
+   * Read-only -- no server mutations.
+   */
+  async inspect(jobIdentifier: string) {
+    this.logger.info({ jobIdentifier }, 'Inspect: fetching job from server');
+
+    const resp = await this.http.get(`/api/geometry-processing/job-by-id/${encodeURIComponent(jobIdentifier)}`);
+
+    if (resp.status === 404) {
+      this.logger.error({ jobIdentifier }, 'Inspect: job not found (checked both UUID and objectID)');
+      process.exit(1);
+    }
+    if (resp.status !== 200) {
+      this.logger.error({ status: resp.status, data: resp.data }, 'Inspect: failed to fetch job');
+      process.exit(1);
+    }
+
+    const job = resp.data as any;
+    this.logger.info({
+      id: job.id,
+      objectID: job.objectID,
+      algorithm: job.GeometryAlgorithmName,
+      isProcessSuccessful: job.isProcessSuccessful,
+      processCompleted: !!job.ProcessCompletedTime,
+    }, 'Inspect: job loaded');
+
+    // Reuse the debug launch flow: write inbox JSON, launch Rhino, open GH script
+    const algoPart = job.GeometryAlgorithmName || 'algorithm';
+    const idPart = job.id || `inspect_${Date.now()}`;
+    const baseName = `${algoPart}_${idPart}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+    // Clean stale inbox files for this algorithm
+    try {
+      const existingFiles = fs.readdirSync(this.inbox);
+      const algoPrefix = `${algoPart}_`;
+      const filesToClean = existingFiles.filter(f => f.startsWith(algoPrefix) && f.endsWith('.json'));
+      for (const file of filesToClean) {
+        fs.unlinkSync(path.join(this.inbox, file));
+      }
+      if (filesToClean.length > 0) {
+        this.logger.info({ count: filesToClean.length }, 'Inspect: cleaned stale inbox files');
+      }
+    } catch (err: any) {
+      this.logger.warn({ error: err?.message }, 'Inspect: inbox cleanup failed (continuing)');
+    }
+
+    // Write input JSON to inbox (same shape the GH scripts expect)
+    const inboxJson = path.join(this.inbox, `${baseName}.json`);
+    const inputPayload = {
+      id: idPart,
+      algorithm: algoPart,
+      params: job.GeometryInputParameterData,
+      metadata: {
+        GeometryName: job.GeometryName,
+        CustomerNote: job.JobNote,
+        objectID: job.objectID,
+      }
+    };
+    fs.writeFileSync(inboxJson, JSON.stringify(inputPayload, null, 2), 'utf8');
+    this.logger.info({ inboxJson, objectID: job.objectID }, 'Inspect: wrote input JSON to inbox');
+
+    // Resolve GH script path
+    const ghScript = path.join(this.config.ghScriptsDir, `${algoPart}.gh`);
+    const ghScriptAbs = path.resolve(ghScript);
+
+    if (!fs.existsSync(ghScriptAbs)) {
+      this.logger.error({ ghScript: ghScriptAbs }, 'Inspect: Grasshopper script not found');
+      process.exit(1);
+    }
+
+    if (!this.config.rhinoCodeCli || !this.config.rhinoCli) {
+      this.logger.error('Inspect: RHINOCODE_CLI or RHINO_CLI not configured');
+      process.exit(1);
+    }
+
+    // Launch Rhino
+    this.logger.info('Inspect: ensuring Rhino is running');
+    const rhinoRunning = await ensureRhinoRunning(
+      this.config.rhinoCodeCli,
+      this.config.rhinoCli,
+      this.logger
+    );
+
+    if (!rhinoRunning) {
+      this.logger.error('Inspect: failed to start Rhino');
+      process.exit(1);
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Open Grasshopper window
+    this.logger.info('Inspect: opening Grasshopper window');
+    try {
+      await executeRhinoCommand(
+        this.config.rhinoCodeCli,
+        '-_Grasshopper _Window _Show _EnterEnd',
+        { timeout: 10000 },
+        this.logger
+      );
+    } catch (err: any) {
+      this.logger.warn({ error: err?.message }, 'Inspect: Grasshopper window command completed');
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Open the GH script
+    const commandString = `-_Grasshopper _Document _Open ${ghScriptAbs} _EnterEnd`;
+    this.logger.info({ commandString }, 'Inspect: opening Grasshopper script');
+
+    try {
+      await executeRhinoCommand(this.config.rhinoCodeCli, commandString, {}, this.logger);
+      this.logger.info('Inspect: Grasshopper script opened');
+    } catch (err: any) {
+      this.logger.warn({ error: err?.message }, 'Inspect: command completed (may need manual verification)');
+    }
+
+    this.logger.info({
+      id: job.id,
+      objectID: job.objectID,
+      algorithm: algoPart,
+    }, 'Inspect: complete - Grasshopper is open for manual inspection');
+    process.exit(0);
   }
 }
