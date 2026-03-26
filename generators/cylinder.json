@@ -1,0 +1,9 @@
+{
+  "id": "cmn811vs70001jphsnv491llq",
+  "algorithm": "cylinder",
+  "params": "{\"radius\":10,\"height\":10}",
+  "metadata": {
+    "GeometryName": "Cylinder",
+    "objectID": "SDZZ"
+  }
+}

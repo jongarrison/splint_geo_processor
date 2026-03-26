@@ -121,20 +121,30 @@ export class Processor {
   const idPart = job?.id ?? job?.ID ?? job?.Id ?? `ts_${Date.now()}`;
   const algoPart = job?.GeometryAlgorithmName || 'algorithm';
   
-  // Clean up any existing JSON files for this algorithm in the inbox
-  // This prevents Grasshopper from picking up stale files from failed/incomplete previous runs
+  // Clean out all files in the inbox before writing new input
   try {
     const existingFiles = fs.readdirSync(this.inbox);
-    const algoPrefix = `${algoPart}_`;
-    const filesToClean = existingFiles.filter(f => f.startsWith(algoPrefix) && f.endsWith('.json'));
-    if (filesToClean.length > 0) {
-      this.logger.info({ count: filesToClean.length, files: filesToClean }, 'Cleaning up stale inbox JSON files');
-      for (const file of filesToClean) {
+    if (existingFiles.length > 0) {
+      this.logger.info({ count: existingFiles.length, files: existingFiles }, 'Cleaning inbox before new job');
+      for (const file of existingFiles) {
         fs.unlinkSync(path.join(this.inbox, file));
       }
     }
   } catch (err: any) {
     this.logger.warn({ error: err?.message }, 'Failed to clean up inbox files (continuing)');
+  }
+
+  // Clean out all files in the outbox before new job
+  try {
+    const existingFiles = fs.readdirSync(this.outbox);
+    if (existingFiles.length > 0) {
+      this.logger.info({ count: existingFiles.length, files: existingFiles }, 'Cleaning outbox before new job');
+      for (const file of existingFiles) {
+        fs.unlinkSync(path.join(this.outbox, file));
+      }
+    }
+  } catch (err: any) {
+    this.logger.warn({ error: err?.message }, 'Failed to clean up outbox files (continuing)');
   }
   
   const baseName = `${algoPart}_${idPart}`.replace(/[^a-zA-Z0-9._-]/g, '_');

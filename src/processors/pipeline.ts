@@ -323,7 +323,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   // resets so long-running multi-splint jobs aren't killed prematurely.
   {
     const start = Date.now();
-    const baseTimeoutMs = 120_000; // 2 minutes base timeout
+    const baseTimeoutMs = 30_000; // 30 seconds inactivity timeout
     const maxTimeoutMs = 10 * 60_000; // 10 minute hard ceiling
     let ok = false;
     let size = 0;

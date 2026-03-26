@@ -191,9 +191,13 @@ def extract_server_params_data(json_data):
 def get_next_geo_job(algorithm_name):
     try:
         log(f"get_next_geo_job {algorithm_name=}")
-        # Process the oldest JSON file
-        json_data, raw_data = load_oldest_json_job_file(splint_inbox_dir, algorithm_name)
+        result = load_oldest_json_job_file(splint_inbox_dir, algorithm_name)
 
+        if result is None:
+            log(f"No job file found for '{algorithm_name}' in {splint_inbox_dir}")
+            return None
+
+        json_data, raw_data = result
         return extract_server_params_data(json_data), raw_data
     except Exception as e:
         log(f"Exception in get_next_geo_job: {traceback.format_exc()}")
@@ -245,16 +249,16 @@ def load_job_data(is_production_mode, geo_algorithm_name):
     else:
         # We start hunting for files to see if work needs to be done.
         log("PROD: Looking for available job data...")
-        job_data, raw_data = get_next_geo_job(geo_algorithm_name)
-        log(f"PROD:\n{job_data=}")
+        result = get_next_geo_job(geo_algorithm_name)
+        log(f"PROD: get_next_geo_job returned: {type(result)}")
 
-        if job_data is None:
+        if result is None:
             log("No Prod Job Data Available")
-            raise Exception(f"PROD: Failed to locate job data for {geo_algorithm_name}")
-        else:
-    
-            jobname = job_data["jobname"]
-            root_filename_out = jobname
+            raise Exception(f"PROD: No job file found in inbox for '{geo_algorithm_name}'. Is the inbox empty?")
+
+        job_data, raw_data = result
+        jobname = job_data["jobname"]
+        root_filename_out = jobname
 
     return job_data, objectID, root_filename_out, output_dir_out, raw_data
 
