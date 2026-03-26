@@ -86,7 +86,7 @@
   "skirt_height": "1",
   "skirt_loops": "0",
   "smooth_coefficient": "150",
-  "sparse_infill_density": "100%",
+  "sparse_infill_density": "15%",
   "skeleton_infill_density": "15%",
   "skin_infill_density": "15%",
   "sparse_infill_line_width": "0.45",
@@ -94,7 +94,7 @@
   "infill_lock_depth": "1.0",
   "skin_infill_depth": "2.0",
   "skeleton_infill_line_width": "0.45",
-  "sparse_infill_pattern": "rectilinear",
+  "sparse_infill_pattern": "grid",
   "sparse_infill_speed": [
     "270"
   ],
@@ -146,7 +146,7 @@
   "tree_support_wall_count": "0",
   "wall_generator": "classic",
   "wall_infill_order": "inner wall/outer wall/infill",
-  "wall_loops": "2",
+  "wall_loops": "99",
   "wipe_tower_no_sparse_layers": "0",
   "xy_contour_compensation": "0",
   "xy_hole_compensation": "0",
