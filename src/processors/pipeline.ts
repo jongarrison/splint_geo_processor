@@ -34,7 +34,7 @@ export async function executeRhinoCodeCli(
     const { timeout = 30_000, env } = options;
     logger?.info({ rhinoCodeCli, args, timeout }, 'Executing rhinocode CLI');
     const { stdout, stderr } = await execFileAsync(rhinoCodeCli, args, { timeout, env });
-    logger?.info({ stdout: stdout?.substring(0, 500), stderr: stderr?.substring(0, 500) }, 'rhinocode CLI completed');
+    logger?.info({ stdout: stdout?.substring(0, 500), stderr: stderr?.substring(0, 500) }, 'rhinocode CLI command sent');
     return { stdout, stderr };
   } catch (err: any) {
     logger?.warn({ error: err?.message, stdout: err?.stdout, stderr: err?.stderr }, 'rhinocode CLI failed');
@@ -318,25 +318,43 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   if (ghStdout && ghStdout.trim()) logInfo('stdout (rhinocode command)', { stdout: ghStdout.substring(0, 2000) });
   if (ghStderr && ghStderr.trim()) logWarn('stderr (rhinocode command)', { stderr: ghStderr.substring(0, 2000) });
 
-  // Validate geometry output exists and is non-trivial, allowing time for file write
-  // Grasshopper may take time to flush large files to disk
+  // Validate geometry output exists and is non-trivial, allowing time for file write.
+  // Uses activity detection: if Grasshopper's log.txt is still growing, the timeout
+  // resets so long-running multi-splint jobs aren't killed prematurely.
   {
     const start = Date.now();
-    const timeoutMs = 60000; // 60 second timeout for large files
+    const baseTimeoutMs = 120_000; // 2 minutes base timeout
+    const maxTimeoutMs = 10 * 60_000; // 10 minute hard ceiling
     let ok = false;
     let size = 0;
     let lastSize = -1;
     let stableSizeCount = 0;
-    
-    while (Date.now() - start < timeoutMs) {
+
+    // Activity detection via log.txt
+    const ghLogPath = path.join(input.outboxDir, 'log.txt');
+    let lastLogSize = 0;
+    let lastActivityTime = Date.now();
+    try {
+      if (fs.existsSync(ghLogPath)) lastLogSize = fs.statSync(ghLogPath).size;
+    } catch {}
+
+    let lastProgressLog = 0;
+
+    while (true) {
+      const elapsed = Date.now() - start;
+      const sinceActivity = Date.now() - lastActivityTime;
+
+      // Hard ceiling: never wait longer than maxTimeoutMs
+      if (elapsed >= maxTimeoutMs) break;
+      // Timeout if no log activity for baseTimeoutMs
+      if (sinceActivity >= baseTimeoutMs) break;
+
       if (fs.existsSync(geometryPath)) {
         try {
           const stats = fs.statSync(geometryPath);
           size = stats.size;
-          
-          // File must be at least 200 bytes and stable (not still growing)
+
           if (stats.isFile() && size >= 200) {
-            // Check if size has stabilized (same size for 2 consecutive checks)
             if (size === lastSize) {
               stableSizeCount++;
               if (stableSizeCount >= 2) {
@@ -350,16 +368,32 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
           }
         } catch {}
       }
+
+      // Check if log.txt is still growing (Grasshopper still working)
+      try {
+        if (fs.existsSync(ghLogPath)) {
+          const currentLogSize = fs.statSync(ghLogPath).size;
+          if (currentLogSize > lastLogSize) {
+            lastLogSize = currentLogSize;
+            lastActivityTime = Date.now();
+          }
+        }
+      } catch {}
+
+      // Periodic progress log every 15 seconds
+      if (Date.now() - lastProgressLog >= 15_000) {
+        lastProgressLog = Date.now();
+        logInfo(`Waiting for output... elapsed=${Math.round(elapsed / 1000)}s, stlSize=${size}, logActivity=${Math.round(sinceActivity / 1000)}s ago`);
+      }
+
       await new Promise(r => setTimeout(r, 500));
     }
 
-    // Check for Grasshopper's log.txt and include it in our logs
-    const ghLogPath = path.join(input.outboxDir, 'log.txt');
+    // Read Grasshopper's log.txt and include in processing logs
     if (fs.existsSync(ghLogPath)) {
       try {
         const ghLogContent = fs.readFileSync(ghLogPath, 'utf-8');
         if (ghLogContent.trim()) {
-          // Format the log with prominent markers and preserved line endings
           const formattedLog = '\n' +
             '================== RHINO LOG START ==================\n' +
             ghLogContent +
@@ -372,8 +406,9 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     }
 
     if (!ok) {
-      logWarn(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes, timeout=${timeoutMs}ms): ${geometryPath}`);
-      throw new Error(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes): ${geometryPath}`);
+      const elapsed = Date.now() - start;
+      logWarn(`Geometry output missing or invalid (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s, lastLogActivity=${Math.round((Date.now() - lastActivityTime) / 1000)}s ago): ${geometryPath}`);
+      throw new Error(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s): ${geometryPath}`);
     }
     logInfo(`Geometry output validated (${size} bytes)`, { geometryPath, waitTimeMs: Date.now() - start });
   }
