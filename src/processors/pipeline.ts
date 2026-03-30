@@ -234,6 +234,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   const base = `${input.algorithm}_${input.id}`.replace(/[^a-zA-Z0-9._-]/g, '_');
   const geometryPath = path.join(input.outboxDir, `${base}.stl`);
   const printPath = path.join(input.outboxDir, `${base}.gcode.3mf`);
+  let pipelineError: Error | null = null;
 
   const logInfo = (msg: string, extra?: any) => {
     input.logger?.info(extra || {}, msg);
@@ -323,7 +324,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   // resets so long-running multi-splint jobs aren't killed prematurely.
   {
     const start = Date.now();
-    const baseTimeoutMs = 30_000; // 30 seconds inactivity timeout
+    const baseTimeoutMs = 90_000; // 90 seconds inactivity timeout (boolean ops can take 30s+ without logging)
     const maxTimeoutMs = 10 * 60_000; // 10 minute hard ceiling
     let ok = false;
     let size = 0;
@@ -408,9 +409,10 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     if (!ok) {
       const elapsed = Date.now() - start;
       logWarn(`Geometry output missing or invalid (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s, lastLogActivity=${Math.round((Date.now() - lastActivityTime) / 1000)}s ago): ${geometryPath}`);
-      throw new Error(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s): ${geometryPath}`);
+      pipelineError = new Error(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s): ${geometryPath}`);
+    } else {
+      logInfo(`Geometry output validated (${size} bytes)`, { geometryPath, waitTimeMs: Date.now() - start });
     }
-    logInfo(`Geometry output validated (${size} bytes)`, { geometryPath, waitTimeMs: Date.now() - start });
   }
 
   // 4) Exit Rhino to free up license
@@ -480,6 +482,11 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   } else {
     const reason = runningInitially ? 'Rhino was already running' : 'local development mode';
     logInfo(`Keeping Rhino open (${reason})`);
+  }
+
+  // If geometry validation failed, throw now (after Rhino cleanup)
+  if (pipelineError) {
+    throw pipelineError;
   }
 
   // Bambu Studio step (real CLI)
