@@ -709,7 +709,7 @@ class FingerModelResult:
     
     def __init__(self, params, tolerance, finger_brep, centerline,
                  components, joint_positions, phalanx_lines, radii,
-                 distal_bone_len=None):
+                 distal_bone_len=None, success=True, error=None):
         self.params = params
         self.tolerance = tolerance
         self.finger_brep = finger_brep
@@ -719,6 +719,8 @@ class FingerModelResult:
         self.phalanx_lines = phalanx_lines  # dict: phalanx name -> Line
         self.radii = radii  # dict: joint name -> float
         self.distal_bone_len = distal_bone_len  # distal_len minus tip_radius
+        self.success = success  # False when union or post-processing failed
+        self.error = error  # error message when success is False
         self._mesh = None  # lazy-cached mesh for cross-section queries
     
     def get_perp_frame(self, name, offset=0.0):
@@ -893,8 +895,13 @@ class FingerModelResult:
 def _build_finger_model(
     params: FingerParams,
     tolerance: Optional[float] = None,
+    raise_on_union_failure: bool = True,
 ):
     """Internal: build finger model and return FingerModelResult.
+    
+    When raise_on_union_failure=False, catches BrepUnionError and returns a
+    partial FingerModelResult with finger_brep=None, success=False, and all
+    pre-union data (components, centerline, joint_positions, radii) populated.
     
     Orientation: Finger along +X, palm faces -Z. Positive angles = flexion toward palm.
     Construction order: Metacarpal -> MCP -> Proximal -> PIP -> Middle -> DIP -> Distal -> Tip
@@ -1180,7 +1187,40 @@ def _build_finger_model(
         )
     
     # robust_brep_union will raise BrepUnionError on failure
-    finger_brep, success, method = robust_brep_union(components, tolerance, check_volumes=True)
+    try:
+        finger_brep, union_ok, method = robust_brep_union(components, tolerance, check_volumes=True)
+    except BrepUnionError as e:
+        if raise_on_union_failure:
+            raise
+        # Return partial result with all pre-union data
+        log(f"Union failed (non-fatal): {e}")
+        distal_full_line = Line(dist_line.From, tip_end_point)
+        elapsed = time.time() - start_time
+        log(f"create_finger_model completed in {elapsed:.3f}s (union failed)")
+        log("=" * 60)
+        return FingerModelResult(
+            params=params,
+            tolerance=tolerance,
+            finger_brep=None,
+            centerline=centerline,
+            components=components,
+            joint_positions=joint_positions,
+            phalanx_lines={
+                "metacarpal": metacarpal_line,
+                "proximal": prox_line,
+                "middle": mid_line,
+                "distal": distal_full_line,
+            },
+            radii={
+                "mcp": mcp_radius,
+                "pip": pip_radius,
+                "dip": dip_radius,
+                "tip": tip_radius,
+            },
+            distal_bone_len=distal_bone_len,
+            success=False,
+            error=str(e),
+        )
     
     log(f"SUCCESS: Finger union complete via {method}")
     log(f"Final finger volume: {finger_brep.GetVolume():.2f} mm^3")
@@ -1235,9 +1275,23 @@ def create_finger_model_result(
 ) -> 'FingerModelResult':
     """Generate a finger model, returning a FingerModelResult for further queries.
     
+    Raises BrepUnionError if the boolean union fails.
     See _build_finger_model for full documentation.
     """
     return _build_finger_model(params, tolerance)
+
+
+def create_finger_model_safe(
+    params: FingerParams,
+    tolerance: Optional[float] = None,
+) -> 'FingerModelResult':
+    """Generate a finger model, returning partial results on failure.
+    
+    Never raises on union failure. Check result.success and result.error.
+    On failure, result.finger_brep is None but components, centerline,
+    joint_positions, phalanx_lines, and radii are still populated.
+    """
+    return _build_finger_model(params, tolerance, raise_on_union_failure=False)
 
 
 def create_finger_model(
