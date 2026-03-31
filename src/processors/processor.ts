@@ -895,7 +895,7 @@ export class Processor {
 
     this.logger.info({ count: fixtureFiles.length, filter: filter || 'all' }, 'Test: running fixtures');
 
-    const results: Array<{ name: string; pass: boolean; issues: string[]; volumePctDiff?: number; elapsed?: number; benchmarkElapsed?: number; unionMethod?: string }> = [];
+    const results: Array<{ name: string; pass: boolean; issues: string[]; volume?: number; volumePctDiff?: number; elapsed?: number; benchmarkElapsed?: number; unionMethod?: string }> = [];
 
     for (const fixtureFile of fixtureFiles) {
       const fixtureName = fixtureFile.replace('.fixture.json', '');
@@ -962,15 +962,18 @@ export class Processor {
       }
 
       // Compute volume and time deltas for summary
+      let volume: number | undefined;
       let volumePctDiff: number | undefined;
       let benchmarkElapsed: number | undefined;
+      if (result.meta?.meshes?.[0]?.volume_mm3 != null) {
+        volume = result.meta.meshes[0].volume_mm3;
+      }
       if (fs.existsSync(benchmarkPath)) {
         const benchmark = JSON.parse(fs.readFileSync(benchmarkPath, 'utf8'));
-        if (result.meta?.meshes?.[0]?.volume_mm3 != null) {
+        if (volume != null) {
           const bVol = benchmark.meta?.meshes?.[0]?.volume_mm3;
-          const rVol = result.meta.meshes[0].volume_mm3;
           if (bVol != null && bVol > 0) {
-            volumePctDiff = ((rVol - bVol) / bVol) * 100;
+            volumePctDiff = ((volume - bVol) / bVol) * 100;
           }
         }
         if (benchmark.durationSeconds != null) {
@@ -979,7 +982,7 @@ export class Processor {
       }
 
       const pass = result.success && issues.length === 0;
-      results.push({ name: fixtureName, pass, issues, volumePctDiff, elapsed: result.durationSeconds, benchmarkElapsed, unionMethod: result.unionMethod });
+      results.push({ name: fixtureName, pass, issues, volume, volumePctDiff, elapsed: result.durationSeconds, benchmarkElapsed, unionMethod: result.unionMethod });
       this.logger.info({ fixtureName, pass, issues }, pass ? 'PASS' : 'FAIL');
     }
 
@@ -992,16 +995,19 @@ export class Processor {
     // Build detail string for a result entry
     const formatDetail = (r: typeof results[number]) => {
       let detail = '';
+      if (r.volume != null) {
+        detail += ` vol:${r.volume.toFixed(0)}`;
+      }
       if (r.volumePctDiff != null) {
         const sign = r.volumePctDiff >= 0 ? '+' : '';
-        detail += ` vol:${sign}${r.volumePctDiff.toFixed(2)}%`;
+        detail += ` vol_d:${sign}${r.volumePctDiff.toFixed(2)}%`;
       }
       if (r.elapsed != null) {
-        detail += ` ${r.elapsed.toFixed(1)}s`;
+        detail += ` time:${r.elapsed.toFixed(1)}s`;
         if (r.benchmarkElapsed != null && r.benchmarkElapsed > 0) {
           const timeDelta = ((r.elapsed - r.benchmarkElapsed) / r.benchmarkElapsed) * 100;
           const timeSign = timeDelta >= 0 ? '+' : '';
-          detail += ` (${timeSign}${timeDelta.toFixed(0)}%)`;
+          detail += ` time_d:${timeSign}${timeDelta.toFixed(0)}%`;
         }
       }
       if (r.unionMethod) {
