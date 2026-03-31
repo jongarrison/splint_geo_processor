@@ -1,0 +1,10 @@
+{
+  "id": "cmne7ve0m0007lh04zui7z3n6",
+  "algorithm": "InfinityExtend",
+  "params": "{\"root_circumference_mm\":65,\"mid_circumference_mm\":68,\"tip_circumference_mm\":62,\"inter_phalanx_distance_mm\":35,\"flexion_degrees\":10}",
+  "metadata": {
+    "GeometryName": "Infinity Extend",
+    "CustomerNote": "Testing Rob's Failed Run",
+    "objectID": "JWA3"
+  }
+}
