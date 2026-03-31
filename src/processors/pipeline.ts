@@ -231,7 +231,9 @@ export interface PipelineOutputs {
 }
 
 export async function runPipeline(input: PipelineInputs): Promise<PipelineOutputs> {
-  const base = `${input.algorithm}_${input.id}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+  // Use baseName from caller -- it matches the inbox JSON filename stem,
+  // which the GH Python script uses as jobname for output files.
+  const base = input.baseName;
   const geometryPath = path.join(input.outboxDir, `${base}.stl`);
   const printPath = path.join(input.outboxDir, `${base}.gcode.3mf`);
   let pipelineError: Error | null = null;

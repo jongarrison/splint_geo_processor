@@ -14,6 +14,9 @@ node_modules/
 **/__pycache__
 stubs/*
 
+# Test fixture results (ephemeral, regenerated on each run)
+test-fixtures/*.result.json
+
 # Environment variables
 .env
 .env.local

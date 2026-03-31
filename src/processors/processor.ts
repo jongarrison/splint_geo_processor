@@ -8,6 +8,7 @@ import { runPipeline, executeRhinoCommand, ensureRhinoRunning } from './pipeline
 import { upload } from '@vercel/blob/client';
 import FormData from 'form-data';
 import { cleanupOldFiles } from '../utils/cleanup.js';
+import readline from 'node:readline/promises';
 
 export class Processor {
   private http: AxiosInstance;
@@ -709,6 +710,25 @@ export class Processor {
     fs.writeFileSync(inboxJson, JSON.stringify(inputPayload, null, 2), 'utf8');
     this.logger.info({ inboxJson, objectID: job.objectID }, 'Inspect: wrote input JSON to inbox');
 
+    // Offer to save as test fixture
+    const objectID = job.objectID || jobIdentifier;
+    const fixtureName = `${algoPart}_${objectID}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const fixturesDir = path.resolve('test-fixtures');
+    const fixturePath = path.join(fixturesDir, `${fixtureName}.fixture.json`);
+
+    if (fs.existsSync(fixturePath)) {
+      this.logger.info({ fixturePath }, 'Inspect: fixture already exists');
+    } else {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      const answer = await rl.question('\nSave as test fixture? (y/n) ');
+      rl.close();
+      if (answer.trim().toLowerCase() === 'y') {
+        fs.mkdirSync(fixturesDir, { recursive: true });
+        fs.writeFileSync(fixturePath, JSON.stringify(inputPayload, null, 2), 'utf8');
+        this.logger.info({ fixturePath }, 'Inspect: saved test fixture');
+      }
+    }
+
     // Resolve GH script path
     const ghScript = path.join(this.config.ghScriptsDir, `${algoPart}.gh`);
     const ghScriptAbs = path.resolve(ghScript);
@@ -770,5 +790,344 @@ export class Processor {
       algorithm: algoPart,
     }, 'Inspect: complete - Grasshopper is open for manual inspection');
     process.exit(0);
+  }
+
+  /**
+   * Capture mode: fetch a job by objectID or UUID from the server,
+   * save it as a test fixture (.fixture.json), then run the pipeline.
+   * If the run succeeds and no .benchmark.json exists yet, write one.
+   * Always writes a .result.json for manual inspection.
+   */
+  async capture(jobIdentifier: string) {
+    const fixturesDir = path.resolve('test-fixtures');
+    fs.mkdirSync(fixturesDir, { recursive: true });
+
+    this.logger.info({ jobIdentifier }, 'Capture: fetching job from server');
+    const resp = await this.http.get(`/api/geometry-processing/job-by-id/${encodeURIComponent(jobIdentifier)}`);
+
+    if (resp.status === 404) {
+      this.logger.error({ jobIdentifier }, 'Capture: job not found');
+      process.exit(1);
+    }
+    if (resp.status !== 200) {
+      this.logger.error({ status: resp.status }, 'Capture: failed to fetch job');
+      process.exit(1);
+    }
+
+    const job = resp.data as any;
+    const algoPart = job.GeometryAlgorithmName || 'algorithm';
+    const objectID = job.objectID || jobIdentifier;
+    const fixtureName = `${algoPart}_${objectID}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+    // Write .fixture.json (the input payload GH scripts expect)
+    const fixturePayload = {
+      id: job.id || `capture_${Date.now()}`,
+      algorithm: algoPart,
+      params: job.GeometryInputParameterData,
+      metadata: {
+        GeometryName: job.GeometryName,
+        CustomerNote: job.JobNote,
+        objectID,
+      }
+    };
+    const fixturePath = path.join(fixturesDir, `${fixtureName}.fixture.json`);
+    fs.writeFileSync(fixturePath, JSON.stringify(fixturePayload, null, 2), 'utf8');
+    this.logger.info({ fixturePath }, 'Capture: wrote fixture file');
+
+    // Run the pipeline against this fixture
+    const result = await this.runFixture(fixtureName, fixturePayload);
+
+    // Write .result.json (always)
+    const resultPath = path.join(fixturesDir, `${fixtureName}.result.json`);
+    fs.writeFileSync(resultPath, JSON.stringify(result, null, 2), 'utf8');
+    this.logger.info({ resultPath, success: result.success }, 'Capture: wrote result file');
+
+    // Write .benchmark.json only if: run succeeded AND no benchmark exists yet
+    const benchmarkPath = path.join(fixturesDir, `${fixtureName}.benchmark.json`);
+    if (result.success && !fs.existsSync(benchmarkPath)) {
+      fs.writeFileSync(benchmarkPath, JSON.stringify(result, null, 2), 'utf8');
+      this.logger.info({ benchmarkPath }, 'Capture: wrote initial benchmark (protected from overwrite)');
+    } else if (result.success && fs.existsSync(benchmarkPath)) {
+      this.logger.info({ benchmarkPath }, 'Capture: benchmark already exists - not overwriting');
+    } else {
+      this.logger.warn('Capture: run failed - no benchmark written');
+    }
+
+    process.exit(result.success ? 0 : 1);
+  }
+
+  /**
+   * Test mode: run all fixtures in test-fixtures/ through the pipeline,
+   * compare results against benchmarks, report pass/fail.
+   */
+  async testAll(filter?: string) {
+    const fixturesDir = path.resolve('test-fixtures');
+    if (!fs.existsSync(fixturesDir)) {
+      this.logger.error('No test-fixtures/ directory found');
+      process.exit(1);
+    }
+
+    let fixtureFiles = fs.readdirSync(fixturesDir)
+      .filter(f => f.endsWith('.fixture.json'))
+      .sort();
+
+    if (filter) {
+      const match = fixtureFiles.find(f => f.toLowerCase().includes(filter.toLowerCase()));
+      if (!match) {
+        this.logger.error({ filter }, 'No fixture matching filter');
+        process.exit(1);
+      }
+      fixtureFiles = [match];
+    }
+
+    if (fixtureFiles.length === 0) {
+      this.logger.warn('No .fixture.json files found in test-fixtures/');
+      process.exit(0);
+    }
+
+    // Clean stale .result.json files and summary before running
+    for (const ff of fixtureFiles) {
+      const staleResult = path.join(fixturesDir, ff.replace('.fixture.json', '.result.json'));
+      if (fs.existsSync(staleResult)) fs.unlinkSync(staleResult);
+    }
+    const summaryPath = path.join(fixturesDir, 'LAST_FULL_RUN.txt');
+    if (fs.existsSync(summaryPath)) fs.unlinkSync(summaryPath);
+
+    this.logger.info({ count: fixtureFiles.length, filter: filter || 'all' }, 'Test: running fixtures');
+
+    const results: Array<{ name: string; pass: boolean; issues: string[]; volumePctDiff?: number; elapsed?: number; benchmarkElapsed?: number; unionMethod?: string }> = [];
+
+    for (const fixtureFile of fixtureFiles) {
+      const fixtureName = fixtureFile.replace('.fixture.json', '');
+      this.logger.info({ fixtureName }, '--- Running fixture ---');
+
+      // Read fixture
+      const fixturePayload = JSON.parse(
+        fs.readFileSync(path.join(fixturesDir, fixtureFile), 'utf8')
+      );
+
+      // Run pipeline
+      const result = await this.runFixture(fixtureName, fixturePayload);
+
+      // Write .result.json (always)
+      const resultPath = path.join(fixturesDir, `${fixtureName}.result.json`);
+      fs.writeFileSync(resultPath, JSON.stringify(result, null, 2), 'utf8');
+
+      // Compare against benchmark
+      const benchmarkPath = path.join(fixturesDir, `${fixtureName}.benchmark.json`);
+      const issues: string[] = [];
+
+      if (!fs.existsSync(benchmarkPath)) {
+        if (result.success) {
+          fs.writeFileSync(benchmarkPath, JSON.stringify(result, null, 2), 'utf8');
+          this.logger.info({ benchmarkPath }, 'Wrote initial benchmark (first successful run)');
+        } else {
+          issues.push('No benchmark and run failed - cannot establish baseline');
+        }
+      } else {
+        const benchmark = JSON.parse(fs.readFileSync(benchmarkPath, 'utf8'));
+        // Compare success
+        if (benchmark.success && !result.success) {
+          issues.push(`Regression: was success, now failed (${result.error || 'unknown'})`);
+        }
+        // Compare mesh count
+        if (benchmark.meta?.mesh_count != null && result.meta?.mesh_count != null) {
+          if (benchmark.meta.mesh_count !== result.meta.mesh_count) {
+            issues.push(`Mesh count changed: ${benchmark.meta.mesh_count} -> ${result.meta.mesh_count}`);
+          }
+        }
+        // Compare volumes (within 1% tolerance)
+        if (benchmark.meta?.meshes && result.meta?.meshes) {
+          for (let i = 0; i < Math.min(benchmark.meta.meshes.length, result.meta.meshes.length); i++) {
+            const bVol = benchmark.meta.meshes[i]?.volume_mm3;
+            const rVol = result.meta.meshes[i]?.volume_mm3;
+            if (bVol != null && rVol != null && bVol > 0) {
+              const pctDiff = Math.abs(rVol - bVol) / bVol * 100;
+              if (pctDiff > 1.0) {
+                issues.push(`Mesh[${i}] volume drift: ${bVol.toFixed(1)} -> ${rVol.toFixed(1)} (${pctDiff.toFixed(1)}%)`);
+              }
+            }
+          }
+        }
+        // Compare is_closed
+        if (benchmark.meta?.meshes && result.meta?.meshes) {
+          for (let i = 0; i < Math.min(benchmark.meta.meshes.length, result.meta.meshes.length); i++) {
+            const bClosed = benchmark.meta.meshes[i]?.is_closed;
+            const rClosed = result.meta.meshes[i]?.is_closed;
+            if (bClosed != null && rClosed != null && bClosed !== rClosed) {
+              issues.push(`Mesh[${i}] is_closed changed: ${bClosed} -> ${rClosed}`);
+            }
+          }
+        }
+      }
+
+      // Compute volume and time deltas for summary
+      let volumePctDiff: number | undefined;
+      let benchmarkElapsed: number | undefined;
+      if (fs.existsSync(benchmarkPath)) {
+        const benchmark = JSON.parse(fs.readFileSync(benchmarkPath, 'utf8'));
+        if (result.meta?.meshes?.[0]?.volume_mm3 != null) {
+          const bVol = benchmark.meta?.meshes?.[0]?.volume_mm3;
+          const rVol = result.meta.meshes[0].volume_mm3;
+          if (bVol != null && bVol > 0) {
+            volumePctDiff = ((rVol - bVol) / bVol) * 100;
+          }
+        }
+        if (benchmark.durationSeconds != null) {
+          benchmarkElapsed = benchmark.durationSeconds;
+        }
+      }
+
+      const pass = result.success && issues.length === 0;
+      results.push({ name: fixtureName, pass, issues, volumePctDiff, elapsed: result.durationSeconds, benchmarkElapsed, unionMethod: result.unionMethod });
+      this.logger.info({ fixtureName, pass, issues }, pass ? 'PASS' : 'FAIL');
+    }
+
+    // Summary
+    const passed = results.filter(r => r.pass).length;
+    const failed = results.filter(r => !r.pass).length;
+    this.logger.info('');
+    this.logger.info({ passed, failed, total: results.length }, '=== Test Summary ===');
+
+    // Build detail string for a result entry
+    const formatDetail = (r: typeof results[number]) => {
+      let detail = '';
+      if (r.volumePctDiff != null) {
+        const sign = r.volumePctDiff >= 0 ? '+' : '';
+        detail += ` vol:${sign}${r.volumePctDiff.toFixed(2)}%`;
+      }
+      if (r.elapsed != null) {
+        detail += ` ${r.elapsed.toFixed(1)}s`;
+        if (r.benchmarkElapsed != null && r.benchmarkElapsed > 0) {
+          const timeDelta = ((r.elapsed - r.benchmarkElapsed) / r.benchmarkElapsed) * 100;
+          const timeSign = timeDelta >= 0 ? '+' : '';
+          detail += ` (${timeSign}${timeDelta.toFixed(0)}%)`;
+        }
+      }
+      if (r.unionMethod) {
+        detail += ` [${r.unionMethod}]`;
+      }
+      return detail;
+    };
+
+    for (const r of results) {
+      const icon = r.pass ? 'PASS' : 'FAIL';
+      this.logger.info(`  [${icon}] ${r.name}${formatDetail(r)}`);
+      for (const issue of r.issues) {
+        this.logger.info(`         ${issue}`);
+      }
+    }
+
+    // Write committed summary file when running all fixtures (no filter)
+    if (!filter) {
+      const lines: string[] = [];
+      lines.push(`Test Run: ${new Date().toISOString()}`);
+      lines.push(`Result: ${failed === 0 ? 'ALL PASSED' : `${failed} FAILED`}`);
+      lines.push(`Fixtures: ${passed} passed, ${failed} failed, ${results.length} total`);
+      lines.push('');
+      for (const r of results) {
+        const icon = r.pass ? 'PASS' : 'FAIL';
+        lines.push(`  [${icon}] ${r.name}${formatDetail(r)}`);
+        for (const issue of r.issues) {
+          lines.push(`         ${issue}`);
+        }
+      }
+      lines.push('');
+      fs.writeFileSync(summaryPath, lines.join('\n'), 'utf8');
+      this.logger.info({ summaryPath }, 'Wrote test summary (committable)');
+    }
+
+    process.exit(failed > 0 ? 1 : 0);
+  }
+
+  /**
+   * Run a single fixture through the pipeline. Returns a result object
+   * with success, timing, meta, log snippet, and union method (if found in log).
+   */
+  private async runFixture(
+    fixtureName: string,
+    fixturePayload: { id: string; algorithm: string; params: any; metadata?: any }
+  ): Promise<Record<string, any>> {
+    const baseName = fixtureName;
+    const algoPart = fixturePayload.algorithm;
+
+    // Clean inbox/outbox
+    for (const dir of [this.inbox, this.outbox]) {
+      try {
+        for (const f of fs.readdirSync(dir)) {
+          fs.unlinkSync(path.join(dir, f));
+        }
+      } catch {}
+    }
+
+    // Write input JSON to inbox
+    const inboxJson = path.join(this.inbox, `${baseName}.json`);
+    fs.writeFileSync(inboxJson, JSON.stringify(fixturePayload, null, 2), 'utf8');
+
+    const startTime = Date.now();
+    let success = false;
+    let error: string | undefined;
+    let meta: any = undefined;
+    let unionMethod: string | undefined;
+    let logSnippet: string | undefined;
+
+    try {
+      await runPipeline({
+        id: String(fixturePayload.id),
+        algorithm: String(algoPart),
+        params: fixturePayload.params,
+        ghScriptsDir: this.config.ghScriptsDir,
+        outboxDir: this.outbox,
+        baseName,
+        inboxJsonPath: inboxJson,
+        rhinoCli: this.config.rhinoCli,
+        rhinoCodeCli: this.config.rhinoCodeCli,
+        bambuCli: this.config.bambuCli,
+        dryRun: this.config.dryRun,
+        logger: this.logger,
+      });
+      success = true;
+    } catch (err: any) {
+      error = err?.message || 'Unknown error';
+      this.logger.error({ error }, 'Fixture run failed');
+    }
+
+    const durationSeconds = (Date.now() - startTime) / 1000;
+
+    // Read .meta.json if present
+    const metaPath = path.join(this.outbox, `${baseName}.meta.json`);
+    if (fs.existsSync(metaPath)) {
+      try {
+        meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      } catch {}
+    }
+
+    // Read log.txt for union method and snippet
+    const logPath = path.join(this.outbox, 'log.txt');
+    if (fs.existsSync(logPath)) {
+      try {
+        const logContent = fs.readFileSync(logPath, 'utf8');
+        // Extract union method from log (e.g. "SUCCESS - Clean multi-brep union")
+        const successMatch = logContent.match(/SUCCESS - (.+)/);
+        if (successMatch) {
+          unionMethod = successMatch[1].trim();
+        }
+        // Keep last 2000 chars as snippet
+        logSnippet = logContent.length > 2000
+          ? logContent.slice(-2000)
+          : logContent;
+      } catch {}
+    }
+
+    return {
+      fixtureName,
+      success,
+      ...(error && { error }),
+      durationSeconds: Math.round(durationSeconds * 100) / 100,
+      ...(meta && { meta }),
+      ...(unionMethod && { unionMethod }),
+      ...(logSnippet && { logSnippet }),
+      timestamp: new Date().toISOString(),
+    };
   }
 }

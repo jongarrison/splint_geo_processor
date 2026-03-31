@@ -15,11 +15,26 @@ async function main() {
   }, 'Loaded config');
   const processor = new Processor(logger, config);
 
-  // Check for inspect mode: npm run inspect -- <objectID or UUID>
-  const inspectId = process.argv[2];
-  if (inspectId) {
-    logger.info({ inspectId }, 'Inspect mode: fetching job and launching Grasshopper');
-    await processor.inspect(inspectId);
+  // CLI modes: --capture <id>, --test, or <id> (inspect mode)
+  const args = process.argv.slice(2);
+
+  if (args[0] === '--capture' && args[1]) {
+    logger.info({ jobId: args[1] }, 'Capture mode: fetching job and running pipeline');
+    await processor.capture(args[1]);
+    return;
+  }
+
+  if (args[0] === '--test') {
+    const fixtureFilter = args[1] || undefined;
+    logger.info({ fixtureFilter }, 'Test mode: running fixtures');
+    await processor.testAll(fixtureFilter);
+    return;
+  }
+
+  // Legacy inspect mode: bare objectID/UUID as first arg
+  if (args[0] && !args[0].startsWith('--')) {
+    logger.info({ inspectId: args[0] }, 'Inspect mode: fetching job and launching Grasshopper');
+    await processor.inspect(args[0]);
     return;
   }
 
