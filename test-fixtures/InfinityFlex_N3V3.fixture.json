@@ -1,0 +1,10 @@
+{
+  "id": "cmne1zzpe0005l8045y0s1alh",
+  "algorithm": "InfinityFlex",
+  "params": "{\"root_circumference_mm\":65,\"mid_circumference_mm\":68,\"tip_circumference_mm\":62,\"inter_phalanx_distance_mm\":35,\"flexion_degrees\":10}",
+  "metadata": {
+    "GeometryName": "Infinity Flex",
+    "CustomerNote": "1",
+    "objectID": "N3V3"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "fixtureName": "InfinityFlex_N3V3",
+  "success": true,
+  "durationSeconds": 11,
+  "meta": {
+    "mesh_count": 1,
+    "meshes": [
+      {
+        "index": 0,
+        "volume_mm3": 1482.0164,
+        "is_closed": true,
+        "bbox_dimensions": [
+          31.4572,
+          25.1619,
+          31.5927
+        ]
+      }
+    ],
+    "file_size_bytes": 4026284,
+    "elapsed_time_seconds": 2.25
+  },
+  "unionMethod": "Clean multi-brep union",
+  "logSnippet": "26\nFeatureIdentification.intersect_with_reference: Starting\nget_ordered_vertices: view=(0.00,1.00,0.00), up=(0.00,0.00,1.00), right=(1.00,0.00,0.00)\n  Got corners from surface domain: u=[0.00,39.10], v=[0.00,25.37]\n  vertex (74.31,25.69,-3.48): up=-3.50, right=19.55\n  vertex (35.21,25.69,-3.48): up=-3.50, right=-19.55\n  vertex (35.21,1.31,3.51): up=3.50, right=-19.55\n  vertex (74.31,1.31,3.51): up=3.50, right=19.55\n  Ordered vertices (clockwise from TL):\n    TL: (35.21, 1.31, 3.51)\n    TR: (74.31, 1.31, 3.51)\n    BR: (74.31, 25.69, -3.48)\n    BL: (35.21, 25.69, -3.48)\n  Found 2 intersection curves\n  TL: vertex (35.21,1.31,3.51) -> curve point (45.59,10.07,1.00), dist=13.82\n  TR: vertex (74.31,1.31,3.51) -> curve point (64.17,9.76,1.09), dist=13.42\n  BR: vertex (74.31,25.69,-3.48) -> curve point (63.77,11.69,0.53), dist=17.98\n  BL: vertex (35.21,25.69,-3.48) -> curve point (45.99,12.00,0.45), dist=17.87\nFeatureIdentification.intersect_with_reference: Complete\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Tue Mar 31 16:43:51 2026\nLogging to output_dir='/Users/jon/SplintFactoryFiles/outbox' root_filename='InfinityFlex_N3V3'\nsave_mesh: 1 mesh(es), format=STL, filename='InfinityFlex_N3V3'\nsave_mesh: directory='/Users/jon/SplintFactoryFiles/outbox'\n  mesh 0: type=Mesh, vertices=40260, faces=47447\n  Using STL export settings\n  Output path: /Users/jon/SplintFactoryFiles/outbox/InfinityFlex_N3V3.stl\n  Created temp layer 'PLAKFCNZY' (0.0005s)\n  Baked 1 mesh(es) (0.0025s)\n  Selected mesh(es) (0.0002s)\n  Running export command...\n  Export RunScript returned: True (0.2033s)\n  File created: InfinityFlex_N3V3.stl (4026284 bytes)\n  Metadata written: InfinityFlex_N3V3.meta.json\nsave_mesh: Complete (0.2146s total)\n  Cleaned up temp layer\nExport succeeded\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Tue Mar 31 16:43:52 2026\nERROR: No brep provided\n",
+  "timestamp": "2026-03-31T23:43:54.800Z"
+}

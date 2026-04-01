@@ -8,7 +8,42 @@ import { runPipeline, executeRhinoCommand, ensureRhinoRunning } from './pipeline
 import { upload } from '@vercel/blob/client';
 import FormData from 'form-data';
 import { cleanupOldFiles } from '../utils/cleanup.js';
-import readline from 'node:readline/promises';
+
+/** Result from running a single fixture through the pipeline */
+interface FixtureResult {
+  fixtureName: string;
+  success: boolean;
+  error?: string;
+  durationSeconds: number;
+  meta?: {
+    mesh_count?: number;
+    meshes?: Array<{ volume_mm3?: number; is_closed?: boolean; bbox_dimensions?: number[] }>;
+    file_size_bytes?: number;
+    elapsed_time_seconds?: number;
+  };
+  unionMethod?: string;
+  sliced: boolean;
+  printSizeBytes?: number;
+  sliceDurationSeconds?: number;
+  logSnippet?: string;
+  timestamp: string;
+}
+
+/** Per-fixture entry in the test summary */
+interface TestResultEntry {
+  name: string;
+  pass: boolean;
+  issues: string[];
+  volume?: number;
+  volumePctDiff?: number;
+  elapsed?: number;
+  benchmarkElapsed?: number;
+  unionMethod?: string;
+  sliced?: boolean;
+  printSizeBytes?: number;
+  sliceDuration?: number;
+  isFirstBenchmark?: boolean;
+}
 
 export class Processor {
   private http: AxiosInstance;
@@ -719,13 +754,35 @@ export class Processor {
     if (fs.existsSync(fixturePath)) {
       this.logger.info({ fixturePath }, 'Inspect: fixture already exists');
     } else {
-      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-      const answer = await rl.question('\nSave as test fixture? (y/n) ');
-      rl.close();
-      if (answer.trim().toLowerCase() === 'y') {
+      // Flush pino transports before prompting (they run in worker threads)
+      await new Promise(resolve => setTimeout(resolve, 500));
+      process.stderr.write('\nSave as test fixture? (y/n) ');
+      const answer = await new Promise<string>(resolve => {
+        process.stdin.setEncoding('utf8');
+        process.stdin.resume();
+        process.stdin.once('data', (data) => {
+          process.stdin.pause();
+          resolve(data.toString().trim());
+        });
+      });
+      if (answer.toLowerCase() === 'y') {
         fs.mkdirSync(fixturesDir, { recursive: true });
         fs.writeFileSync(fixturePath, JSON.stringify(inputPayload, null, 2), 'utf8');
         this.logger.info({ fixturePath }, 'Inspect: saved test fixture');
+
+        // Run pipeline to capture benchmark
+        this.logger.info('Inspect: running pipeline to capture benchmark...');
+        const result = await this.runFixture(fixtureName, inputPayload);
+        const resultPath = path.join(fixturesDir, `${fixtureName}.result.json`);
+        fs.writeFileSync(resultPath, JSON.stringify(result, null, 2), 'utf8');
+
+        const benchmarkPath = path.join(fixturesDir, `${fixtureName}.benchmark.json`);
+        if (result.success && !fs.existsSync(benchmarkPath)) {
+          fs.writeFileSync(benchmarkPath, JSON.stringify(result, null, 2), 'utf8');
+          this.logger.info({ benchmarkPath }, 'Inspect: wrote initial benchmark');
+        } else if (!result.success) {
+          this.logger.warn({ error: result.error }, 'Inspect: pipeline failed - no benchmark written');
+        }
       }
     }
 
@@ -895,7 +952,8 @@ export class Processor {
 
     this.logger.info({ count: fixtureFiles.length, filter: filter || 'all' }, 'Test: running fixtures');
 
-    const results: Array<{ name: string; pass: boolean; issues: string[]; volume?: number; volumePctDiff?: number; elapsed?: number; benchmarkElapsed?: number; unionMethod?: string }> = [];
+    const suiteStartTime = Date.now();
+    const results: TestResultEntry[] = [];
 
     for (const fixtureFile of fixtureFiles) {
       const fixtureName = fixtureFile.replace('.fixture.json', '');
@@ -913,84 +971,83 @@ export class Processor {
       const resultPath = path.join(fixturesDir, `${fixtureName}.result.json`);
       fs.writeFileSync(resultPath, JSON.stringify(result, null, 2), 'utf8');
 
-      // Compare against benchmark
+      // Compare against benchmark (single read)
       const benchmarkPath = path.join(fixturesDir, `${fixtureName}.benchmark.json`);
       const issues: string[] = [];
+      let isFirstBenchmark = false;
+      let benchmark: FixtureResult | null = null;
 
       if (!fs.existsSync(benchmarkPath)) {
         if (result.success) {
           fs.writeFileSync(benchmarkPath, JSON.stringify(result, null, 2), 'utf8');
           this.logger.info({ benchmarkPath }, 'Wrote initial benchmark (first successful run)');
+          isFirstBenchmark = true;
+          benchmark = result; // just-written benchmark is the result itself
         } else {
           issues.push('No benchmark and run failed - cannot establish baseline');
         }
       } else {
-        const benchmark = JSON.parse(fs.readFileSync(benchmarkPath, 'utf8'));
-        // Compare success
+        benchmark = JSON.parse(fs.readFileSync(benchmarkPath, 'utf8'));
+      }
+
+      // All benchmark comparisons use the single `benchmark` object
+      if (benchmark && !isFirstBenchmark) {
+        // Success regression
         if (benchmark.success && !result.success) {
           issues.push(`Regression: was success, now failed (${result.error || 'unknown'})`);
         }
-        // Compare mesh count
+        // Mesh count
         if (benchmark.meta?.mesh_count != null && result.meta?.mesh_count != null) {
           if (benchmark.meta.mesh_count !== result.meta.mesh_count) {
             issues.push(`Mesh count changed: ${benchmark.meta.mesh_count} -> ${result.meta.mesh_count}`);
           }
         }
-        // Compare volumes (within 1% tolerance)
-        if (benchmark.meta?.meshes && result.meta?.meshes) {
-          for (let i = 0; i < Math.min(benchmark.meta.meshes.length, result.meta.meshes.length); i++) {
-            const bVol = benchmark.meta.meshes[i]?.volume_mm3;
-            const rVol = result.meta.meshes[i]?.volume_mm3;
-            if (bVol != null && rVol != null && bVol > 0) {
-              const pctDiff = Math.abs(rVol - bVol) / bVol * 100;
-              if (pctDiff > 1.0) {
-                issues.push(`Mesh[${i}] volume drift: ${bVol.toFixed(1)} -> ${rVol.toFixed(1)} (${pctDiff.toFixed(1)}%)`);
-              }
+        // Per-mesh comparisons (volume drift, is_closed)
+        const bMeshes = benchmark.meta?.meshes ?? [];
+        const rMeshes = result.meta?.meshes ?? [];
+        for (let i = 0; i < Math.min(bMeshes.length, rMeshes.length); i++) {
+          const bVol = bMeshes[i]?.volume_mm3;
+          const rVol = rMeshes[i]?.volume_mm3;
+          if (bVol != null && rVol != null && bVol > 0) {
+            const pctDiff = Math.abs(rVol - bVol) / bVol * 100;
+            if (pctDiff > 1.0) {
+              issues.push(`Mesh[${i}] volume drift: ${bVol.toFixed(1)} -> ${rVol.toFixed(1)} (${pctDiff.toFixed(1)}%)`);
             }
+          }
+          const bClosed = bMeshes[i]?.is_closed;
+          const rClosed = rMeshes[i]?.is_closed;
+          if (bClosed != null && rClosed != null && bClosed !== rClosed) {
+            issues.push(`Mesh[${i}] is_closed changed: ${bClosed} -> ${rClosed}`);
           }
         }
-        // Compare is_closed
-        if (benchmark.meta?.meshes && result.meta?.meshes) {
-          for (let i = 0; i < Math.min(benchmark.meta.meshes.length, result.meta.meshes.length); i++) {
-            const bClosed = benchmark.meta.meshes[i]?.is_closed;
-            const rClosed = result.meta.meshes[i]?.is_closed;
-            if (bClosed != null && rClosed != null && bClosed !== rClosed) {
-              issues.push(`Mesh[${i}] is_closed changed: ${bClosed} -> ${rClosed}`);
-            }
-          }
+        // Slicing regression
+        if (benchmark.sliced && !result.sliced) {
+          issues.push('Slicing regression: was sliced, now missing .gcode.3mf');
         }
       }
 
-      // Compute volume and time deltas for summary
-      let volume: number | undefined;
+      // Compute summary values from result and benchmark
+      const volume = result.meta?.meshes?.[0]?.volume_mm3;
       let volumePctDiff: number | undefined;
-      let benchmarkElapsed: number | undefined;
-      if (result.meta?.meshes?.[0]?.volume_mm3 != null) {
-        volume = result.meta.meshes[0].volume_mm3;
-      }
-      if (fs.existsSync(benchmarkPath)) {
-        const benchmark = JSON.parse(fs.readFileSync(benchmarkPath, 'utf8'));
-        if (volume != null) {
-          const bVol = benchmark.meta?.meshes?.[0]?.volume_mm3;
-          if (bVol != null && bVol > 0) {
-            volumePctDiff = ((volume - bVol) / bVol) * 100;
-          }
-        }
-        if (benchmark.durationSeconds != null) {
-          benchmarkElapsed = benchmark.durationSeconds;
+      if (benchmark && volume != null) {
+        const bVol = benchmark.meta?.meshes?.[0]?.volume_mm3;
+        if (bVol != null && bVol > 0) {
+          volumePctDiff = ((volume - bVol) / bVol) * 100;
         }
       }
+      const benchmarkElapsed = (!isFirstBenchmark && benchmark?.durationSeconds) || undefined;
 
       const pass = result.success && issues.length === 0;
-      results.push({ name: fixtureName, pass, issues, volume, volumePctDiff, elapsed: result.durationSeconds, benchmarkElapsed, unionMethod: result.unionMethod });
+      results.push({ name: fixtureName, pass, issues, volume, volumePctDiff, elapsed: result.durationSeconds, benchmarkElapsed, unionMethod: result.unionMethod, sliced: result.sliced, printSizeBytes: result.printSizeBytes, sliceDuration: result.sliceDurationSeconds, isFirstBenchmark });
       this.logger.info({ fixtureName, pass, issues }, pass ? 'PASS' : 'FAIL');
     }
 
     // Summary
+    const suiteDurationSeconds = (Date.now() - suiteStartTime) / 1000;
     const passed = results.filter(r => r.pass).length;
     const failed = results.filter(r => !r.pass).length;
     this.logger.info('');
-    this.logger.info({ passed, failed, total: results.length }, '=== Test Summary ===');
+    this.logger.info({ passed, failed, total: results.length, durationSeconds: Math.round(suiteDurationSeconds * 10) / 10 }, '=== Test Summary ===');
 
     // Build detail string for a result entry
     const formatDetail = (r: typeof results[number]) => {
@@ -1004,11 +1061,16 @@ export class Processor {
       }
       if (r.elapsed != null) {
         detail += ` time:${r.elapsed.toFixed(1)}s`;
-        if (r.benchmarkElapsed != null && r.benchmarkElapsed > 0) {
+        if (r.isFirstBenchmark) {
+          detail += ' time_d:first';
+        } else if (r.benchmarkElapsed != null && r.benchmarkElapsed > 0) {
           const timeDelta = ((r.elapsed - r.benchmarkElapsed) / r.benchmarkElapsed) * 100;
           const timeSign = timeDelta >= 0 ? '+' : '';
           detail += ` time_d:${timeSign}${timeDelta.toFixed(0)}%`;
         }
+      }
+      if (r.sliced != null) {
+        detail += r.sliced ? ` sliced:${r.sliceDuration != null ? r.sliceDuration.toFixed(1) + 's' : 'yes'}` : ' sliced:NO';
       }
       if (r.unionMethod) {
         detail += ` [${r.unionMethod}]`;
@@ -1030,6 +1092,9 @@ export class Processor {
       lines.push(`Test Run: ${new Date().toISOString()}`);
       lines.push(`Result: ${failed === 0 ? 'ALL PASSED' : `${failed} FAILED`}`);
       lines.push(`Fixtures: ${passed} passed, ${failed} failed, ${results.length} total`);
+      const mins = Math.floor(suiteDurationSeconds / 60);
+      const secs = Math.round(suiteDurationSeconds % 60);
+      lines.push(`Duration: ${mins > 0 ? `${mins}m ${secs}s` : `${secs}s`}`);
       lines.push('');
       for (const r of results) {
         const icon = r.pass ? 'PASS' : 'FAIL';
@@ -1053,7 +1118,7 @@ export class Processor {
   private async runFixture(
     fixtureName: string,
     fixturePayload: { id: string; algorithm: string; params: any; metadata?: any }
-  ): Promise<Record<string, any>> {
+  ): Promise<FixtureResult> {
     const baseName = fixtureName;
     const algoPart = fixturePayload.algorithm;
 
@@ -1076,9 +1141,10 @@ export class Processor {
     let meta: any = undefined;
     let unionMethod: string | undefined;
     let logSnippet: string | undefined;
+    let sliceDurationSeconds: number | undefined;
 
     try {
-      await runPipeline({
+      const outputs = await runPipeline({
         id: String(fixturePayload.id),
         algorithm: String(algoPart),
         params: fixturePayload.params,
@@ -1093,6 +1159,7 @@ export class Processor {
         logger: this.logger,
       });
       success = true;
+      sliceDurationSeconds = outputs.sliceDurationSeconds;
     } catch (err: any) {
       error = err?.message || 'Unknown error';
       this.logger.error({ error }, 'Fixture run failed');
@@ -1105,6 +1172,20 @@ export class Processor {
     if (fs.existsSync(metaPath)) {
       try {
         meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      } catch {}
+    }
+
+    // Check for sliced .gcode.3mf output
+    let sliced = false;
+    let printSizeBytes: number | undefined;
+    const printPath = path.join(this.outbox, `${baseName}.gcode.3mf`);
+    if (fs.existsSync(printPath)) {
+      try {
+        const printStats = fs.statSync(printPath);
+        if (printStats.size > 0) {
+          sliced = true;
+          printSizeBytes = printStats.size;
+        }
       } catch {}
     }
 
@@ -1132,6 +1213,9 @@ export class Processor {
       durationSeconds: Math.round(durationSeconds * 100) / 100,
       ...(meta && { meta }),
       ...(unionMethod && { unionMethod }),
+      sliced,
+      ...(printSizeBytes != null && { printSizeBytes }),
+      ...(sliceDurationSeconds != null && { sliceDurationSeconds }),
       ...(logSnippet && { logSnippet }),
       timestamp: new Date().toISOString(),
     };

@@ -1,5 +1,0 @@
-Test Run: 2026-03-31T21:43:35.054Z
-Result: ALL PASSED
-Fixtures: 1 passed, 0 failed, 1 total
-
-  [PASS] InfinityExtend_JWA3 vol:+0.00% 12.1s (-50%) [Clean multi-brep union]

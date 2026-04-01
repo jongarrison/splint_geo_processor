@@ -99,14 +99,13 @@ def confirm_job_is_processed_and_exit(jobname, is_success, message):
 
     conf_path = Path(get_outbox_job_confirmation_filepath(jobname))
     try:
-        #Remove the job queue file that started all of this work
-        # if job_path.exists():
-        #     shutil.move(job_path, splint_archive_dir) # This is now handled by the splint_geo_processor
-        #     # job_path.unlink()
-        #     if job_path.exists():
-        #         log(f"FAILED TO Archive JOB FILE. previous message:{message}: {job_path}")
-
-        log(f"RESULT: {'SUCCESS' if is_success else 'FAILURE'} {message=} {jobname=}")
+        # IMPORTANT: These [PIPELINE_RESULT:...] markers are parsed by
+        # splint_geo_processor/src/processors/pipeline.ts to detect job
+        # completion. Do not change the format without updating the poller.
+        if is_success:
+            log(f"[PIPELINE_RESULT:SUCCESS] {message=} {jobname=}")
+        else:
+            log(f"[PIPELINE_RESULT:FAILURE] {message=} {jobname=}")
 
     except Exception as e:
         conf_data = {"result": "FAILURE", "phase": "during confirmation", "exception": f"{traceback.format_exc()}", "message": message}

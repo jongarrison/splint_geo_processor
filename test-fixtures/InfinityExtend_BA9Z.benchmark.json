@@ -1,0 +1,118 @@
+{
+  "fixtureName": "InfinityExtend_BA9Z",
+  "success": true,
+  "durationSeconds": 33.77,
+  "meta": {
+    "mesh_count": 1,
+    "meshes": [
+      {
+        "index": 0,
+        "volume_mm3": 5340.2444,
+        "is_closed": true,
+        "bbox_dimensions": [
+          99.9807,
+          95.7158,
+          29.0744
+        ]
+      }
+    ],
+    "file_size_bytes": 15258684,
+    "elapsed_time_seconds": 0.96,
+    "custom": {
+      "wall_probe_data": [
+        {
+          "pip_dorsal": {
+            "location": "pip",
+            "offset": 0,
+            "direction": [
+              0,
+              1,
+              0
+            ],
+            "thickness_mm": 1.5812
+          },
+          "pip_dorsal_medial_30": {
+            "location": "pip",
+            "offset": 0,
+            "direction": [
+              -0.49999999999999994,
+              0.8660254037844387,
+              0
+            ],
+            "thickness_mm": 1.8218
+          }
+        },
+        {
+          "pip_dorsal": {
+            "location": "pip",
+            "offset": 0,
+            "direction": [
+              0,
+              1,
+              0
+            ],
+            "thickness_mm": 1.5084
+          },
+          "pip_dorsal_medial_30": {
+            "location": "pip",
+            "offset": 0,
+            "direction": [
+              -0.49999999999999994,
+              0.8660254037844387,
+              0
+            ],
+            "thickness_mm": 1.5657
+          }
+        },
+        {
+          "pip_dorsal": {
+            "location": "pip",
+            "offset": 0,
+            "direction": [
+              0,
+              1,
+              0
+            ],
+            "thickness_mm": 1.5009
+          },
+          "pip_dorsal_medial_30": {
+            "location": "pip",
+            "offset": 0,
+            "direction": [
+              -0.49999999999999994,
+              0.8660254037844387,
+              0
+            ],
+            "thickness_mm": 1.5054
+          }
+        },
+        {
+          "pip_dorsal": {
+            "location": "pip",
+            "offset": 0,
+            "direction": [
+              0,
+              1,
+              0
+            ],
+            "thickness_mm": 1.4992
+          },
+          "pip_dorsal_medial_30": {
+            "location": "pip",
+            "offset": 0,
+            "direction": [
+              -0.49999999999999994,
+              0.8660254037844387,
+              0
+            ],
+            "thickness_mm": 1.5209
+          }
+        }
+      ],
+      "axial_band_thickness_mm": 1.5
+    }
+  },
+  "unionMethod": "Clean multi-brep union",
+  "logSnippet": " Baked 1 mesh(es) (0.0229s)\n  Selected mesh(es) (0.0057s)\n  Running export command...\n  Export RunScript returned: False (0.3411s)\n  File created: InfinityExtend_BA9Z.stl (15258684 bytes)\n  Metadata written: InfinityExtend_BA9Z.meta.json\nsave_mesh: Complete (0.3974s total)\n  Cleaned up temp layer\n  Custom metadata merged (2 keys)\nExport succeeded: output_dir='/Users/jon/SplintFactoryFiles/outbox' root_filename='InfinityExtend_BA9Z'\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Wed Apr  1 09:58:49 2026\nERROR: No brep provided\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Wed Apr  1 09:58:49 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Wed Apr  1 09:58:49 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Wed Apr  1 09:58:49 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Wed Apr  1 09:58:49 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Wed Apr  1 09:58:49 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Wed Apr  1 09:58:49 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Wed Apr  1 09:58:49 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Wed Apr  1 09:58:50 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Wed Apr  1 09:58:50 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Wed Apr  1 09:58:50 2026\n",
+  "timestamp": "2026-04-01T16:58:53.114Z"
+}

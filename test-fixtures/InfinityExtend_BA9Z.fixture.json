@@ -1,0 +1,10 @@
+{
+  "id": "cmndormwg0009ky04nbt4yylx",
+  "algorithm": "InfinityExtend",
+  "params": "{\"root_circumference_mm\":63,\"mid_circumference_mm\":64,\"tip_circumference_mm\":54,\"inter_phalanx_distance_mm\":30.5,\"contracture_flexion_start\":25,\"contracture_flexion_end\":-8,\"contracture_flexion_count\":4}",
+  "metadata": {
+    "GeometryName": "Infinity Extend Contracture",
+    "CustomerNote": null,
+    "objectID": "BA9Z"
+  }
+}

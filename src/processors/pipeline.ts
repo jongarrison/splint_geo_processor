@@ -228,6 +228,7 @@ export interface PipelineInputs {
 export interface PipelineOutputs {
   geometryPath: string;  // STL/3MF/OBJ path
   printPath?: string;    // 3MF with gcode (optional)
+  sliceDurationSeconds?: number; // Bambu slicer wall-clock time
 }
 
 export async function runPipeline(input: PipelineInputs): Promise<PipelineOutputs> {
@@ -324,17 +325,20 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   // Validate geometry output exists and is non-trivial, allowing time for file write.
   // Uses activity detection: if Grasshopper's log.txt is still growing, the timeout
   // resets so long-running multi-splint jobs aren't killed prematurely.
+  // Watches for [PIPELINE_RESULT:...] signals in log.txt for fast completion detection.
   {
     const start = Date.now();
     const baseTimeoutMs = 90_000; // 90 seconds inactivity timeout (boolean ops can take 30s+ without logging)
     const maxTimeoutMs = 10 * 60_000; // 10 minute hard ceiling
     let ok = false;
+    let pipelineSignalFailure = false; // set true if log.txt contains [PIPELINE_RESULT:FAILURE]
     let size = 0;
     let lastSize = -1;
     let stableSizeCount = 0;
 
     // Activity detection via log.txt
     const ghLogPath = path.join(input.outboxDir, 'log.txt');
+    const metaJsonPath = path.join(input.outboxDir, `${base}.meta.json`);
     let lastLogSize = 0;
     let lastActivityTime = Date.now();
     try {
@@ -352,6 +356,53 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       // Timeout if no log activity for baseTimeoutMs
       if (sinceActivity >= baseTimeoutMs) break;
 
+      // Fast path: .meta.json means Python verified the STL and wrote metadata
+      if (fs.existsSync(metaJsonPath)) {
+        logInfo('Detected .meta.json - Python export complete');
+        ok = true;
+        // Read final STL size for the log
+        try { size = fs.statSync(geometryPath).size; } catch {}
+        break;
+      }
+
+      // Fast path: check log.txt tail for pipeline result signals
+      // These are written by splintcommon.confirm_job_is_processed_and_exit()
+      try {
+        if (fs.existsSync(ghLogPath)) {
+          const currentLogSize = fs.statSync(ghLogPath).size;
+          if (currentLogSize > lastLogSize) {
+            // Read only the new bytes to check for signals
+            const fd = fs.openSync(ghLogPath, 'r');
+            const newBytes = Buffer.alloc(currentLogSize - lastLogSize);
+            fs.readSync(fd, newBytes, 0, newBytes.length, lastLogSize);
+            fs.closeSync(fd);
+            const newContent = newBytes.toString('utf8');
+
+            if (newContent.includes('[PIPELINE_RESULT:FAILURE]')) {
+              logWarn('Detected [PIPELINE_RESULT:FAILURE] in log - aborting poll');
+              pipelineSignalFailure = true;
+              lastLogSize = currentLogSize;
+              lastActivityTime = Date.now();
+              break;
+            }
+            if (newContent.includes('[PIPELINE_RESULT:SUCCESS]')) {
+              logInfo('Detected [PIPELINE_RESULT:SUCCESS] in log');
+              // .meta.json should exist by now, but give a brief moment
+              await new Promise(r => setTimeout(r, 200));
+              try { size = fs.statSync(geometryPath).size; } catch {}
+              ok = size >= 200;
+              lastLogSize = currentLogSize;
+              lastActivityTime = Date.now();
+              break;
+            }
+
+            lastLogSize = currentLogSize;
+            lastActivityTime = Date.now();
+          }
+        }
+      } catch {}
+
+      // Fallback: STL file size stability check (for older GH scripts)
       if (fs.existsSync(geometryPath)) {
         try {
           const stats = fs.statSync(geometryPath);
@@ -372,19 +423,8 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
         } catch {}
       }
 
-      // Check if log.txt is still growing (Grasshopper still working)
-      try {
-        if (fs.existsSync(ghLogPath)) {
-          const currentLogSize = fs.statSync(ghLogPath).size;
-          if (currentLogSize > lastLogSize) {
-            lastLogSize = currentLogSize;
-            lastActivityTime = Date.now();
-          }
-        }
-      } catch {}
-
-      // Periodic progress log every 15 seconds
-      if (Date.now() - lastProgressLog >= 15_000) {
+      // Periodic progress log every 5 seconds
+      if (Date.now() - lastProgressLog >= 5_000) {
         lastProgressLog = Date.now();
         logInfo(`Waiting for output... elapsed=${Math.round(elapsed / 1000)}s, stlSize=${size}, logActivity=${Math.round(sinceActivity / 1000)}s ago`);
       }
@@ -408,7 +448,9 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       }
     }
 
-    if (!ok) {
+    if (pipelineSignalFailure) {
+      pipelineError = new Error('Python pipeline reported failure via [PIPELINE_RESULT:FAILURE]');
+    } else if (!ok) {
       const elapsed = Date.now() - start;
       logWarn(`Geometry output missing or invalid (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s, lastLogActivity=${Math.round((Date.now() - lastActivityTime) / 1000)}s ago): ${geometryPath}`);
       pipelineError = new Error(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s): ${geometryPath}`);
@@ -492,7 +534,10 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   }
 
   // Bambu Studio step (real CLI)
+  let sliceDurationSeconds: number | undefined;
   if (input.bambuCli) {
+
+    const sliceStart = Date.now();
 
     const machineSettingsPath = path.join(__dirname, '../../printer-settings/machine/machine-final.json');
     const processSettingsPath = path.join(__dirname, '../../printer-settings/process/process-final.json');
@@ -517,9 +562,11 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     logInfo('execFile Bambu CLI: ', { cmd: `${input.bambuCli} ${prettyArgs}` });
 
     const { stdout: bambuStdout, stderr: bambuStderr } = await execFileAsync(input.bambuCli, args, { timeout: 10 * 60_000 });
+    sliceDurationSeconds = (Date.now() - sliceStart) / 1000;
     if (bambuStdout && bambuStdout.trim()) logInfo('stdout (bambu)', { stdout: bambuStdout.substring(0, 2000) });
     if (bambuStderr && bambuStderr.trim()) logWarn('stderr (bambu)', { stderr: bambuStderr.substring(0, 2000) });
+    logInfo(`Bambu slicer completed in ${sliceDurationSeconds.toFixed(1)}s`);
   }
 
-  return { geometryPath, printPath: fs.existsSync(printPath) ? printPath : undefined };
+  return { geometryPath, printPath: fs.existsSync(printPath) ? printPath : undefined, sliceDurationSeconds };
 }
