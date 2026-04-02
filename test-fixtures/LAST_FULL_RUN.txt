@@ -1,0 +1,8 @@
+Test Run: 2026-04-01T18:16:25.647Z
+Result: ALL PASSED
+Fixtures: 3 passed, 0 failed, 3 total
+Duration: 42s
+
+  [PASS] InfinityExtend_BA9Z vol:5340 vol_d:+0.00% time:21.6s time_d:-36% sliced:3.2s [Clean multi-brep union]
+  [PASS] InfinityExtend_JWA3 vol:1518 vol_d:+0.00% time:10.9s time_d:+2% sliced:1.2s [Clean multi-brep union]
+  [PASS] InfinityFlex_N3V3 vol:1482 vol_d:+0.00% time:9.5s time_d:-14% sliced:1.2s [Clean multi-brep union]
