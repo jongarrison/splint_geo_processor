@@ -111,7 +111,12 @@ export class Processor {
           continue;
         }
         if (resp.status === 401) {
-          this.logger.warn(`[${env}] Unauthorized (401). Check SF_API_KEY or secrets/api-key.txt for a valid API key.`);
+          const keyLen = this.config.apiKey?.length ?? 0;
+          const keyPreview = keyLen > 6
+            ? `${this.config.apiKey!.slice(0, 3)}...${this.config.apiKey!.slice(-3)}`
+            : '(not set or too short)';
+          const body = typeof resp.data === 'string' ? resp.data.slice(0, 200) : JSON.stringify(resp.data).slice(0, 200);
+          this.logger.warn(`[${env}] Unauthorized (401) | key length=${keyLen} preview=${keyPreview} | server=${this.config.apiUrl} | response: ${body}`);
           await sleep(intervalMs);
           continue;
         }

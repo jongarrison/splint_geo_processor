@@ -42,7 +42,9 @@ function resolveEnvFile(explicitEnvFile?: string) {
 
 async function main() {
   const { args, envFile } = parseCliArgs(process.argv.slice(2));
+  // Load env-specific settings first (committed), then .env secret on top (gitignored)
   dotenv.config({ path: resolveEnvFile(envFile) });
+  dotenv.config({ path: path.join(process.cwd(), '.env'), override: true });
 
   const [{ createLogger }, { Processor }, { loadConfig }] = await Promise.all([
     import('./utils/logger.js'),
