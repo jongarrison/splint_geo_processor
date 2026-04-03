@@ -85,7 +85,7 @@ export class Processor {
     // Validate API connectivity before entering main loop
     try {
       this.logger.info({ apiUrl: this.config.apiUrl }, `[${env}] Testing API connectivity...`);
-      const testResp = await this.http.get('/api/geometry-processing/next-job');
+      const testResp = await this.http.get('/api/design-processing/next-job');
       this.logger.info({ status: testResp.status }, `[${env}] API connectivity confirmed`);
     } catch (err: any) {
       this.logger.warn({ 
@@ -103,7 +103,7 @@ export class Processor {
     while (true) {
       try {
         // Poll for next job (priority: check for work first)
-        const resp = await this.http.get('/api/geometry-processing/next-job');
+        const resp = await this.http.get('/api/design-processing/next-job');
 
         if (resp.status === 404) {
           this.logger.info(`[${env}] No jobs available`);
@@ -130,7 +130,7 @@ export class Processor {
         }, `[${env}] Job received from factory`);
         
         try {
-          const markStartedResp = await this.http.post('/api/geometry-processing/mark-started', {
+          const markStartedResp = await this.http.post('/api/design-processing/mark-started', {
             jobId: job?.id
           });
           if (markStartedResp.status === 200) {
@@ -153,9 +153,9 @@ export class Processor {
           this.logger.debug({ keys }, 'next-job shape');
         } catch {}
 
-  // Write input JSON to inbox. Filename: {GeometryAlgorithmName}_{GeometryProcessingQueueID}.json
+  // Write input JSON to inbox. Filename: {algorithmName}_{designJobId}.json
   const idPart = job?.id ?? job?.ID ?? job?.Id ?? `ts_${Date.now()}`;
-  const algoPart = job?.GeometryAlgorithmName || 'algorithm';
+  const algoPart = job?.algorithmName || 'algorithm';
   
   // Clean out all files in the inbox before writing new input
   try {
@@ -187,17 +187,17 @@ export class Processor {
   const inboxJson = path.join(this.inbox, `${baseName}.json`);
         const inputPayload = {
           id: idPart,
-          algorithm: job?.GeometryAlgorithmName,
-          params: job?.GeometryInputParameterData,
+          algorithm: job?.algorithmName,
+          params: job?.inputParameters,
           metadata: {
-            GeometryName: job?.GeometryName,
-            CustomerNote: job?.CustomerNote,
-            CustomerID: job?.CustomerID,
-            objectID: job?.objectID
+            designName: job?.designName,
+            jobNote: job?.jobNote,
+            jobLabel: job?.jobLabel,
+            objectId: job?.objectId
           }
         };
         fs.writeFileSync(inboxJson, JSON.stringify(inputPayload, null, 2), 'utf8');
-        this.logger.info({ inboxJson, objectID: job?.objectID }, 'Wrote input JSON to inbox');
+        this.logger.info({ inboxJson, objectId: job?.objectId }, 'Wrote input JSON to inbox');
 
         // Prepare per-job archive directory and job-specific log file immediately
         const home = process.env.HOME || process.env.USERPROFILE || '.';
@@ -388,7 +388,7 @@ export class Processor {
 
   private async reportResult(jobId: string, isSuccess: boolean, errorMessage?: string, processingLog?: string) {
     const payload: any = {
-      GeometryProcessingQueueID: jobId,
+      designJobId: jobId,
       isSuccess,
     };
     if (!isSuccess && errorMessage) payload.errorMessage = errorMessage;
@@ -403,7 +403,7 @@ export class Processor {
       }
     }
     try {
-      const resp = await this.http.post('/api/geometry-processing/result', payload);
+      const resp = await this.http.post('/api/design-processing/result', payload);
       if (resp.status >= 200 && resp.status < 300) {
         this.logger.info({ jobId }, 'Reported result');
       } else {
@@ -489,17 +489,17 @@ export class Processor {
 
     // Step 3: Report result with blob URLs
     const payload: any = {
-      GeometryProcessingQueueID: jobId,
+      designJobId: jobId,
       isSuccess: true,
       geometryBlobUrl: geometryUpload.url,
       geometryBlobPathname: geometryUpload.pathname,
-      GeometryFileName: geometryName,
+      meshFileName: geometryName,
     };
     
     if (printUpload) {
       payload.printBlobUrl = printUpload.url;
       payload.printBlobPathname = printUpload.pathname;
-      payload.PrintFileName = printName;
+      payload.printFileName = printName;
     }
     
     if (meshMetadata) {
@@ -517,7 +517,7 @@ export class Processor {
       }
     }
     
-    const resp = await this.http.post('/api/geometry-processing/result', payload);
+    const resp = await this.http.post('/api/design-processing/result', payload);
     if (resp.status >= 200 && resp.status < 300) {
       this.logger.info({ jobId }, 'Reported success with blob URLs');
     } else {
@@ -571,17 +571,17 @@ export class Processor {
     
     // Step 2: Report result with blob URLs
     const payload: any = {
-      GeometryProcessingQueueID: jobId,
+      designJobId: jobId,
       isSuccess: true,
       geometryBlobUrl: geometryUpload.url,
       geometryBlobPathname: geometryUpload.pathname,
-      GeometryFileName: geometryName,
+      meshFileName: geometryName,
     };
     
     if (printUpload) {
       payload.printBlobUrl = printUpload.url;
       payload.printBlobPathname = printUpload.pathname;
-      payload.PrintFileName = printName;
+      payload.printFileName = printName;
     }
     
     if (meshMetadata) {
@@ -599,7 +599,7 @@ export class Processor {
       }
     }
     
-    const resp = await this.http.post('/api/geometry-processing/result', payload);
+    const resp = await this.http.post('/api/design-processing/result', payload);
     if (resp.status >= 200 && resp.status < 300) {
       this.logger.info({ jobId }, 'Reported success with blob URLs');
     } else {
@@ -683,17 +683,17 @@ export class Processor {
   }
 
   /**
-   * Inspect mode: fetch a job by objectID or UUID from the server,
+   * Inspect mode: fetch a job by objectId or UUID from the server,
    * write its data to the inbox, launch Rhino/Grasshopper, and exit.
    * Read-only -- no server mutations.
    */
   async inspect(jobIdentifier: string) {
     this.logger.info({ jobIdentifier }, 'Inspect: fetching job from server');
 
-    const resp = await this.http.get(`/api/geometry-processing/job-by-id/${encodeURIComponent(jobIdentifier)}`);
+    const resp = await this.http.get(`/api/design-processing/job-by-id/${encodeURIComponent(jobIdentifier)}`);
 
     if (resp.status === 404) {
-      this.logger.error({ jobIdentifier }, 'Inspect: job not found (checked both UUID and objectID)');
+      this.logger.error({ jobIdentifier }, 'Inspect: job not found (checked both UUID and objectId)');
       process.exit(1);
     }
     if (resp.status !== 200) {
@@ -704,14 +704,14 @@ export class Processor {
     const job = resp.data as any;
     this.logger.info({
       id: job.id,
-      objectID: job.objectID,
-      algorithm: job.GeometryAlgorithmName,
+      objectId: job.objectId,
+      algorithm: job.algorithmName,
       isProcessSuccessful: job.isProcessSuccessful,
       processCompleted: !!job.ProcessCompletedTime,
     }, 'Inspect: job loaded');
 
     // Reuse the debug launch flow: write inbox JSON, launch Rhino, open GH script
-    const algoPart = job.GeometryAlgorithmName || 'algorithm';
+    const algoPart = job.algorithmName || 'algorithm';
     const idPart = job.id || `inspect_${Date.now()}`;
     const baseName = `${algoPart}_${idPart}`.replace(/[^a-zA-Z0-9._-]/g, '_');
 
@@ -735,19 +735,19 @@ export class Processor {
     const inputPayload = {
       id: idPart,
       algorithm: algoPart,
-      params: job.GeometryInputParameterData,
+      params: job.inputParameters,
       metadata: {
-        GeometryName: job.GeometryName,
-        CustomerNote: job.JobNote,
-        objectID: job.objectID,
+        designName: job.designName,
+        jobNote: job.JobNote,
+        objectId: job.objectId,
       }
     };
     fs.writeFileSync(inboxJson, JSON.stringify(inputPayload, null, 2), 'utf8');
-    this.logger.info({ inboxJson, objectID: job.objectID }, 'Inspect: wrote input JSON to inbox');
+    this.logger.info({ inboxJson, objectId: job.objectId }, 'Inspect: wrote input JSON to inbox');
 
     // Offer to save as test fixture
-    const objectID = job.objectID || jobIdentifier;
-    const fixtureName = `${algoPart}_${objectID}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const objectId = job.objectId || jobIdentifier;
+    const fixtureName = `${algoPart}_${objectId}`.replace(/[^a-zA-Z0-9._-]/g, '_');
     const fixturesDir = path.resolve('test-fixtures');
     const fixturePath = path.join(fixturesDir, `${fixtureName}.fixture.json`);
 
@@ -843,14 +843,14 @@ export class Processor {
 
     this.logger.info({
       id: job.id,
-      objectID: job.objectID,
+      objectId: job.objectId,
       algorithm: algoPart,
     }, 'Inspect: complete - Grasshopper is open for manual inspection');
     process.exit(0);
   }
 
   /**
-   * Capture mode: fetch a job by objectID or UUID from the server,
+   * Capture mode: fetch a job by objectId or UUID from the server,
    * save it as a test fixture (.fixture.json), then run the pipeline.
    * If the run succeeds and no .benchmark.json exists yet, write one.
    * Always writes a .result.json for manual inspection.
@@ -860,7 +860,7 @@ export class Processor {
     fs.mkdirSync(fixturesDir, { recursive: true });
 
     this.logger.info({ jobIdentifier }, 'Capture: fetching job from server');
-    const resp = await this.http.get(`/api/geometry-processing/job-by-id/${encodeURIComponent(jobIdentifier)}`);
+    const resp = await this.http.get(`/api/design-processing/job-by-id/${encodeURIComponent(jobIdentifier)}`);
 
     if (resp.status === 404) {
       this.logger.error({ jobIdentifier }, 'Capture: job not found');
@@ -872,19 +872,19 @@ export class Processor {
     }
 
     const job = resp.data as any;
-    const algoPart = job.GeometryAlgorithmName || 'algorithm';
-    const objectID = job.objectID || jobIdentifier;
-    const fixtureName = `${algoPart}_${objectID}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const algoPart = job.algorithmName || 'algorithm';
+    const objectId = job.objectId || jobIdentifier;
+    const fixtureName = `${algoPart}_${objectId}`.replace(/[^a-zA-Z0-9._-]/g, '_');
 
     // Write .fixture.json (the input payload GH scripts expect)
     const fixturePayload = {
       id: job.id || `capture_${Date.now()}`,
       algorithm: algoPart,
-      params: job.GeometryInputParameterData,
+      params: job.inputParameters,
       metadata: {
-        GeometryName: job.GeometryName,
-        CustomerNote: job.JobNote,
-        objectID,
+        designName: job.designName,
+        jobNote: job.JobNote,
+        objectId,
       }
     };
     const fixturePath = path.join(fixturesDir, `${fixtureName}.fixture.json`);

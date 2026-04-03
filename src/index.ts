@@ -75,7 +75,7 @@ async function main() {
     return;
   }
 
-  // Legacy inspect mode: bare objectID/UUID as first arg
+  // Legacy inspect mode: bare objectId/UUID as first arg
   if (args[0] && !args[0].startsWith('--')) {
     logger.info({ inspectId: args[0] }, 'Inspect mode: fetching job and launching Grasshopper');
     await processor.inspect(args[0]);
