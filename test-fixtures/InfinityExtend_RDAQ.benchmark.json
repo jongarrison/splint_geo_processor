@@ -1,0 +1,55 @@
+{
+  "fixtureName": "InfinityExtend_RDAQ",
+  "success": true,
+  "durationSeconds": 23.86,
+  "meta": {
+    "mesh_count": 1,
+    "meshes": [
+      {
+        "index": 0,
+        "volume_mm3": 1507.3557,
+        "is_closed": true,
+        "bbox_dimensions": [
+          31.7602,
+          24.6822,
+          31.3233
+        ]
+      }
+    ],
+    "file_size_bytes": 3812384,
+    "elapsed_time_seconds": 0.56,
+    "custom": {
+      "wall_probe_data": [
+        {
+          "pip_dorsal": {
+            "location": "pip",
+            "offset": 0,
+            "direction": [
+              0,
+              1,
+              0
+            ],
+            "thickness_mm": 1.5012
+          },
+          "pip_dorsal_medial_30": {
+            "location": "pip",
+            "offset": 0,
+            "direction": [
+              -0.49999999999999994,
+              0.8660254037844387,
+              0
+            ],
+            "thickness_mm": 1.5323
+          }
+        }
+      ],
+      "axial_band_thickness_mm": 1.5
+    }
+  },
+  "unionMethod": "Clean multi-brep union",
+  "sliced": true,
+  "printSizeBytes": 1450686,
+  "sliceDurationSeconds": 1.354,
+  "logSnippet": "\n  Baked 1 mesh(es) (0.0179s)\n  Selected mesh(es) (0.0059s)\n  Running export command...\n  Export RunScript returned: True (0.2325s)\n  File created: InfinityExtend_RDAQ.stl (3812384 bytes)\n  Metadata written: InfinityExtend_RDAQ.meta.json\nsave_mesh: Complete (0.2720s total)\n  Cleaned up temp layer\n  Custom metadata merged (2 keys)\nExport succeeded: output_dir='/Users/jon/SplintFactoryFiles/outbox' root_filename='InfinityExtend_RDAQ'\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Fri Apr  3 23:24:20 2026\nERROR: No brep provided\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Fri Apr  3 23:24:20 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Fri Apr  3 23:24:20 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Fri Apr  3 23:24:20 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Fri Apr  3 23:24:20 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Fri Apr  3 23:24:20 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Fri Apr  3 23:24:20 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Fri Apr  3 23:24:20 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Fri Apr  3 23:24:20 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Fri Apr  3 23:24:20 2026\nSplint Home Dirs verified: splint_home_dir=PosixPath('/Users/jon/SplintFactoryFiles')\nGhPython Node initialized at Fri Apr  3 23:24:20 2026\n",
+  "timestamp": "2026-04-04T06:24:22.440Z"
+}

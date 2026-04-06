@@ -1,0 +1,8 @@
+{
+  "id": "cmnjbi2dx0001jp3c0ejtsxqw",
+  "algorithm": "InfinityExtend",
+  "params": "{\"root_circumference_mm\":64,\"mid_circumference_mm\":67,\"tip_circumference_mm\":62,\"inter_phalanx_distance_mm\":35,\"flexion_degrees\":10}",
+  "metadata": {
+    "objectId": "RDAQ"
+  }
+}

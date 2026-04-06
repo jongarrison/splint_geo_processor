@@ -1,11 +1,10 @@
 {
-  "id": "cmllag8u90003jp2bss280e7q",
+  "id": "cmne1zzpe0005l8045y0s1alh",
   "algorithm": "InfinityFlex",
-  "params": "{\"interPhalanxDistanceMM\":30,\"rootCircumferenceMM\":51,\"midCircumferenceMM\":55,\"tipCircumferenceMM\":57,\"flexionDegrees\":5}",
+  "params": "{\"root_circumference_mm\":65,\"mid_circumference_mm\":68,\"tip_circumference_mm\":62,\"inter_phalanx_distance_mm\":35,\"flexion_degrees\":10}",
   "metadata": {
-    "GeometryName": "InfinityFlex",
-    "CustomerNote": null,
-    "CustomerID": "if1",
-    "objectID": "TEST"
+    "GeometryName": "Infinity Flex",
+    "CustomerNote": "1",
+    "objectId": "N3V3"
   }
 }

@@ -180,7 +180,7 @@ def extract_server_params_data(json_data):
             log("No 'params' key found in JSON data.")
         else:
             result_data["jobname"] = json_data["jobname"]
-            result_data["objectID"] = json_data.get("metadata", {}).get("objectID", "NA")
+            result_data["objectId"] = json_data.get("metadata", {}).get("objectId", "NA")
 
             for key in list(result_data.keys()):
                 log(f"RESULT: {key}: {result_data[key]}")
@@ -242,9 +242,9 @@ def load_job_data(is_production_mode, geo_algorithm_name):
         job_data, raw_data = load_dev_data(geo_algorithm_name)
         log(f"DEV: Received dev job_data={job_data}")
 
-        root_filename_out = f"DEV_{geo_algorithm_name}_{objectID}"
         jobname = job_data["jobname"]
-        objectID = "LOCL"
+        objectID = job_data.get("objectId", "LOCL")
+        root_filename_out = f"DEV_{geo_algorithm_name}_{objectID}"
     else:
         # We start hunting for files to see if work needs to be done.
         log("PROD: Looking for available job data...")
@@ -257,6 +257,7 @@ def load_job_data(is_production_mode, geo_algorithm_name):
 
         job_data, raw_data = result
         jobname = job_data["jobname"]
+        objectID = job_data.get("objectId", "NA")
         root_filename_out = jobname
 
     return job_data, objectID, root_filename_out, output_dir_out, raw_data
