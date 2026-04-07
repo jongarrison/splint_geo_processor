@@ -42,9 +42,14 @@ if ($existingTask) {
 }
 
 # Create action - run node with the built JavaScript
+# Platform detection (win32) handles env file resolution automatically,
+# but we also set ENV_MODE=production as an explicit safeguard
 $nodePath = (Get-Command node).Source
 $scriptPath = Join-Path $repoPath "dist\index.js"
-$action = New-ScheduledTaskAction -Execute $nodePath -Argument $scriptPath -WorkingDirectory $repoPath
+$action = New-ScheduledTaskAction `
+    -Execute "cmd.exe" `
+    -Argument "/c set ENV_MODE=production && `"$nodePath`" `"$scriptPath`"" `
+    -WorkingDirectory $repoPath
 
 # Create trigger - at user logon
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser

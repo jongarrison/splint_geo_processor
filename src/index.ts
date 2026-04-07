@@ -35,7 +35,12 @@ function resolveEnvFile(explicitEnvFile?: string) {
     return explicitEnvFile;
   }
 
-  return process.env.ENV_MODE === 'production'
+  // ENV_MODE explicitly overrides; otherwise default by platform
+  // Windows machines are always production, Mac/Linux are local dev
+  const isProduction = process.env.ENV_MODE === 'production' || 
+    (!process.env.ENV_MODE && process.platform === 'win32');
+
+  return isProduction
     ? path.join(process.cwd(), '.env.production')
     : path.join(process.cwd(), '.env.local');
 }
