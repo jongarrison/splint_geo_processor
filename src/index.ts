@@ -35,7 +35,15 @@ function resolveEnvFile(explicitEnvFile?: string) {
     return explicitEnvFile;
   }
 
-  return process.env.ENV_MODE === 'production'
+  if (process.env.ENV_MODE === 'production') {
+    return path.join(process.cwd(), '.env.production');
+  }
+  if (process.env.ENV_MODE === 'local') {
+    return path.join(process.cwd(), '.env.local');
+  }
+
+  // Auto-detect by platform: Windows -> production, Mac/Linux -> local dev
+  return process.platform === 'win32'
     ? path.join(process.cwd(), '.env.production')
     : path.join(process.cwd(), '.env.local');
 }
@@ -43,7 +51,8 @@ function resolveEnvFile(explicitEnvFile?: string) {
 async function main() {
   const { args, envFile } = parseCliArgs(process.argv.slice(2));
   // Load env-specific settings first (committed), then .env secrets on top (gitignored)
-  dotenv.config({ path: resolveEnvFile(envFile) });
+  const resolvedEnvFile = resolveEnvFile(envFile);
+  dotenv.config({ path: resolvedEnvFile });
   dotenv.config({ path: path.join(process.cwd(), '.env'), override: true });
 
   const [{ createLogger }, { Processor }, { loadConfig }] = await Promise.all([
@@ -54,7 +63,7 @@ async function main() {
 
   const logger = createLogger();
 
-  logger.info('splint_geo_processor starting...');
+  logger.info({ envFile: resolvedEnvFile, platform: process.platform }, 'splint_geo_processor starting...');
   const config = loadConfig();
   logger.info({ 
     environment: config.environment,
