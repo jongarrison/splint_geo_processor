@@ -35,19 +35,14 @@ function resolveEnvFile(explicitEnvFile?: string) {
     return explicitEnvFile;
   }
 
-  // ENV_MODE explicitly overrides; otherwise default by platform
-  // Windows machines are always production, Mac/Linux are local dev
-  const isProduction = process.env.ENV_MODE === 'production' || 
-    (!process.env.ENV_MODE && process.platform === 'win32');
-
-  return isProduction
+  return process.env.ENV_MODE === 'production'
     ? path.join(process.cwd(), '.env.production')
     : path.join(process.cwd(), '.env.local');
 }
 
 async function main() {
   const { args, envFile } = parseCliArgs(process.argv.slice(2));
-  // Load env-specific settings first (committed), then .env secret on top (gitignored)
+  // Load env-specific settings first (committed), then .env secrets on top (gitignored)
   dotenv.config({ path: resolveEnvFile(envFile) });
   dotenv.config({ path: path.join(process.cwd(), '.env'), override: true });
 

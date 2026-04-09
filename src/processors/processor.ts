@@ -111,7 +111,7 @@ export class Processor {
           continue;
         }
         if (resp.status === 401) {
-          this.logger.warn(`[${env}] Unauthorized (401). Check SPLINT_SERVER_API_KEY in secrets/config.json.`);
+          this.logger.warn(`[${env}] Unauthorized (401). Check SF_API_KEY in .env file.`);
           await sleep(intervalMs);
           continue;
         }
