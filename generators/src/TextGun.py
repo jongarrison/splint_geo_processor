@@ -44,6 +44,7 @@ def _emboss_text_impl(
     projection_origin=None,
     extrusion_depth_factor=0.8,
     emboss_inside=True,
+    align_to_surface_normal=False,
     compute_protection_curves=False,
 ):
     """
@@ -67,6 +68,11 @@ def _emboss_text_impl(
         extrusion_depth_factor: Fraction of wall thickness for extrusion depth (default 0.8)
         emboss_inside: If True, emboss on inside surface (default).
                       If False, emboss on outside surface (text will be mirrored).
+        align_to_surface_normal: If True, rotate each letter after touchdown so
+                      its extrusion axis aligns with the local surface normal.
+                      Produces consistent emboss depth on curved surfaces where
+                      projection_vector is not perpendicular to the surface
+                      (e.g. text on the inside bore of a ring). Default False.
         compute_protection_curves: If True, also compute and return 2D text
                       outline curves projected near the brep surface.
     
@@ -284,7 +290,32 @@ def _emboss_text_impl(
         
         log("  Moved letter {} by ({:.2f}, {:.2f}, {:.2f})".format(
             i, move_vector.X, move_vector.Y, move_vector.Z))
-        
+
+        # Optionally rotate letter so its extrusion axis aligns with local surface normal.
+        # This corrects uneven depth on curved surfaces (e.g. inside bore of a ring)
+        # where the projection vector is not perpendicular to the surface.
+        if align_to_surface_normal:
+            mp = target_mesh.ClosestMeshPoint(surface_point, 1.0)
+            if mp is not None:
+                surface_normal = target_mesh.NormalAt(mp)
+                if surface_normal.Length > 0.001:
+                    surface_normal.Unitize()
+                    # Flip normal so it agrees with projection_direction in sense;
+                    # mesh normals on inner surfaces (e.g. ring bore) point inward,
+                    # which is opposite to projection_direction. Aligning sense first
+                    # means the rotation is always a small corrective angle, not 180.
+                    if rg.Vector3d.Multiply(projection_direction, surface_normal) < 0:
+                        surface_normal = -surface_normal
+                    rot_xform = rg.Transform.Rotation(
+                        projection_direction, surface_normal, surface_point)
+                    moved_letter.Transform(rot_xform)
+                    log("  Rotated letter {} to surface normal (dot={:.3f})".format(
+                        i, rg.Vector3d.Multiply(projection_direction, surface_normal)))
+                else:
+                    log("  Warning: zero-length normal for letter {}, skipping rotation".format(i))
+            else:
+                log("  Warning: no mesh point found near surface_point for letter {}, skipping rotation".format(i))
+
         # Fix inverted normals if volume is negative (required for boolean to work)
         letter_volume = get_brep_volume(moved_letter)
         if letter_volume and letter_volume < 0:
@@ -383,6 +414,7 @@ def emboss_text(
     projection_origin=None,
     extrusion_depth_factor=0.8,
     emboss_inside=True,
+    align_to_surface_normal=False,
 ):
     """Emboss text on a brep wall (backward-compatible 4-tuple return).
 
@@ -396,6 +428,7 @@ def emboss_text(
         projection_origin=projection_origin,
         extrusion_depth_factor=extrusion_depth_factor,
         emboss_inside=emboss_inside,
+        align_to_surface_normal=align_to_surface_normal,
         compute_protection_curves=False,
     )
     return result[:4]
@@ -411,6 +444,7 @@ def emboss_text_with_protection(
     projection_origin=None,
     extrusion_depth_factor=0.8,
     emboss_inside=True,
+    align_to_surface_normal=False,
 ):
     """Emboss text and return protection curves for ventilation clearance.
 
@@ -433,6 +467,7 @@ def emboss_text_with_protection(
         projection_origin=projection_origin,
         extrusion_depth_factor=extrusion_depth_factor,
         emboss_inside=emboss_inside,
+        align_to_surface_normal=align_to_surface_normal,
         compute_protection_curves=True,
     )
 
