@@ -35,8 +35,10 @@ function resolveEnvFile(explicitEnvFile?: string) {
     return explicitEnvFile;
   }
 
-  // ENV_MODE is set by npm scripts: dev/start -> local, dev:prod/start:prod -> production
-  return process.env.ENV_MODE === 'production'
+  // ENV_MODE from npm scripts, with platform fallback (Windows = production)
+  const isProduction = process.env.ENV_MODE === 'production' || 
+    (!process.env.ENV_MODE && process.platform === 'win32');
+  return isProduction
     ? path.join(process.cwd(), '.env.production')
     : path.join(process.cwd(), '.env.local');
 }
