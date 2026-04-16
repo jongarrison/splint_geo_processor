@@ -12,7 +12,7 @@ class FeatureIdentificationError(Exception):
     pass
 
 
-def box_center_slice(target_brep, bbox_plane, choose_side_vector):
+def box_center_slice(target_brep, bbox_plane, choose_side_vector, return_size=False):
     """
     Create a planar surface at the center of an oriented bounding box,
     oriented to face in a specified direction.
@@ -21,9 +21,13 @@ def box_center_slice(target_brep, bbox_plane, choose_side_vector):
         target_brep: A solid Brep to create the bounding box around
         bbox_plane: Plane used to orient the bounding box
         choose_side_vector: Vector3d indicating which side of the bbox to select
+        return_size: If True, also return the panel dimensions in bbox_plane coords.
+                     One dimension will be 0 (the panel is flat).
         
     Returns:
-        Brep: A planar surface (intersection_shape) positioned at the bbox center
+        Brep: A planar surface (intersection_shape) positioned at the bbox center.
+        If return_size is True, returns (Brep, (x_size, y_size, z_size)) where
+        x/y/z are measured along bbox_plane's X/Y/Z axes respectively.
         
     Raises:
         FeatureIdentificationError: If operation fails
@@ -148,6 +152,19 @@ def box_center_slice(target_brep, bbox_plane, choose_side_vector):
             final_centroid.X, final_centroid.Y, final_centroid.Z))
     
     log("FeatureIdentification.box_center_slice: Complete")
+
+    if return_size:
+        # Measure the panel in bbox_plane coordinates; one axis will be ~0 (flat surface)
+        panel_copy = intersection_shape.DuplicateBrep()
+        panel_copy.Transform(world_to_plane)
+        panel_bbox = panel_copy.GetBoundingBox(True)
+        x_size = panel_bbox.Max.X - panel_bbox.Min.X
+        y_size = panel_bbox.Max.Y - panel_bbox.Min.Y
+        z_size = panel_bbox.Max.Z - panel_bbox.Min.Z
+        log("  panel size in bbox_plane coords: x={:.2f}, y={:.2f}, z={:.2f}".format(
+            x_size, y_size, z_size))
+        return intersection_shape, (x_size, y_size, z_size)
+
     return intersection_shape
 
 
