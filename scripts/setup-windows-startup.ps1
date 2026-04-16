@@ -42,8 +42,7 @@ if ($existingTask) {
 }
 
 # Create action - run node with the built JavaScript
-# Platform detection (win32) handles env file resolution automatically,
-# but we also set ENV_MODE=production as an explicit safeguard
+# ENV_MODE=production selects .env.production for URLs/settings; .env provides the API key
 $nodePath = (Get-Command node).Source
 $scriptPath = Join-Path $repoPath "dist\index.js"
 $action = New-ScheduledTaskAction `
