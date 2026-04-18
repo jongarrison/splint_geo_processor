@@ -1,7 +1,7 @@
 {
   "id": "cmo191w3z0003jp3lovll3xm2",
   "algorithm": "BuddyRingsDuo",
-  "params": "{\"c_left_mm\":62,\"c_right_mm\":65,\"full_perimeter_mm\":110,\"right_forward_offset_mm\":3,\"b_left_slit\":true,\"b_right_slit\":true}",
+  "params": "{\"c_left_mm\":62,\"c_right_mm\":65,\"full_perimeter_mm\":110,\"right_forward_offset_mm\":5,\"b_left_slit\":true,\"b_right_slit\":true}",
   "metadata": {
     "jobNote": null,
     "jobLabel": null,

@@ -79,37 +79,75 @@ def _thicken_surface(surface, thickness):
     return None
 
 
-def _find_slit_edges(brep, original_brep, tolerance):
-    """Find edges created by the slit cut via midpoint comparison.
+def _dist_to_plane(point, plane_origin, normal):
+    """Signed distance from a point to a plane defined by origin + unit normal."""
+    vec = point - plane_origin
+    return abs(vec.X * normal.X + vec.Y * normal.Y + vec.Z * normal.Z)
 
-    Any edge on the result whose midpoint doesn't match any pre-cut edge
-    midpoint is classified as new (created by the boolean difference).
+
+def _find_slit_edges(brep, original_brep, slit_normal, slit_center, slit_thickness, tolerance):
+    """Find edges created by the slit cut that lie on the two cut planes.
+
+    Only edges coplanar with one of the two offset planes are returned.
+    Wall/intersection edges that pass through the slit region are excluded.
+
+    An edge is considered coplanar with a plane if its midpoint and both
+    endpoints are within tolerance of that plane.
 
     Args:
         brep: The brep after the slit cut.
         original_brep: The brep before the slit cut.
+        slit_normal: Unit normal of the slit panel.
+        slit_center: A point on the slit center plane.
+        slit_thickness: Total slit width in mm.
         tolerance: Distance tolerance for midpoint matching.
 
     Returns:
-        List of edge indices that are new (from the cut).
+        Tuple of (side_a_indices, side_b_indices) - edge indices coplanar
+        with the + and - normal offset planes respectively.
     """
     match_tol = tolerance * 10
+    half = slit_thickness / 2.0
+    plane_tol = tolerance * 5  # coplanarity tolerance
+
+    # Offset plane origins
+    plane_a_origin = slit_center + slit_normal * half   # + normal side
+    plane_b_origin = slit_center + slit_normal * (-half) # - normal side
 
     # Snapshot original edge midpoints
     original_midpoints = []
     for edge in original_brep.Edges:
         original_midpoints.append(edge.PointAt(edge.Domain.Mid))
 
-    new_edge_indices = []
+    side_a = []
+    side_b = []
+    skipped = 0
     for edge in brep.Edges:
         mid_pt = edge.PointAt(edge.Domain.Mid)
         is_original = any(mid_pt.DistanceTo(op) < match_tol for op in original_midpoints)
-        if not is_original:
-            new_edge_indices.append(edge.EdgeIndex)
+        if is_original:
+            continue
 
-    log("Slit edge detection: {} new edges found (of {} total, vs {} original)".format(
-        len(new_edge_indices), brep.Edges.Count, len(original_midpoints)))
-    return new_edge_indices
+        # Test coplanarity: midpoint + both endpoints must be on the plane
+        start_pt = edge.PointAtStart
+        end_pt = edge.PointAtEnd
+
+        # Check plane A
+        if (_dist_to_plane(mid_pt, plane_a_origin, slit_normal) < plane_tol and
+                _dist_to_plane(start_pt, plane_a_origin, slit_normal) < plane_tol and
+                _dist_to_plane(end_pt, plane_a_origin, slit_normal) < plane_tol):
+            side_a.append(edge.EdgeIndex)
+        # Check plane B
+        elif (_dist_to_plane(mid_pt, plane_b_origin, slit_normal) < plane_tol and
+                _dist_to_plane(start_pt, plane_b_origin, slit_normal) < plane_tol and
+                _dist_to_plane(end_pt, plane_b_origin, slit_normal) < plane_tol):
+            side_b.append(edge.EdgeIndex)
+        else:
+            skipped += 1
+
+    log("Slit edge detection: {} + {} coplanar edges, {} wall/split edges skipped".format(
+        len(side_a), len(side_b), skipped))
+    return side_a, side_b
 
 
 def _fillet_edges_by_index(brep, edge_indices, radius, tolerance):
@@ -143,13 +181,12 @@ def _fillet_edges_by_index(brep, edge_indices, radius, tolerance):
 
     log("Batch fillet failed, trying one-at-a-time")
 
-    # One-at-a-time with re-detection each pass
-    # Snapshot midpoints of target edges
+    # One-at-a-time with re-detection each pass.
+    # Snapshot midpoints of target edges; entries set to None once consumed.
     target_points = []
     for idx in edge_indices:
         edge = brep.Edges[idx]
-        mid_t = edge.Domain.Mid
-        target_points.append(edge.PointAt(mid_t))
+        target_points.append(edge.PointAt(edge.Domain.Mid))
 
     current = brep
     match_tol = tolerance * 10
@@ -157,14 +194,13 @@ def _fillet_edges_by_index(brep, edge_indices, radius, tolerance):
     total_filleted = 0
 
     for pass_num in range(max_passes):
-        # Find current edges matching our target midpoints
-        candidates = []
+        # Find current edges matching unconsumed target midpoints
+        candidates = []  # (edge_index, target_index)
         for edge in current.Edges:
-            mid_t = edge.Domain.Mid
-            mid_pt = edge.PointAt(mid_t)
-            for tp in target_points:
-                if mid_pt.DistanceTo(tp) < match_tol:
-                    candidates.append(edge.EdgeIndex)
+            mid_pt = edge.PointAt(edge.Domain.Mid)
+            for ti, tp in enumerate(target_points):
+                if tp is not None and mid_pt.DistanceTo(tp) < match_tol:
+                    candidates.append((edge.EdgeIndex, ti))
                     break
 
         if not candidates:
@@ -173,7 +209,7 @@ def _fillet_edges_by_index(brep, edge_indices, radius, tolerance):
             break
 
         filleted = False
-        for idx in candidates:
+        for idx, ti in candidates:
             res = rg.Brep.CreateFilletEdges(
                 current, [idx], [radius], [radius], blend_type, rail_type, tolerance
             )
@@ -181,6 +217,7 @@ def _fillet_edges_by_index(brep, edge_indices, radius, tolerance):
                 log("  Fillet pass {}: edge {} succeeded".format(pass_num, idx))
                 current = res[0]
                 total_filleted += 1
+                target_points[ti] = None  # consumed, prevent re-match
                 filleted = True
                 break
             else:
@@ -188,9 +225,10 @@ def _fillet_edges_by_index(brep, edge_indices, radius, tolerance):
 
         if not filleted:
             # Try remaining as batch
-            batch_radii = [radius] * len(candidates)
+            remaining_indices = [ei for ei, _ in candidates]
+            batch_radii = [radius] * len(remaining_indices)
             res = rg.Brep.CreateFilletEdges(
-                current, candidates, batch_radii, batch_radii,
+                current, remaining_indices, batch_radii, batch_radii,
                 blend_type, rail_type, tolerance
             )
             if res and len(res) > 0:
@@ -218,7 +256,9 @@ def cut_slit(splint_brep, slit_panel, slit_thickness, fillet_radius,
         tolerance: Model tolerance (uses doc tolerance if None).
 
     Returns:
-        The splint Brep with slit cut and edges filleted.
+        Tuple of (brep, side_a_edges, side_b_edges, surface_a, surface_b).
+        side_a/b are edge index lists for each cut plane (+ and - normal).
+        surface_a/b are single-face Breps of the two offset cut planes.
 
     Raises:
         BrepSlitError: If the boolean difference fails.
@@ -265,23 +305,47 @@ def cut_slit(splint_brep, slit_panel, slit_thickness, fillet_radius,
     log("Boolean difference: success={}, method={}, faces={}, edges={}".format(
         success, method, slit_brep.Faces.Count, slit_brep.Edges.Count))
 
-    # Step 3: Find edges created by the cut
-    new_edges = _find_slit_edges(slit_brep, splint_brep, tolerance)
+    # Heal naked edges left by boolean difference
+    naked_before = sum(1 for e in slit_brep.Edges if e.Valence == rg.EdgeAdjacency.Naked)
+    if naked_before > 0:
+        slit_brep.JoinNakedEdges(tolerance)
+        naked_after = sum(1 for e in slit_brep.Edges if e.Valence == rg.EdgeAdjacency.Naked)
+        log("Healed naked edges: {} -> {} (solid={})".format(
+            naked_before, naked_after, slit_brep.IsSolid))
 
-    if not new_edges:
-        log("WARNING: no new edges detected from cut, skipping fillet")
-        return slit_brep
+    # Compute slit plane info for edge classification and surface output
+    if isinstance(slit_panel, rg.Brep):
+        srf = slit_panel.Faces[0].UnderlyingSurface()
+    else:
+        srf = slit_panel
+    slit_center = srf.PointAt(srf.Domain(0).Mid, srf.Domain(1).Mid)
+    slit_normal = srf.NormalAt(srf.Domain(0).Mid, srf.Domain(1).Mid)
+    slit_normal.Unitize()
+    half = slit_thickness / 2.0
+
+    # Build the two offset surface breps (single-face)
+    surface_a = srf.ToBrep()
+    surface_b = srf.ToBrep()
+    surface_a.Transform(rg.Transform.Translation(slit_normal * half))
+    surface_b.Transform(rg.Transform.Translation(slit_normal * (-half)))
+
+    # Step 3: Find edges created by the cut, coplanar with each cut plane
+    side_a, side_b = _find_slit_edges(
+        slit_brep, splint_brep, slit_normal, slit_center, slit_thickness, tolerance)
+
+    if not side_a and not side_b:
+        log("WARNING: no new edges detected from cut")
+        return slit_brep, [], [], surface_a, surface_b
 
     # Step 4: Fillet the new edges
     if fillet_radius > 0:
-        slit_brep = _fillet_edges_by_index(slit_brep, new_edges, fillet_radius, tolerance)
+        all_new = side_a + side_b
+        slit_brep = _fillet_edges_by_index(slit_brep, all_new, fillet_radius, tolerance)
         log("After fillet: solid={}, valid={}, faces={}, edges={}".format(
             slit_brep.IsSolid, slit_brep.IsValid,
             slit_brep.Faces.Count, slit_brep.Edges.Count))
-    else:
-        log("Fillet radius is 0, skipping fillet")
 
     log("=" * 60)
     log("SLIT COMPLETE")
     log("=" * 60)
-    return slit_brep
+    return slit_brep, side_a, side_b, surface_a, surface_b
