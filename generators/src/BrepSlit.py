@@ -12,6 +12,7 @@ import Rhino.Geometry as rg
 import scriptcontext as sc
 from splintcommon import log
 from BrepDifference import robust_brep_difference
+from BrepFillet import fillet_edges as safe_fillet_edges  # unused until chamfer is re-enabled
 
 
 class BrepSlitError(Exception):
@@ -151,7 +152,18 @@ def _find_slit_edges(brep, original_brep, slit_normal, slit_center, slit_thickne
 
 
 def _fillet_edges_by_index(brep, edge_indices, radius, tolerance):
-    """Fillet specific edges by index. Tries batch first, then one-at-a-time.
+    """Apply chamfer/fillet to slit edges. Currently unused -- see cut_slit Step 4.
+
+    DEFERRED: Applying CreateFilletEdges post-boolean reliably breaks the solid
+    state of the result. The chamfer radius (0.3mm) is large relative to the slit
+    geometry, and the fillet engine leaves naked edges at shared vertices where
+    multiple slit-plane edges meet. This turns a clean solid into a non-solid,
+    which then causes the *next* slit's boolean to fall back to MeshBoolean,
+    compounding fragmentation across chained slit operations.
+
+    Future approach: embed the bevel geometry into the cutter shape itself
+    in _thicken_surface (e.g. hexagonal cross-section cutter) so no post-boolean
+    edge operations are needed.
 
     Args:
         brep: Input brep.
@@ -160,87 +172,14 @@ def _fillet_edges_by_index(brep, edge_indices, radius, tolerance):
         tolerance: Model tolerance.
 
     Returns:
-        Filleted brep (or original if filleting fails).
+        Treated brep (or original if operation fails).
     """
     if not edge_indices:
         log("No edges to fillet")
         return brep
 
-    blend_type = rg.BlendType.Fillet
-    rail_type = rg.RailType.DistanceFromEdge
-    radii = [radius] * len(edge_indices)
-
-    # Try batch first
-    log("Attempting batch fillet on {} edges, radius={:.3f}".format(len(edge_indices), radius))
-    result = rg.Brep.CreateFilletEdges(
-        brep, edge_indices, radii, radii, blend_type, rail_type, tolerance
-    )
-    if result and len(result) > 0:
-        log("Batch fillet succeeded: {} brep(s)".format(len(result)))
-        return result[0]
-
-    log("Batch fillet failed, trying one-at-a-time")
-
-    # One-at-a-time with re-detection each pass.
-    # Snapshot midpoints of target edges; entries set to None once consumed.
-    target_points = []
-    for idx in edge_indices:
-        edge = brep.Edges[idx]
-        target_points.append(edge.PointAt(edge.Domain.Mid))
-
-    current = brep
-    match_tol = tolerance * 10
-    max_passes = len(edge_indices) + 5
-    total_filleted = 0
-
-    for pass_num in range(max_passes):
-        # Find current edges matching unconsumed target midpoints
-        candidates = []  # (edge_index, target_index)
-        for edge in current.Edges:
-            mid_pt = edge.PointAt(edge.Domain.Mid)
-            for ti, tp in enumerate(target_points):
-                if tp is not None and mid_pt.DistanceTo(tp) < match_tol:
-                    candidates.append((edge.EdgeIndex, ti))
-                    break
-
-        if not candidates:
-            log("Fillet pass {}: no target edges remain, done ({} filleted)".format(
-                pass_num, total_filleted))
-            break
-
-        filleted = False
-        for idx, ti in candidates:
-            res = rg.Brep.CreateFilletEdges(
-                current, [idx], [radius], [radius], blend_type, rail_type, tolerance
-            )
-            if res and len(res) > 0:
-                log("  Fillet pass {}: edge {} succeeded".format(pass_num, idx))
-                current = res[0]
-                total_filleted += 1
-                target_points[ti] = None  # consumed, prevent re-match
-                filleted = True
-                break
-            else:
-                log("  Fillet pass {}: edge {} FAILED".format(pass_num, idx))
-
-        if not filleted:
-            # Try remaining as batch
-            remaining_indices = [ei for ei, _ in candidates]
-            batch_radii = [radius] * len(remaining_indices)
-            res = rg.Brep.CreateFilletEdges(
-                current, remaining_indices, batch_radii, batch_radii,
-                blend_type, rail_type, tolerance
-            )
-            if res and len(res) > 0:
-                log("  Batch fallback succeeded for remaining {} edges".format(len(candidates)))
-                current = res[0]
-                total_filleted += len(candidates)
-                break
-            log("No more edges could be filleted ({} of {} done)".format(
-                total_filleted, len(edge_indices)))
-            break
-
-    return current
+    # Delegate to BrepFillet stable implementation (single call, no retry loop).
+    return safe_fillet_edges(brep, edge_indices, radius, tolerance)
 
 
 def cut_slit(splint_brep, slit_panel, slit_thickness, fillet_radius,
@@ -337,13 +276,8 @@ def cut_slit(splint_brep, slit_panel, slit_thickness, fillet_radius,
         log("WARNING: no new edges detected from cut")
         return slit_brep, [], [], surface_a, surface_b
 
-    # Step 4: Fillet the new edges
-    if fillet_radius > 0:
-        all_new = side_a + side_b
-        slit_brep = _fillet_edges_by_index(slit_brep, all_new, fillet_radius, tolerance)
-        log("After fillet: solid={}, valid={}, faces={}, edges={}".format(
-            slit_brep.IsSolid, slit_brep.IsValid,
-            slit_brep.Faces.Count, slit_brep.Edges.Count))
+    # Step 4: Edge chamfer/fillet -- skipped for now (breaks solid state)
+    # TODO: replace with cutter-embedded bevel geometry in _thicken_surface
 
     log("=" * 60)
     log("SLIT COMPLETE")
