@@ -30,28 +30,24 @@ function parseCliArgs(argv: string[]): CliArgs {
   return { args, envFile };
 }
 
-function resolveTargetEnvFile(explicitEnvFile?: string): string {
+function resolveEnvFile(explicitEnvFile?: string) {
   if (explicitEnvFile) {
     return explicitEnvFile;
   }
 
-  // ENV_MODE=production => production API target; default is local
-  const isProduction = process.env.ENV_MODE === 'production';
-  return path.join(process.cwd(), isProduction ? '.env.target.production' : '.env.target.local');
-}
-
-function resolvePlatformEnvFile(): string {
-  // Selects toolchain paths (Rhino, RhinoCode, Bambu) by OS
-  return path.join(process.cwd(), process.platform === 'win32' ? '.env.platform.win' : '.env.platform.mac');
+  // ENV_MODE from npm scripts, with platform fallback (Windows = production)
+  const isProduction = process.env.ENV_MODE === 'production' || 
+    (!process.env.ENV_MODE && process.platform === 'win32');
+  return isProduction
+    ? path.join(process.cwd(), '.env.production')
+    : path.join(process.cwd(), '.env.local');
 }
 
 async function main() {
   const { args, envFile } = parseCliArgs(process.argv.slice(2));
-  // Load target (API URL/intervals), then platform (toolchain paths), then .env secrets (wins all)
-  const targetEnvFile = resolveTargetEnvFile(envFile);
-  const platformEnvFile = resolvePlatformEnvFile();
-  dotenv.config({ path: targetEnvFile });
-  dotenv.config({ path: platformEnvFile });
+  // Load env-specific settings first (committed), then .env secrets on top (gitignored)
+  const resolvedEnvFile = resolveEnvFile(envFile);
+  dotenv.config({ path: resolvedEnvFile });
   dotenv.config({ path: path.join(process.cwd(), '.env'), override: true });
 
   const [{ createLogger }, { Processor }, { loadConfig }] = await Promise.all([
@@ -62,7 +58,7 @@ async function main() {
 
   const logger = createLogger();
 
-  logger.info({ targetEnvFile, platformEnvFile, platform: process.platform }, 'splint_geo_processor starting...');
+  logger.info({ envFile: resolvedEnvFile, platform: process.platform }, 'splint_geo_processor starting...');
   const config = loadConfig();
   logger.info({ 
     environment: config.environment,

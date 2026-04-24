@@ -42,7 +42,7 @@ if ($existingTask) {
 }
 
 # Create action - run node with the built JavaScript
-# ENV_MODE=production selects .env.production for URLs/settings; .env provides the API key
+# ENV_MODE=production selects .env.target.production (API URL/settings) and .env.platform.win (toolchain paths); .env provides the API key
 $nodePath = (Get-Command node).Source
 $scriptPath = Join-Path $repoPath "dist\index.js"
 $action = New-ScheduledTaskAction `
