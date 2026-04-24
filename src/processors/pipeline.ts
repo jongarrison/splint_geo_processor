@@ -102,7 +102,12 @@ export async function checkRhinoHealth(
   logger?: PinoLogger
 ): Promise<boolean> {
   try {
-    await executeRhinoCommand(rhinoCodeCli, '_SelNone', { timeout: 8000 }, logger);
+    const { stdout } = await executeRhinoCommand(rhinoCodeCli, '_SelNone', { timeout: 8000 }, logger);
+    // rhinocode returns this when no Rhino instance is running
+    if (stdout.includes('Can not determine target Rhino') || stdout.includes('no running instance')) {
+      logger?.info({ stdout: stdout.substring(0, 200) }, 'Rhino health check failed - no running instance');
+      return false;
+    }
     logger?.info({}, 'Rhino health check passed');
     return true;
   } catch (err: any) {
