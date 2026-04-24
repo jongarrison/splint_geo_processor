@@ -25,8 +25,7 @@ export interface AppConfig {
   environment: string;         // Environment name (local, production, or derived from URL)
 }
 
-// All config is loaded from env vars (.env -> .env.local/.env.production)
-// See .env for common settings, .env.local/.env.production for overrides
+// All config is loaded from env vars; loading order: .env.target.* -> .env.platform.* -> .env (secrets)
 export function loadConfig(): AppConfig {
   const apiUrl = process.env.SF_API_URL || 'http://localhost:3000';
   logger.info({ apiUrl }, 'Config loaded from env');
