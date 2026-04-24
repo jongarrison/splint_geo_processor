@@ -41,13 +41,19 @@ if ($existingTask) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }
 
+# Set ENV_MODE=production as a persistent user environment variable so all processes
+# run as this user (including scheduled tasks) inherit it reliably.
+[System.Environment]::SetEnvironmentVariable('ENV_MODE', 'production', 'User')
+Write-Host "Set ENV_MODE=production as persistent user environment variable" -ForegroundColor Green
+Write-Host ""
+
 # Create action - run node with the built JavaScript
-# ENV_MODE=production selects .env.target.production (API URL/settings) and .env.platform.win (toolchain paths); .env provides the API key
+# ENV_MODE is now a persistent user env var; no need to pass it inline
 $nodePath = (Get-Command node).Source
 $scriptPath = Join-Path $repoPath "dist\index.js"
 $action = New-ScheduledTaskAction `
-    -Execute "cmd.exe" `
-    -Argument "/c set ENV_MODE=production && `"$nodePath`" `"$scriptPath`"" `
+    -Execute $nodePath `
+    -Argument "`"$scriptPath`"" `
     -WorkingDirectory $repoPath
 
 # Create trigger - at user logon

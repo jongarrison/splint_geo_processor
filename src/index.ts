@@ -50,6 +50,8 @@ async function main() {
   // Load target (API URL/intervals), then platform (toolchain paths), then .env secrets (wins all)
   const targetEnvFile = resolveTargetEnvFile(envFile);
   const platformEnvFile = resolvePlatformEnvFile();
+  // Log ENV_MODE before loading dotenv so we can diagnose env inheritance issues
+  const envMode = process.env.ENV_MODE ?? '(not set)';
   dotenv.config({ path: targetEnvFile });
   dotenv.config({ path: platformEnvFile });
   dotenv.config({ path: path.join(process.cwd(), '.env'), override: true });
@@ -62,7 +64,7 @@ async function main() {
 
   const logger = createLogger();
 
-  logger.info({ targetEnvFile, platformEnvFile, platform: process.platform }, 'splint_geo_processor starting...');
+  logger.info({ targetEnvFile, platformEnvFile, platform: process.platform, envMode }, 'splint_geo_processor starting...');
   const config = loadConfig();
   logger.info({ 
     environment: config.environment,
