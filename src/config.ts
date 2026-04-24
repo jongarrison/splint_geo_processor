@@ -22,6 +22,7 @@ export interface AppConfig {
   rhinoCodeCli?: string;       // Path to rhinocode CLI (for list/command)
   bambuCli?: string;           // Path to BambuStudio CLI
   dryRun?: boolean;            // If true, simulate outputs without invoking external tools
+  keepRhinoAlive: boolean;     // If true, Rhino stays running between jobs (dedicated license)
   environment: string;         // Environment name (local, production, or derived from URL)
 }
 
@@ -41,6 +42,7 @@ export function loadConfig(): AppConfig {
   const rhinoCodeCli = process.env.RHINOCODE_CLI;
   const bambuCli = process.env.BAMBU_CLI;
   const dryRun = (process.env.DRY_RUN ?? '').toLowerCase() === 'true';
+  const keepRhinoAlive = (process.env.KEEP_RHINO_ALIVE ?? '').toLowerCase() === 'true';
 
   // Ensure dirs
   fs.mkdirSync(inboxDir, { recursive: true });
@@ -78,6 +80,7 @@ export function loadConfig(): AppConfig {
     rhinoCodeCli: rhinoCodeCli || undefined, 
     bambuCli: bambuCli || undefined, 
     dryRun,
+    keepRhinoAlive,
     environment 
   };
 }

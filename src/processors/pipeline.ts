@@ -61,6 +61,56 @@ export async function executeRhinoCommand(
   return executeRhinoCodeCli(rhinoCodeCli, ['command', commandString], options, logger);
 }
 
+type PinoLogger = { info: (obj: any, msg?: string) => void; warn: (obj: any, msg?: string) => void };
+
+// Check if Rhino process exists at OS level (independent of rhinocode)
+async function rhinoProcessExists(): Promise<boolean> {
+  try {
+    if (process.platform === 'win32') {
+      const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq Rhino.exe" /NH', { timeout: 5000 });
+      return stdout.includes('Rhino.exe');
+    } else {
+      const { stdout } = await execAsync('pgrep -i rhino', { timeout: 5000 });
+      return stdout.trim().length > 0;
+    }
+  } catch {
+    return false;
+  }
+}
+
+// Kill all Rhino processes at OS level
+async function killRhinoProcess(logger?: PinoLogger): Promise<void> {
+  try {
+    if (process.platform === 'win32') {
+      await execAsync('taskkill /F /IM Rhino.exe', { timeout: 10000 });
+    } else {
+      await execAsync('killall Rhino', { timeout: 10000 });
+    }
+    logger?.info({}, 'Rhino process killed');
+  } catch (err: any) {
+    logger?.info({ error: err?.message }, 'Kill Rhino result (may not exist)');
+  }
+}
+
+/**
+ * Verify Rhino is responsive to commands by sending a fast no-op command (_SelNone).
+ * More reliable than checking the process list -- catches hung-but-listed states.
+ * Use before each job when keepRhinoAlive=true.
+ */
+export async function checkRhinoHealth(
+  rhinoCodeCli: string,
+  logger?: PinoLogger
+): Promise<boolean> {
+  try {
+    await executeRhinoCommand(rhinoCodeCli, '_SelNone', { timeout: 8000 }, logger);
+    logger?.info({}, 'Rhino health check passed');
+    return true;
+  } catch (err: any) {
+    logger?.info({ error: err?.message }, 'Rhino health check failed - not responsive to commands');
+    return false;
+  }
+}
+
 /**
  * Check if Rhino is running and launch if needed.
  * Implements two-phase launch strategy:
@@ -78,64 +128,6 @@ export async function ensureRhinoRunning(
   logger?: { info: (obj: any, msg?: string) => void; warn: (obj: any, msg?: string) => void }
 ): Promise<boolean> {
   
-  // Check if Rhino is responding via rhinocode CLI
-  const isRhinoResponding = async (): Promise<boolean> => {
-    try {
-      const { stdout } = await executeRhinoCodeCli(rhinoCodeCli, ['list', '--json'], { timeout: 5000 }, logger);
-      // Valid list output should be JSON array, empty [] if no Rhino running
-      // Help text starts with "Usage:" when command fails
-      const isHelpText = stdout.includes('Usage:') || stdout.includes('rhinocode [');
-      if (isHelpText) {
-        logger?.info({ stdout: stdout.substring(0, 200) }, 'rhinocode list returned help text - command may not exist');
-        return false;
-      }
-      
-      // Try to parse as JSON array
-      try {
-        const instances = JSON.parse(stdout.trim());
-        const hasInstances = Array.isArray(instances) && instances.length > 0;
-        logger?.info({ hasInstances, instanceCount: instances.length }, 'rhinocode list check');
-        return hasInstances;
-      } catch {
-        // Not valid JSON, Rhino not responding
-        logger?.info({ stdout: stdout.substring(0, 200) }, 'rhinocode list returned non-JSON');
-        return false;
-      }
-    } catch (err: any) {
-      logger?.info({ error: err?.message }, 'rhinocode list check failed - Rhino not responding');
-      return false;
-    }
-  };
-
-  // Check if Rhino process exists at OS level (independent of rhinocode)
-  const rhinoProcessExists = async (): Promise<boolean> => {
-    try {
-      if (process.platform === 'win32') {
-        const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq Rhino.exe" /NH', { timeout: 5000 });
-        return stdout.includes('Rhino.exe');
-      } else {
-        const { stdout } = await execAsync('pgrep -i rhino', { timeout: 5000 });
-        return stdout.trim().length > 0;
-      }
-    } catch {
-      return false;
-    }
-  };
-
-  // Kill all Rhino processes at OS level
-  const killRhinoProcess = async (): Promise<void> => {
-    try {
-      if (process.platform === 'win32') {
-        await execAsync('taskkill /F /IM Rhino.exe', { timeout: 10000 });
-      } else {
-        await execAsync('killall Rhino', { timeout: 10000 });
-      }
-      logger?.info('Rhino process killed');
-    } catch (err: any) {
-      logger?.info({ error: err?.message }, 'Kill Rhino result (may not exist)');
-    }
-  };
-
   // Launch Rhino via OS-specific command
   const launchRhino = async (): Promise<void> => {
     logger?.info({ rhinoCli }, 'Launching Rhino');
@@ -152,11 +144,11 @@ export async function ensureRhinoRunning(
     }
   };
 
-  // Poll for Rhino to become responsive
+  // Poll for Rhino to become responsive to commands (uses full health check, not just list)
   const pollForRhino = async (maxAttempts: number, delayMs: number): Promise<boolean> => {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
-      const responding = await isRhinoResponding();
+      const responding = await checkRhinoHealth(rhinoCodeCli, logger);
       logger?.info({ attempt, maxAttempts, responding }, 'Polling for Rhino');
       if (responding) {
         return true;
@@ -168,7 +160,7 @@ export async function ensureRhinoRunning(
   // Main logic: Check if already running, then implement two-phase launch
   logger?.info('Checking if Rhino is running');
   
-  if (await isRhinoResponding()) {
+  if (await checkRhinoHealth(rhinoCodeCli, logger)) {
     logger?.info('Rhino is already running and responding');
     return true;
   }
@@ -177,7 +169,7 @@ export async function ensureRhinoRunning(
   logger?.info('Phase 1: Launching Rhino (45s polling)');
   await launchRhino();
   
-  if (await pollForRhino(9, 5000)) { // 9 attempts × 5s = 45s
+  if (await pollForRhino(9, 5000)) { // 9 attempts x 5s = 45s
     logger?.info('Phase 1: Rhino started successfully');
     return true;
   }
@@ -187,7 +179,7 @@ export async function ensureRhinoRunning(
   
   if (await rhinoProcessExists()) {
     logger?.warn('Rhino process detected but not responding - killing for recovery');
-    await killRhinoProcess();
+    await killRhinoProcess(logger);
     await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for cleanup
   }
 
@@ -220,6 +212,7 @@ export interface PipelineInputs {
   rhinoCodeCli?: string;
   bambuCli?: string;
   dryRun?: boolean;
+  keepRhinoAlive?: boolean;  // If true, skip Rhino shutdown after job (dedicated license)
   // Optional structured logger and per-job log function
   logger?: { info: (obj: any, msg?: string) => void; warn: (obj: any, msg?: string) => void };
   jobLog?: (level: 'info' | 'warn', message: string, extra?: any) => void;
@@ -277,17 +270,15 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     throw new Error(errorMsg);
   }
 
-  // Check if Rhino was already running before we ensure it
-  const isRhinoRunning = async (rhinoCodeCli: string): Promise<boolean> => {
-    try {
-      const { stdout } = await execAsync(`${rhinoCodeCli} list`, { timeout: 5000 });
-      return stdout.includes('rhinocode server');
-    } catch {
-      return false;
+  // If keeping Rhino alive, verify it's healthy before proceeding;
+  // kill an unresponsive instance so ensureRhinoRunning() can do a clean relaunch.
+  if (input.keepRhinoAlive) {
+    if (!(await checkRhinoHealth(input.rhinoCodeCli, input.logger))) {
+      logInfo('Rhino health check failed - killing for clean restart');
+      await killRhinoProcess(input.logger);
+      await new Promise(r => setTimeout(r, 2000));
     }
-  };
-
-  const runningInitially = await isRhinoRunning(input.rhinoCodeCli);
+  }
 
   // Ensure Rhino is running using centralized function
   logInfo('Ensuring Rhino is running');
@@ -459,58 +450,18 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     }
   }
 
-  // 4) Exit Rhino to free up license
-  // Helper functions for OS-level process management
-  const rhinoProcessExists = async (): Promise<boolean> => {
-    try {
-      if (process.platform === 'win32') {
-        const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq Rhino.exe" /NH', { timeout: 5000 });
-        return stdout.includes('Rhino.exe');
-      } else {
-        const { stdout } = await execAsync('pgrep -i rhino', { timeout: 5000 });
-        return stdout.trim().length > 0;
-      }
-    } catch {
-      return false;
-    }
-  };
-
-  const killRhinoProcess = async (): Promise<void> => {
-    try {
-      if (process.platform === 'win32') {
-        await execAsync('taskkill /F /IM Rhino.exe', { timeout: 10000 });
-      } else {
-        await execAsync('killall Rhino', { timeout: 10000 });
-      }
-      logInfo('Rhino process killed');
-    } catch (err: any) {
-      logInfo('Kill Rhino result (may not exist)', { error: err?.message });
-    }
-  };
-
-  // Only exit if:
-  //   - We launched Rhino (it wasn't already running)
-  //   - AND we're in production (not local dev)
-  const isLocalDev = process.env.NODE_ENV === 'local' || 
-                     input.rhinoCli?.includes('RhinoWIP') ||
-                     process.platform === 'darwin';
-  
-  if (!runningInitially && !isLocalDev) {
-    logInfo('Closing Rhino to free license (production mode)');
+  // Exit Rhino to free license unless keeping alive for next job
+  if (!input.keepRhinoAlive) {
+    logInfo('Closing Rhino (keepRhinoAlive=false)');
     try {
       // Use -_Exit N to exit without saving and without prompting
       await executeRhinoCommand(input.rhinoCodeCli, '-_Exit N', { timeout: 30_000 }, { info: logInfo, warn: logWarn });
       logInfo('Rhino exit command sent');
-      
-      // Wait a moment for graceful exit
       await new Promise((r) => setTimeout(r, 2000));
-      
-      // Force kill any remaining Rhino processes to ensure cleanup
-      // This handles cases where Exit command doesn't work due to GUI prompts
       const stillRunning = await rhinoProcessExists();
       if (stillRunning) {
         logWarn('Rhino still running after Exit command - force killing');
-        await killRhinoProcess();
+        await killRhinoProcess(input.logger);
         await new Promise((r) => setTimeout(r, 1000));
         logInfo('Rhino force killed');
       } else {
@@ -518,14 +469,10 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       }
     } catch (exitErr: any) {
       logWarn('Rhino exit command failed', { error: exitErr?.message });
-      // Still try to kill the process
-      try {
-        await killRhinoProcess();
-      } catch {}
+      try { await killRhinoProcess(input.logger); } catch {}
     }
   } else {
-    const reason = runningInitially ? 'Rhino was already running' : 'local development mode';
-    logInfo(`Keeping Rhino open (${reason})`);
+    logInfo('Keeping Rhino alive for next job (keepRhinoAlive=true)');
   }
 
   // If geometry validation failed, throw now (after Rhino cleanup)

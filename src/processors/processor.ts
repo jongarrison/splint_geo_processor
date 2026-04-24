@@ -97,6 +97,17 @@ export class Processor {
     
     // Run cleanup on startup
     await this.runCleanupIfNeeded(true);
+
+    // Pre-warm Rhino if configured to keep it alive between jobs
+    if (this.config.keepRhinoAlive && this.config.rhinoCli && this.config.rhinoCodeCli) {
+      this.logger.info('Pre-warming Rhino (keepRhinoAlive=true)');
+      const started = await ensureRhinoRunning(this.config.rhinoCodeCli, this.config.rhinoCli, this.logger);
+      if (started) {
+        this.logger.info('Rhino pre-warm complete');
+      } else {
+        this.logger.warn('Rhino pre-warm failed - will retry on first job');
+      }
+    }
     
     const intervalMs = this.config.pollIntervalMs || 5000;
 
@@ -252,6 +263,7 @@ export class Processor {
             rhinoCodeCli: this.config.rhinoCodeCli,
             bambuCli: this.config.bambuCli,
             dryRun: this.config.dryRun,
+            keepRhinoAlive: this.config.keepRhinoAlive,
             logger: this.logger,
             jobLog
           });
