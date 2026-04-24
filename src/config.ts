@@ -29,9 +29,7 @@ export interface AppConfig {
 // See .env for common settings, .env.local/.env.production for overrides
 export function loadConfig(): AppConfig {
   const apiUrl = process.env.SF_API_URL || 'http://localhost:3000';
-  const apiKey = process.env.SF_API_KEY || '';
-
-  logger.info({ apiUrl, hasApiKey: !!apiKey }, 'Config loaded from env');
+  logger.info({ apiUrl }, 'Config loaded from env');
 
   const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS || 3000);
 
@@ -61,6 +59,14 @@ export function loadConfig(): AppConfig {
   } else {
     environment = 'unknown';
   }
+
+  // Select API key by environment so both local and prod keys can coexist in .env
+  const isProduction = environment === 'production' || environment === 'vercel';
+  const apiKey = isProduction
+    ? (process.env.SF_API_KEY_PROD || process.env.SF_API_KEY || '')
+    : (process.env.SF_API_KEY_LOCAL || process.env.SF_API_KEY || '');
+
+  logger.info({ hasApiKey: !!apiKey, environment }, 'API key resolved');
 
   return { 
     apiUrl, 
