@@ -66,6 +66,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -RunOnlyIfNetworkAvailable `
     -DontStopOnIdleEnd `
+    -ExecutionTimeLimit (New-TimeSpan -Days 0) `
     -RestartCount 3 `
     -RestartInterval (New-TimeSpan -Minutes 1)
 
