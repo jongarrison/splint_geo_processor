@@ -699,7 +699,7 @@ export class Processor {
    * write its data to the inbox, launch Rhino/Grasshopper, and exit.
    * Read-only -- no server mutations.
    */
-  async inspect(jobIdentifier: string) {
+  async inspect(jobIdentifier: string, saveFixture = false) {
     this.logger.info({ jobIdentifier }, 'Inspect: fetching job from server');
 
     const resp = await this.http.get(`/api/design-processing/job-by-id/${encodeURIComponent(jobIdentifier)}`);
@@ -765,6 +765,8 @@ export class Processor {
 
     if (fs.existsSync(fixturePath)) {
       this.logger.info({ fixturePath }, 'Inspect: fixture already exists');
+    } else if (!saveFixture) {
+      this.logger.info('Inspect: skipping fixture save (use --save-fixture to capture)');
     } else {
       // Flush pino transports before prompting (they run in worker threads)
       await new Promise(resolve => setTimeout(resolve, 500));
