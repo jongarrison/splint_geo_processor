@@ -37,7 +37,14 @@ $taskName = "SplintGeoProcessor"
 # Remove existing task if it exists
 $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($existingTask) {
-    Write-Host "Task already exists. Removing..." -ForegroundColor Yellow
+    Write-Host "Task already exists. Stopping and removing..." -ForegroundColor Yellow
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    # Give it a moment to terminate child processes
+    Start-Sleep -Seconds 2
+    
+    # Failsafe kill for any lingering node processes attached to this app
+    Stop-Process -Name "node" -ErrorAction SilentlyContinue
+    
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }
 
@@ -67,6 +74,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -RunOnlyIfNetworkAvailable `
     -DontStopOnIdleEnd `
     -ExecutionTimeLimit (New-TimeSpan -Days 0) `
+    -MultipleInstances IgnoreNew `
     -RestartCount 3 `
     -RestartInterval (New-TimeSpan -Minutes 1)
 
