@@ -162,12 +162,19 @@ export async function ensureRhinoRunning(
     return false;
   };
 
-  // Main logic: Check if already running, then implement two-phase launch
+  // Main logic: Check if already running, then implement launch strategy
   logger?.info('Checking if Rhino is running');
   
   if (await checkRhinoHealth(rhinoCodeCli, logger)) {
     logger?.info('Rhino is already running and responding');
     return true;
+  }
+
+  // If Rhino is unhealthy but a process exists, kill it to ensure a clean launch
+  if (await rhinoProcessExists()) {
+    logger?.warn('Rhino process detected but not responding properly - killing before launch');
+    await killRhinoProcess(logger);
+    await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for cleanup
   }
 
   // Phase 1: Normal launch with 45s timeout
@@ -273,16 +280,6 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     const errorMsg = 'RHINOCODE_CLI not configured and DRY_RUN is false';
     logWarn(errorMsg);
     throw new Error(errorMsg);
-  }
-
-  // If keeping Rhino alive, verify it's healthy before proceeding;
-  // kill an unresponsive instance so ensureRhinoRunning() can do a clean relaunch.
-  if (input.keepRhinoAlive) {
-    if (!(await checkRhinoHealth(input.rhinoCodeCli, input.logger))) {
-      logInfo('Rhino health check failed - killing for clean restart');
-      await killRhinoProcess(input.logger);
-      await new Promise(r => setTimeout(r, 2000));
-    }
   }
 
   // Ensure Rhino is running using centralized function

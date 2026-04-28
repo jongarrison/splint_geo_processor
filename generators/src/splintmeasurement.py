@@ -126,6 +126,88 @@ def measure_wall_thickness(finger_result, splint_mesh, name, offset, local_direc
     return base
 
 
+def measure_mesh_wall_thickness(splint_mesh, ray_line, far_distance=200.0):
+    """Measure wall thickness along a provided probe line/ray on a mesh.
+
+    Args:
+        splint_mesh: Mesh/Brep/Guid that can be coerced to a Mesh.
+        ray_line: Probe line. Direction is From -> To.
+        far_distance: Fallback probe extension (mm) if ray_line is degenerate.
+
+    Returns:
+        dict with keys:
+            "thickness_mm": float or None if measurement failed
+            "inner_point": Point3d of first hit from line.From (or None)
+            "outer_point": Point3d of first hit from reverse ray at line.To (or None)
+            "ray_origin": Point3d start of the probe line
+            "ray_direction": Vector3d unitized direction (From -> To)
+        Returns None when inputs cannot be coerced/used.
+    """
+    # Coerce Guid/ObjRef to actual Mesh geometry
+    if not isinstance(splint_mesh, rg.Mesh):
+        coerced = _coerce_mesh(splint_mesh)
+        if coerced is None:
+            log("measure_mesh_wall_thickness: cannot coerce splint_mesh to Mesh (got {})".format(
+                type(splint_mesh).__name__))
+            return None
+        splint_mesh = coerced
+
+    if isinstance(ray_line, rg.Line):
+        line = ray_line
+    else:
+        try:
+            import rhinoscriptsyntax as rs
+            line = rs.coerceline(ray_line)
+        except Exception:
+            line = None
+
+    if line is None:
+        log("measure_mesh_wall_thickness: cannot coerce ray_line to Line (got {})".format(
+            type(ray_line).__name__))
+        return None
+
+    world_dir = line.Direction
+    if not world_dir.Unitize():
+        log("measure_mesh_wall_thickness: ray_line has zero length")
+        return None
+
+    origin = line.From
+    base = {"ray_origin": origin, "ray_direction": Vector3d(world_dir)}
+
+    # Ray from line start along line direction: finds first wall hit
+    ray_out = rg.Ray3d(origin, world_dir)
+    t_inner = rg.Intersect.Intersection.MeshRay(splint_mesh, ray_out)
+    if t_inner < 0:
+        log("measure_mesh_wall_thickness: outward ray missed")
+        base.update({"thickness_mm": None, "inner_point": None, "outer_point": None})
+        return base
+
+    inner_point = ray_out.PointAt(t_inner)
+
+    # Reverse ray from line end (or fallback far point) to find opposite wall hit
+    far_origin = line.To
+    if far_origin.DistanceTo(origin) <= Rhino.RhinoMath.ZeroTolerance:
+        far_origin = origin + world_dir * far_distance
+
+    neg_dir = Vector3d(-world_dir.X, -world_dir.Y, -world_dir.Z)
+    ray_in = rg.Ray3d(far_origin, neg_dir)
+    t_outer = rg.Intersect.Intersection.MeshRay(splint_mesh, ray_in)
+    if t_outer < 0:
+        log("measure_mesh_wall_thickness: inward ray missed")
+        base.update({"thickness_mm": None, "inner_point": inner_point, "outer_point": None})
+        return base
+
+    outer_point = ray_in.PointAt(t_outer)
+    thickness = inner_point.DistanceTo(outer_point)
+
+    base.update({
+        "thickness_mm": round(thickness, 4),
+        "inner_point": inner_point,
+        "outer_point": outer_point,
+    })
+    return base
+
+
 def measure_thickness_probes(finger_result, splint_mesh, probes, far_distance=200.0):
     """Run a batch of measurement probes and return a results dict.
 
