@@ -58,7 +58,7 @@ def measure_wall_thickness(finger_result, splint_mesh, name, offset, local_direc
         local_direction: (x, y, z) tuple in perp frame local coords.
                          (1,0,0)=lateral, (0,1,0)=dorsal, (0,-1,0)=volar,
                          (-1,0,0)=medial. Gets unitized internally.
-        far_distance: How far (mm) to place the outside ray origin.
+        far_distance: Length (mm) of the constructed probe line.
 
     Returns:
         dict with keys:
@@ -69,14 +69,6 @@ def measure_wall_thickness(finger_result, splint_mesh, name, offset, local_direc
             "ray_direction": Vector3d world-space probe direction
         Returns None if the perp frame cannot be computed.
     """
-    # Coerce Guid/ObjRef to actual Mesh geometry
-    if not isinstance(splint_mesh, rg.Mesh):
-        coerced = _coerce_mesh(splint_mesh)
-        if coerced is None:
-            log("measure_wall_thickness: cannot coerce splint_mesh to Mesh (got {})".format(type(splint_mesh).__name__))
-            return None
-        splint_mesh = coerced
-
     plane = finger_result.get_perp_frame(name, offset)
     if plane is None:
         log("measure_wall_thickness: no perp frame for '{}' offset={}".format(name, offset))
@@ -85,54 +77,24 @@ def measure_wall_thickness(finger_result, splint_mesh, name, offset, local_direc
     lx, ly, lz = local_direction
     # Transform local direction to world space using the perp frame axes
     world_dir = plane.XAxis * lx + plane.YAxis * ly + plane.ZAxis * lz
-    world_dir.Unitize()
+    if not world_dir.Unitize():
+        log("measure_wall_thickness: zero-length world direction for '{}' offset={} dir={}".format(
+            name, offset, local_direction))
+        return None
 
     origin = plane.Origin
 
-    # Ray outward from centerline: finds inner wall first
-    ray_out = rg.Ray3d(origin, world_dir)
-    t_inner = rg.Intersect.Intersection.MeshRay(splint_mesh, ray_out)
-
-    base = {"ray_origin": origin, "ray_direction": Vector3d(world_dir)}
-
-    if t_inner < 0:
-        log("measure_wall_thickness: outward ray missed for '{}' offset={} dir={}".format(
-            name, offset, local_direction))
-        base.update({"thickness_mm": None, "inner_point": None, "outer_point": None})
-        return base
-
-    inner_point = ray_out.PointAt(t_inner)
-
-    # Ray inward from far outside: finds outer wall first
-    far_origin = origin + world_dir * far_distance
-    neg_dir = Vector3d(-world_dir.X, -world_dir.Y, -world_dir.Z)
-    ray_in = rg.Ray3d(far_origin, neg_dir)
-    t_outer = rg.Intersect.Intersection.MeshRay(splint_mesh, ray_in)
-
-    if t_outer < 0:
-        log("measure_wall_thickness: inward ray missed for '{}' offset={} dir={}".format(
-            name, offset, local_direction))
-        base.update({"thickness_mm": None, "inner_point": inner_point, "outer_point": None})
-        return base
-
-    outer_point = ray_in.PointAt(t_outer)
-    thickness = inner_point.DistanceTo(outer_point)
-
-    base.update({
-        "thickness_mm": round(thickness, 4),
-        "inner_point": inner_point,
-        "outer_point": outer_point,
-    })
-    return base
+    probe_end = Point3d(origin + world_dir * far_distance)
+    probe_line = rg.Line(origin, probe_end)
+    return measure_mesh_wall_thickness(splint_mesh, probe_line)
 
 
-def measure_mesh_wall_thickness(splint_mesh, ray_line, far_distance=200.0):
+def measure_mesh_wall_thickness(splint_mesh, ray_line):
     """Measure wall thickness along a provided probe line/ray on a mesh.
 
     Args:
         splint_mesh: Mesh/Brep/Guid that can be coerced to a Mesh.
         ray_line: Probe line. Direction is From -> To.
-        far_distance: Fallback probe extension (mm) if ray_line is degenerate.
 
     Returns:
         dict with keys:
@@ -184,10 +146,8 @@ def measure_mesh_wall_thickness(splint_mesh, ray_line, far_distance=200.0):
 
     inner_point = ray_out.PointAt(t_inner)
 
-    # Reverse ray from line end (or fallback far point) to find opposite wall hit
+    # Reverse ray from line end to find opposite wall hit
     far_origin = line.To
-    if far_origin.DistanceTo(origin) <= Rhino.RhinoMath.ZeroTolerance:
-        far_origin = origin + world_dir * far_distance
 
     neg_dir = Vector3d(-world_dir.X, -world_dir.Y, -world_dir.Z)
     ray_in = rg.Ray3d(far_origin, neg_dir)

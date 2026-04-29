@@ -211,9 +211,12 @@ def _emboss_text_impl(
             center_offset.X, center_offset.Y, center_offset.Z))
     
     # Step 2c: If embossing outside, mirror text horizontally so it reads correctly
+    # Mirror across the text_plane's local X axis (not world X) so the flip happens
+    # in the text's own frame -- otherwise letters end up askew relative to the
+    # projection geometry whenever text_plane is not aligned with world axes.
     if not emboss_inside:
         log(" =========== MIRRORING ===========")
-        mirror_plane = rg.Plane(centroid, rg.Vector3d.XAxis)
+        mirror_plane = rg.Plane(centroid, text_plane.XAxis)
         mirror_xform = rg.Transform.Mirror(mirror_plane)
         for brep in letter_breps:
             brep.Transform(mirror_xform)
@@ -364,7 +367,7 @@ def _emboss_text_impl(
 
             # Mirror for outside embossing (same as letter breps)
             if not emboss_inside:
-                m_plane = rg.Plane(centroid, rg.Vector3d.XAxis)
+                m_plane = rg.Plane(centroid, text_plane.XAxis)
                 m_xform = rg.Transform.Mirror(m_plane)
                 for crv in outline_curves:
                     crv.Transform(m_xform)
