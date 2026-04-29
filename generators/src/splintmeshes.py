@@ -103,8 +103,11 @@ def _get_stl_settings():
     e_str += "_Enter _DetailedOptions "
     e_str += "_JaggedSeams=_No "
     e_str += "_PackTextures=_No "
-    e_str += "_Refine=_Yes "
-    e_str += "_SimplePlane=_Yes "
+    # Refine/SimplePlane only affect NURBS->mesh conversion; we always feed
+    # pre-baked meshes. Leaving these on caused silent macro abort on a
+    # ~1M-face SizingRings export (RunScript returned True in 0.0005s, no file).
+    e_str += "_Refine=_No "
+    e_str += "_SimplePlane=_No "
     e_str += "_Enter _Enter"
     return e_str, "stl"
 
