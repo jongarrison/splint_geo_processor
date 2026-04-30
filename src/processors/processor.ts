@@ -334,9 +334,7 @@ export class Processor {
         } finally {
           // Archive job files (inbox and any produced outbox files) regardless of success/failure
           try {
-            const expectedGeometry = path.join(this.outbox, `${baseName}.stl`);
-            const expectedPrint = path.join(this.outbox, `${baseName}.gcode.3mf`);
-            await this.archiveJobFiles(archiveDirName, inboxJson, expectedGeometry, expectedPrint);
+            await this.archiveJobFiles(archiveDirName, inboxJson);
           } catch (archiveErr: any) {
             this.logger.warn({ err: archiveErr?.message }, 'Archiving job files failed');
           }
@@ -652,7 +650,7 @@ export class Processor {
     this.lastCleanupTime = now;
   }
 
-  private async archiveJobFiles(archiveDirName: string, inboxJson: string, geometryPath: string, printPath?: string) {
+  private async archiveJobFiles(archiveDirName: string, inboxJson: string) {
     const home = process.env.HOME || process.env.USERPROFILE || '.';
     const archiveRoot = path.join(home, 'SplintFactoryFiles', 'archive');
     const destDir = path.join(archiveRoot, archiveDirName);

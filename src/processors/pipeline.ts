@@ -240,7 +240,12 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   // Use baseName from caller -- it matches the inbox JSON filename stem,
   // which the GH Python script uses as jobname for output files.
   const base = input.baseName;
-  const geometryPath = path.join(input.outboxDir, `${base}.stl`);
+  const geometryCandidates = [
+    path.join(input.outboxDir, `${base}.stl`),
+    path.join(input.outboxDir, `${base}.3mf`),
+    path.join(input.outboxDir, `${base}.obj`),
+  ];
+  let geometryPath = geometryCandidates[0];
   const printPath = path.join(input.outboxDir, `${base}.gcode.3mf`);
   let pipelineError: Error | null = null;
 
@@ -328,6 +333,20 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     let size = 0;
     let lastSize = -1;
     let stableSizeCount = 0;
+    const findGeometryOutput = (): { path: string; size: number } | undefined => {
+      for (const candidate of geometryCandidates) {
+        if (!fs.existsSync(candidate)) continue;
+        try {
+          const stats = fs.statSync(candidate);
+          if (stats.isFile()) {
+            return { path: candidate, size: stats.size };
+          }
+        } catch {
+          // Continue to next candidate
+        }
+      }
+      return undefined;
+    };
 
     // Activity detection via log.txt
     const ghLogPath = path.join(input.outboxDir, 'log.txt');
@@ -351,11 +370,14 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
 
       // Fast path: .meta.json means Python verified the STL and wrote metadata
       if (fs.existsSync(metaJsonPath)) {
-        logInfo('Detected .meta.json - Python export complete');
-        ok = true;
-        // Read final STL size for the log
-        try { size = fs.statSync(geometryPath).size; } catch {}
-        break;
+        const found = findGeometryOutput();
+        if (found && found.size >= 200) {
+          geometryPath = found.path;
+          size = found.size;
+          logInfo('Detected .meta.json and geometry output', { geometryPath, size });
+          ok = true;
+          break;
+        }
       }
 
       // Fast path: check log.txt tail for pipeline result signals
@@ -382,11 +404,15 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
               logInfo('Detected [PIPELINE_RESULT:SUCCESS] in log');
               // .meta.json should exist by now, but give a brief moment
               await new Promise(r => setTimeout(r, 200));
-              try { size = fs.statSync(geometryPath).size; } catch {}
-              ok = size >= 200;
+              const found = findGeometryOutput();
+              if (found) {
+                geometryPath = found.path;
+                size = found.size;
+              }
+              ok = !!found && found.size >= 200;
               lastLogSize = currentLogSize;
               lastActivityTime = Date.now();
-              break;
+              if (ok) break;
             }
 
             lastLogSize = currentLogSize;
@@ -395,31 +421,34 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
         }
       } catch {}
 
-      // Fallback: STL file size stability check (for older GH scripts)
-      if (fs.existsSync(geometryPath)) {
-        try {
-          const stats = fs.statSync(geometryPath);
-          size = stats.size;
+      // Fallback: output file size stability check (for older GH scripts)
+      const found = findGeometryOutput();
+      if (found) {
+        if (geometryPath !== found.path) {
+          geometryPath = found.path;
+          lastSize = -1;
+          stableSizeCount = 0;
+        }
+        size = found.size;
 
-          if (stats.isFile() && size >= 200) {
-            if (size === lastSize) {
-              stableSizeCount++;
-              if (stableSizeCount >= 2) {
-                ok = true;
-                break;
-              }
-            } else {
-              stableSizeCount = 0;
-              lastSize = size;
+        if (size >= 200) {
+          if (size === lastSize) {
+            stableSizeCount++;
+            if (stableSizeCount >= 2) {
+              ok = true;
+              break;
             }
+          } else {
+            stableSizeCount = 0;
+            lastSize = size;
           }
-        } catch {}
+        }
       }
 
       // Periodic progress log every 5 seconds
       if (Date.now() - lastProgressLog >= 5_000) {
         lastProgressLog = Date.now();
-        logInfo(`Waiting for output... elapsed=${Math.round(elapsed / 1000)}s, stlSize=${size}, logActivity=${Math.round(sinceActivity / 1000)}s ago`);
+        logInfo(`Waiting for output... elapsed=${Math.round(elapsed / 1000)}s, geometrySize=${size}, logActivity=${Math.round(sinceActivity / 1000)}s ago`);
       }
 
       await new Promise(r => setTimeout(r, 500));
@@ -445,8 +474,9 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       pipelineError = new Error('Python pipeline reported failure via [PIPELINE_RESULT:FAILURE]');
     } else if (!ok) {
       const elapsed = Date.now() - start;
-      logWarn(`Geometry output missing or invalid (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s, lastLogActivity=${Math.round((Date.now() - lastActivityTime) / 1000)}s ago): ${geometryPath}`);
-      pipelineError = new Error(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s): ${geometryPath}`);
+      const candidates = geometryCandidates.map((p) => path.basename(p)).join(', ');
+      logWarn(`Geometry output missing or invalid (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s, lastLogActivity=${Math.round((Date.now() - lastActivityTime) / 1000)}s ago). Tried: ${candidates}`);
+      pipelineError = new Error(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s). Tried: ${candidates}`);
     } else {
       logInfo(`Geometry output validated (${size} bytes)`, { geometryPath, waitTimeMs: Date.now() - start });
     }
