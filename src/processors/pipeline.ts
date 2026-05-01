@@ -63,6 +63,40 @@ export async function executeRhinoCommand(
 
 type PinoLogger = { info: (obj: any, msg?: string) => void; warn: (obj: any, msg?: string) => void };
 
+const RHINO_HEALTH_PROBE_FILENAME = 'rhino_health_probe.json';
+
+function resolveRhinoHealthProbeScriptPath(): string {
+  const candidates = [
+    path.resolve(process.cwd(), 'generators/src/rhino_health_probe.py'),
+    path.resolve(__dirname, '../../generators/src/rhino_health_probe.py')
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return candidates[0];
+}
+
+function isRhinoExecutionProbeEnabled(): boolean {
+  return (process.env.RHINO_EXECUTION_PROBE_ENABLED ?? 'true').toLowerCase() !== 'false';
+}
+
+function getRhinoExecutionProbeWaitMs(): number {
+  const raw = Number(process.env.RHINO_EXECUTION_PROBE_WAIT_MS ?? 5000);
+  if (!Number.isFinite(raw) || raw < 1000) {
+    return 5000;
+  }
+  return Math.floor(raw);
+}
+
+function getSplintOutboxDir(): string {
+  const home = process.env.HOME || process.env.USERPROFILE || '.';
+  return path.join(home, 'SplintFactoryFiles', 'outbox');
+}
+
 // Check if Rhino process exists at OS level (independent of rhinocode)
 async function rhinoProcessExists(): Promise<boolean> {
   try {
@@ -76,6 +110,110 @@ async function rhinoProcessExists(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function waitForRhinoExit(timeoutMs = 15_000, pollMs = 500): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const stillRunning = await rhinoProcessExists();
+    if (!stillRunning) {
+      return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, pollMs));
+  }
+  return !(await rhinoProcessExists());
+}
+
+// Query how many targetable Rhino instances rhinocode can see.
+async function getRhinoTargetCount(
+  rhinoCodeCli: string,
+  logger?: PinoLogger
+): Promise<number> {
+  try {
+    const { stdout } = await executeRhinoCodeCli(rhinoCodeCli, ['list', '--json'], { timeout: 8000 }, logger);
+    const raw = (stdout || '').trim();
+    if (!raw) {
+      return 0;
+    }
+
+    // Prefer direct JSON parse, but tolerate leading log lines before JSON.
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed) ? parsed.length : 0;
+    } catch {
+      const start = raw.indexOf('[');
+      const end = raw.lastIndexOf(']');
+      if (start >= 0 && end > start) {
+        const parsed = JSON.parse(raw.slice(start, end + 1)) as unknown;
+        return Array.isArray(parsed) ? parsed.length : 0;
+      }
+    }
+
+    logger?.warn({ stdout: raw.substring(0, 300) }, 'Unable to parse rhinocode list output as JSON');
+    return 0;
+  } catch (err: any) {
+    logger?.info({ error: err?.message }, 'rhinocode list query failed');
+    return 0;
+  }
+}
+
+async function checkRhinoExecutionProbe(
+  rhinoCodeCli: string,
+  logger?: PinoLogger
+): Promise<boolean> {
+  const probeScriptPath = resolveRhinoHealthProbeScriptPath();
+  if (!fs.existsSync(probeScriptPath)) {
+    logger?.warn({ probeScriptPath }, 'Rhino execution probe script not found');
+    return false;
+  }
+
+  const outboxDir = getSplintOutboxDir();
+  const probeFilePath = path.join(outboxDir, RHINO_HEALTH_PROBE_FILENAME);
+
+  try {
+    fs.mkdirSync(outboxDir, { recursive: true });
+  } catch (err: any) {
+    logger?.warn({ outboxDir, error: err?.message }, 'Failed to create outbox directory for Rhino probe');
+    return false;
+  }
+
+  try {
+    if (fs.existsSync(probeFilePath)) {
+      fs.unlinkSync(probeFilePath);
+    }
+  } catch (err: any) {
+    logger?.warn({ probeFilePath, error: err?.message }, 'Failed to clear old Rhino probe file');
+  }
+
+  const probeStart = Date.now();
+  const probeCommand = `-_RunPythonScript "${probeScriptPath}"`;
+
+  try {
+    await executeRhinoCommand(rhinoCodeCli, probeCommand, { timeout: 8000 }, logger);
+  } catch (err: any) {
+    logger?.warn({ error: err?.message }, 'Rhino execution probe command failed');
+    return false;
+  }
+
+  const waitMs = getRhinoExecutionProbeWaitMs();
+  while (Date.now() - probeStart <= waitMs) {
+    try {
+      if (fs.existsSync(probeFilePath)) {
+        const stats = fs.statSync(probeFilePath);
+        if (stats.mtimeMs >= probeStart - 200) {
+          logger?.info({ probeFilePath, ageMs: Date.now() - stats.mtimeMs }, 'Rhino execution probe passed');
+          return true;
+        }
+      }
+    } catch (err: any) {
+      logger?.warn({ error: err?.message }, 'Failed reading Rhino probe file');
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
+
+  logger?.warn({ probeFilePath, waitMs }, 'Rhino execution probe timed out waiting for marker file');
+  return false;
 }
 
 // Windows-only check for GUI hung state ("Not Responding")
@@ -116,41 +254,63 @@ async function rhinoProcessResponding(logger?: PinoLogger): Promise<boolean> {
 async function killRhinoProcess(logger?: PinoLogger): Promise<void> {
   try {
     if (process.platform === 'win32') {
-      await execAsync('taskkill /F /IM Rhino.exe', { timeout: 10000 });
+      await execAsync('taskkill /F /T /IM Rhino.exe', { timeout: 10000 });
     } else {
       await execAsync('killall Rhino', { timeout: 10000 });
     }
-    logger?.info({}, 'Rhino process killed');
+
+    const exited = await waitForRhinoExit();
+    if (exited) {
+      logger?.info({}, 'Rhino process killed');
+    } else {
+      logger?.warn({}, 'Rhino kill command sent but process still appears to be running');
+    }
   } catch (err: any) {
     logger?.info({ error: err?.message }, 'Kill Rhino result (may not exist)');
   }
 }
 
 /**
- * Verify Rhino is responsive to commands by sending a fast no-op command (_SelNone).
- * More reliable than checking the process list -- catches hung-but-listed states.
- * Use before each job when keepRhinoAlive=true.
+ * Verify Rhino is healthy by checking rhinocode target discovery and process responding state.
+ * Uses `rhinocode list --json` instead of `_SelNone` so health does not depend on command output.
  */
 export async function checkRhinoHealth(
   rhinoCodeCli: string,
   logger?: PinoLogger
 ): Promise<boolean> {
   try {
-    const { stdout } = await executeRhinoCommand(rhinoCodeCli, '_SelNone', { timeout: 8000 }, logger);
-    // rhinocode returns this when no Rhino instance is running
-    if (stdout.includes('Can not determine target Rhino') || stdout.includes('no running instance')) {
-      logger?.info({ stdout: stdout.substring(0, 200) }, 'Rhino health check failed - no running instance');
+    const targetCount = await getRhinoTargetCount(rhinoCodeCli, logger);
+
+    if (targetCount <= 0) {
+      const processExists = await rhinoProcessExists();
+      if (processExists) {
+        const processResponding = await rhinoProcessResponding(logger);
+        if (!processResponding) {
+          logger?.info({}, 'Rhino health check failed - process exists but is not responding');
+          return false;
+        }
+      }
+
+      logger?.info({ targetCount, processExists }, 'Rhino health check failed - no targetable Rhino instance');
       return false;
     }
 
-    // On Windows, reject GUI-hung Rhino even if rhinocode accepted a command.
+    // On Windows, reject GUI-hung Rhino even if target discovery succeeds.
     const responding = await rhinoProcessResponding(logger);
     if (!responding) {
       logger?.info({}, 'Rhino health check failed - process is not responding');
       return false;
     }
 
-    logger?.info({}, 'Rhino health check passed');
+    if (isRhinoExecutionProbeEnabled()) {
+      const probePassed = await checkRhinoExecutionProbe(rhinoCodeCli, logger);
+      if (!probePassed) {
+        logger?.info({}, 'Rhino health check failed - execution probe did not produce marker file');
+        return false;
+      }
+    }
+
+    logger?.info({ targetCount }, 'Rhino health check passed');
     return true;
   } catch (err: any) {
     logger?.info({ error: err?.message }, 'Rhino health check failed - not responsive to commands');
@@ -193,10 +353,27 @@ export async function ensureRhinoRunning(
 
   // Poll for Rhino to become responsive to commands (uses full health check, not just list)
   const pollForRhino = async (maxAttempts: number, delayMs: number): Promise<boolean> => {
+    let unhealthyWhileProcessExists = 0;
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
       const responding = await checkRhinoHealth(rhinoCodeCli, logger);
-      logger?.info({ attempt, maxAttempts, responding }, 'Polling for Rhino');
+      const processExists = await rhinoProcessExists();
+
+      if (!responding && processExists) {
+        unhealthyWhileProcessExists += 1;
+      } else {
+        unhealthyWhileProcessExists = 0;
+      }
+
+      logger?.info({ attempt, maxAttempts, responding, processExists, unhealthyWhileProcessExists }, 'Polling for Rhino');
+
+      // Fail fast if Rhino process appears to be launched but stays unhealthy.
+      if (!responding && unhealthyWhileProcessExists >= 3) {
+        logger?.warn({ attempt, unhealthyWhileProcessExists }, 'Rhino process exists but remains unhealthy after launch attempts - failing early');
+        return false;
+      }
+
       if (responding) {
         return true;
       }
