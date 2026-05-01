@@ -78,6 +78,40 @@ async function rhinoProcessExists(): Promise<boolean> {
   }
 }
 
+// Windows-only check for GUI hung state ("Not Responding")
+async function rhinoProcessResponding(logger?: PinoLogger): Promise<boolean> {
+  if (process.platform !== 'win32') {
+    return true;
+  }
+
+  try {
+    const command = [
+      'powershell.exe -NoProfile -Command',
+      '"$p = Get-Process Rhino -ErrorAction SilentlyContinue | Select-Object -First 1;',
+      'if ($null -eq $p) { Write-Output MISSING }',
+      'elseif ($p.Responding) { Write-Output RESPONDING }',
+      'else { Write-Output NOT_RESPONDING }"'
+    ].join(' ');
+    const { stdout } = await execAsync(command, { timeout: 5000 });
+    const state = (stdout || '').trim();
+
+    if (state === 'RESPONDING') {
+      return true;
+    }
+
+    if (state === 'NOT_RESPONDING') {
+      logger?.warn({}, 'Rhino process is present but Windows reports it is not responding');
+      return false;
+    }
+
+    logger?.warn({ state }, 'Rhino process response state is unknown');
+    return false;
+  } catch (err: any) {
+    logger?.warn({ error: err?.message }, 'Failed to read Rhino responding state from Windows');
+    return false;
+  }
+}
+
 // Kill all Rhino processes at OS level
 async function killRhinoProcess(logger?: PinoLogger): Promise<void> {
   try {
@@ -108,6 +142,14 @@ export async function checkRhinoHealth(
       logger?.info({ stdout: stdout.substring(0, 200) }, 'Rhino health check failed - no running instance');
       return false;
     }
+
+    // On Windows, reject GUI-hung Rhino even if rhinocode accepted a command.
+    const responding = await rhinoProcessResponding(logger);
+    if (!responding) {
+      logger?.info({}, 'Rhino health check failed - process is not responding');
+      return false;
+    }
+
     logger?.info({}, 'Rhino health check passed');
     return true;
   } catch (err: any) {
@@ -248,6 +290,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   let geometryPath = geometryCandidates[0];
   const printPath = path.join(input.outboxDir, `${base}.gcode.3mf`);
   let pipelineError: Error | null = null;
+  let shouldResetRhinoAfterFailure = false;
 
   const logInfo = (msg: string, extra?: any) => {
     input.logger?.info(extra || {}, msg);
@@ -256,6 +299,24 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   const logWarn = (msg: string, extra?: any) => {
     input.logger?.warn(extra || {}, msg);
     if (input.jobLog) input.jobLog('warn', msg, extra);
+  };
+
+  const clearPipelineAttemptArtifacts = () => {
+    const attemptArtifacts = [
+      ...geometryCandidates,
+      path.join(input.outboxDir, `${base}.meta.json`),
+      path.join(input.outboxDir, 'log.txt')
+    ];
+
+    for (const artifact of attemptArtifacts) {
+      try {
+        if (fs.existsSync(artifact)) {
+          fs.unlinkSync(artifact);
+        }
+      } catch (err: any) {
+        logWarn('Failed to clear pipeline artifact before attempt', { artifact, error: err?.message });
+      }
+    }
   };
 
   if (input.dryRun) {
@@ -276,12 +337,14 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   }
 
   // Rhino/Grasshopper step
-  if (!input.rhinoCli) {
+  const rhinoCliPath = input.rhinoCli;
+  if (!rhinoCliPath) {
     const errorMsg = 'RHINO_CLI not configured and DRY_RUN is false';
     logWarn(errorMsg);
     throw new Error(errorMsg);
   }
-  if (!input.rhinoCodeCli) {
+  const rhinoCodeCliPath = input.rhinoCodeCli;
+  if (!rhinoCodeCliPath) {
     const errorMsg = 'RHINOCODE_CLI not configured and DRY_RUN is false';
     logWarn(errorMsg);
     throw new Error(errorMsg);
@@ -290,8 +353,8 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   // Ensure Rhino is running using centralized function
   logInfo('Ensuring Rhino is running');
   const rhinoRunning = await ensureRhinoRunning(
-    input.rhinoCodeCli,
-    input.rhinoCli,
+    rhinoCodeCliPath,
+    rhinoCliPath,
     input.logger
   );
 
@@ -299,40 +362,47 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     throw new Error('Rhino did not start successfully after launch attempts');
   }
 
-  // Run GrasshopperPlayer with the script
-  // rhinocode command "- _GrasshopperPlayer {gh_script_path}" (hyphen underscore)
-  const ghArg = `-_GrasshopperPlayer "${ghScriptAbs}"`;
-  const runCmd = `${input.rhinoCodeCli} command ${ghArg}`;
-  logInfo('exec', { cmd: runCmd });
-  const execEnv = {
-    ...process.env,
-    SF_JOB_BASENAME: base,
-    SF_OUTBOX_DIR: input.outboxDir,
-    SF_INBOX_JSON: (input as any).inboxJsonPath || '',
-    SF_PARAMS_JSON: typeof input.params === 'string' ? input.params : JSON.stringify(input.params ?? {})
-  } as NodeJS.ProcessEnv;
-  const { stdout: ghStdout, stderr: ghStderr } = await executeRhinoCommand(
-    input.rhinoCodeCli,
-    ghArg,
-    { timeout: 10 * 60_000, env: execEnv },
-    { info: logInfo, warn: logWarn }
-  );
-  if (ghStdout && ghStdout.trim()) logInfo('stdout (rhinocode command)', { stdout: ghStdout.substring(0, 2000) });
-  if (ghStderr && ghStderr.trim()) logWarn('stderr (rhinocode command)', { stderr: ghStderr.substring(0, 2000) });
+  const runGrasshopperAttempt = async (attemptNumber: number): Promise<{ error: Error | null; lockLikely: boolean }> => {
+    clearPipelineAttemptArtifacts();
 
-  // Validate geometry output exists and is non-trivial, allowing time for file write.
-  // Uses activity detection: if Grasshopper's log.txt is still growing, the timeout
-  // resets so long-running multi-splint jobs aren't killed prematurely.
-  // Watches for [PIPELINE_RESULT:...] signals in log.txt for fast completion detection.
-  {
+    // Run GrasshopperPlayer with the script
+    // rhinocode command "- _GrasshopperPlayer {gh_script_path}" (hyphen underscore)
+    const ghArg = `-_GrasshopperPlayer "${ghScriptAbs}"`;
+    const runCmd = `${rhinoCodeCliPath} command ${ghArg}`;
+    logInfo('exec', { cmd: runCmd, attemptNumber });
+    const execEnv = {
+      ...process.env,
+      SF_JOB_BASENAME: base,
+      SF_OUTBOX_DIR: input.outboxDir,
+      SF_INBOX_JSON: (input as any).inboxJsonPath || '',
+      SF_PARAMS_JSON: typeof input.params === 'string' ? input.params : JSON.stringify(input.params ?? {})
+    } as NodeJS.ProcessEnv;
+
+    const { stdout: ghStdout, stderr: ghStderr } = await executeRhinoCommand(
+      rhinoCodeCliPath,
+      ghArg,
+      { timeout: 10 * 60_000, env: execEnv },
+      { info: logInfo, warn: logWarn }
+    );
+    if (ghStdout && ghStdout.trim()) logInfo('stdout (rhinocode command)', { stdout: ghStdout.substring(0, 2000), attemptNumber });
+    if (ghStderr && ghStderr.trim()) logWarn('stderr (rhinocode command)', { stderr: ghStderr.substring(0, 2000), attemptNumber });
+
+    // Validate geometry output exists and is non-trivial, allowing time for file write.
+    // Uses activity detection: if Grasshopper's log.txt is still growing, the timeout
+    // resets so long-running multi-splint jobs aren't killed prematurely.
+    // Watches for [PIPELINE_RESULT:...] signals in log.txt for fast completion detection.
     const start = Date.now();
-    const baseTimeoutMs = 90_000; // 90 seconds inactivity timeout (boolean ops can take 30s+ without logging)
-    const maxTimeoutMs = 10 * 60_000; // 10 minute hard ceiling
+    const inactivityTimeoutMs = Number(process.env.GH_INACTIVITY_TIMEOUT_MS || 90_000);
+    const noProgressTimeoutMs = Number(process.env.GH_NO_PROGRESS_TIMEOUT_MS || 30_000);
+    const maxTimeoutMs = Number(process.env.GH_MAX_TIMEOUT_MS || (10 * 60_000));
     let ok = false;
     let pipelineSignalFailure = false; // set true if log.txt contains [PIPELINE_RESULT:FAILURE]
     let size = 0;
     let lastSize = -1;
     let stableSizeCount = 0;
+    let sawProgress = false;
+    let timeoutReason: 'none' | 'no-progress' | 'inactivity' | 'max' = 'none';
+
     const findGeometryOutput = (): { path: string; size: number } | undefined => {
       for (const candidate of geometryCandidates) {
         if (!fs.existsSync(candidate)) continue;
@@ -353,9 +423,6 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     const metaJsonPath = path.join(input.outboxDir, `${base}.meta.json`);
     let lastLogSize = 0;
     let lastActivityTime = Date.now();
-    try {
-      if (fs.existsSync(ghLogPath)) lastLogSize = fs.statSync(ghLogPath).size;
-    } catch {}
 
     let lastProgressLog = 0;
 
@@ -364,9 +431,22 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       const sinceActivity = Date.now() - lastActivityTime;
 
       // Hard ceiling: never wait longer than maxTimeoutMs
-      if (elapsed >= maxTimeoutMs) break;
-      // Timeout if no log activity for baseTimeoutMs
-      if (sinceActivity >= baseTimeoutMs) break;
+      if (elapsed >= maxTimeoutMs) {
+        timeoutReason = 'max';
+        break;
+      }
+
+      // If no progress has ever shown up, fail fast (locked Rhino signature)
+      if (!sawProgress && elapsed >= noProgressTimeoutMs) {
+        timeoutReason = 'no-progress';
+        break;
+      }
+
+      // After some progress appears, allow longer inactivity timeout
+      if (sawProgress && sinceActivity >= inactivityTimeoutMs) {
+        timeoutReason = 'inactivity';
+        break;
+      }
 
       // Fast path: .meta.json means Python verified the STL and wrote metadata
       if (fs.existsSync(metaJsonPath)) {
@@ -374,7 +454,8 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
         if (found && found.size >= 200) {
           geometryPath = found.path;
           size = found.size;
-          logInfo('Detected .meta.json and geometry output', { geometryPath, size });
+          sawProgress = true;
+          logInfo('Detected .meta.json and geometry output', { geometryPath, size, attemptNumber });
           ok = true;
           break;
         }
@@ -392,16 +473,17 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
             fs.readSync(fd, newBytes, 0, newBytes.length, lastLogSize);
             fs.closeSync(fd);
             const newContent = newBytes.toString('utf8');
+            sawProgress = true;
 
             if (newContent.includes('[PIPELINE_RESULT:FAILURE]')) {
-              logWarn('Detected [PIPELINE_RESULT:FAILURE] in log - aborting poll');
+              logWarn('Detected [PIPELINE_RESULT:FAILURE] in log - aborting poll', { attemptNumber });
               pipelineSignalFailure = true;
               lastLogSize = currentLogSize;
               lastActivityTime = Date.now();
               break;
             }
             if (newContent.includes('[PIPELINE_RESULT:SUCCESS]')) {
-              logInfo('Detected [PIPELINE_RESULT:SUCCESS] in log');
+              logInfo('Detected [PIPELINE_RESULT:SUCCESS] in log', { attemptNumber });
               // .meta.json should exist by now, but give a brief moment
               await new Promise(r => setTimeout(r, 200));
               const found = findGeometryOutput();
@@ -429,6 +511,10 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
           lastSize = -1;
           stableSizeCount = 0;
         }
+        if (found.size > size) {
+          sawProgress = true;
+          lastActivityTime = Date.now();
+        }
         size = found.size;
 
         if (size >= 200) {
@@ -448,7 +534,10 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       // Periodic progress log every 5 seconds
       if (Date.now() - lastProgressLog >= 5_000) {
         lastProgressLog = Date.now();
-        logInfo(`Waiting for output... elapsed=${Math.round(elapsed / 1000)}s, geometrySize=${size}, logActivity=${Math.round(sinceActivity / 1000)}s ago`);
+        logInfo(
+          `Waiting for output... elapsed=${Math.round(elapsed / 1000)}s, stlSize=${size}, logActivity=${Math.round(sinceActivity / 1000)}s ago`,
+          { attemptNumber, sawProgress }
+        );
       }
 
       await new Promise(r => setTimeout(r, 500));
@@ -466,28 +555,77 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
           logInfo(formattedLog.substring(0, 20000));
         }
       } catch (err: any) {
-        logWarn('Failed to read Grasshopper log.txt', { error: err?.message });
+        logWarn('Failed to read Grasshopper log.txt', { error: err?.message, attemptNumber });
       }
     }
 
     if (pipelineSignalFailure) {
-      pipelineError = new Error('Python pipeline reported failure via [PIPELINE_RESULT:FAILURE]');
-    } else if (!ok) {
+      return {
+        error: new Error('Python pipeline reported failure via [PIPELINE_RESULT:FAILURE]'),
+        lockLikely: false
+      };
+    }
+
+    if (!ok) {
       const elapsed = Date.now() - start;
       const candidates = geometryCandidates.map((p) => path.basename(p)).join(', ');
-      logWarn(`Geometry output missing or invalid (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s, lastLogActivity=${Math.round((Date.now() - lastActivityTime) / 1000)}s ago). Tried: ${candidates}`);
-      pipelineError = new Error(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s). Tried: ${candidates}`);
-    } else {
-      logInfo(`Geometry output validated (${size} bytes)`, { geometryPath, waitTimeMs: Date.now() - start });
+
+      if (timeoutReason === 'no-progress') {
+        const msg = `No Grasshopper progress detected after ${Math.round(elapsed / 1000)}s; treating Rhino as locked and eligible for restart. Tried: ${candidates}`;
+        logWarn(msg, { attemptNumber, noProgressTimeoutMs, inactivityTimeoutMs });
+        return { error: new Error(msg), lockLikely: true };
+      }
+
+      logWarn(
+        `Geometry output missing or invalid (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s, lastLogActivity=${Math.round((Date.now() - lastActivityTime) / 1000)}s ago, timeoutReason=${timeoutReason}). Tried: ${candidates}`,
+        { attemptNumber, sawProgress }
+      );
+      return {
+        error: new Error(`Geometry output missing or invalid after GrasshopperPlayer run (size=${size} bytes, waited=${Math.round(elapsed / 1000)}s, timeoutReason=${timeoutReason}). Tried: ${candidates}`),
+        lockLikely: false
+      };
+    }
+
+    logInfo(`Geometry output validated (${size} bytes)`, { geometryPath, waitTimeMs: Date.now() - start, attemptNumber });
+    return { error: null, lockLikely: false };
+  };
+
+  const maxGrasshopperAttempts = 2;
+  for (let attemptNumber = 1; attemptNumber <= maxGrasshopperAttempts; attemptNumber++) {
+    const attemptResult = await runGrasshopperAttempt(attemptNumber);
+    pipelineError = attemptResult.error;
+
+    if (!pipelineError) {
+      break;
+    }
+
+    if (!attemptResult.lockLikely || attemptNumber >= maxGrasshopperAttempts) {
+      shouldResetRhinoAfterFailure = attemptResult.lockLikely;
+      break;
+    }
+
+    shouldResetRhinoAfterFailure = true;
+    logWarn('Detected likely Rhino locked state - forcing Rhino restart before retry', { attemptNumber });
+    await killRhinoProcess(input.logger);
+    await new Promise((r) => setTimeout(r, 2000));
+
+    const restarted = await ensureRhinoRunning(rhinoCodeCliPath, rhinoCliPath, input.logger);
+    if (!restarted) {
+      pipelineError = new Error('Rhino restart failed after detecting likely locked state');
+      break;
     }
   }
 
   // Exit Rhino to free license unless keeping alive for next job
-  if (!input.keepRhinoAlive) {
+  if (!input.keepRhinoAlive || (pipelineError && shouldResetRhinoAfterFailure)) {
+    const keepAliveDisabledByRecovery = pipelineError && shouldResetRhinoAfterFailure;
+    if (keepAliveDisabledByRecovery) {
+      logWarn('Resetting Rhino after locked-state failure (overriding keepRhinoAlive=true)');
+    }
     logInfo('Closing Rhino (keepRhinoAlive=false)');
     try {
       // Use -_Exit N to exit without saving and without prompting
-      await executeRhinoCommand(input.rhinoCodeCli, '-_Exit N', { timeout: 30_000 }, { info: logInfo, warn: logWarn });
+      await executeRhinoCommand(rhinoCodeCliPath, '-_Exit N', { timeout: 30_000 }, { info: logInfo, warn: logWarn });
       logInfo('Rhino exit command sent');
       await new Promise((r) => setTimeout(r, 2000));
       const stillRunning = await rhinoProcessExists();
