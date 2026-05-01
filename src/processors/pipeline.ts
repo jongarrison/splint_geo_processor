@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile, exec } from 'node:child_process';
+import { execFile, exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
@@ -95,6 +95,18 @@ function getRhinoExecutionProbeWaitMs(): number {
 function getSplintOutboxDir(): string {
   const home = process.env.HOME || process.env.USERPROFILE || '.';
   return path.join(home, 'SplintFactoryFiles', 'outbox');
+}
+
+function shouldStartScriptServerOnRhinoLaunch(): boolean {
+  return (process.env.RHINO_START_SCRIPT_SERVER_ON_LAUNCH ?? 'true').toLowerCase() !== 'false';
+}
+
+function getRhinoStartupMacro(): string {
+  const configured = (process.env.RHINO_STARTUP_COMMAND ?? 'StartScriptServer').trim();
+  const base = configured.length > 0 ? configured : 'StartScriptServer';
+  const stripped = base.replace(/^-+/, '');
+  const underscored = stripped.startsWith('_') ? stripped : `_${stripped}`;
+  return `-${underscored} _Enter`;
 }
 
 // Check if Rhino process exists at OS level (independent of rhinocode)
@@ -339,12 +351,32 @@ export async function ensureRhinoRunning(
   const launchRhino = async (): Promise<void> => {
     logger?.info({ rhinoCli }, 'Launching Rhino');
     try {
+      const startServerOnLaunch = shouldStartScriptServerOnRhinoLaunch();
+      const startupMacro = getRhinoStartupMacro();
+
       if (process.platform === 'win32') {
-        await execAsync(`powershell.exe -Command "Start-Process -FilePath '${rhinoCli}' -ArgumentList '/nosplash'"`, { 
-          timeout: 5000 
+        const rhinoArgs = ['/nosplash'];
+        if (startServerOnLaunch) {
+          rhinoArgs.push(`/runscript=${startupMacro}`);
+        }
+
+        logger?.info({ rhinoCli, rhinoArgs, startServerOnLaunch, startupMacro }, 'Launching Rhino with startup args');
+        const child = spawn(rhinoCli, rhinoArgs, {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
         });
+        child.on('error', (error) => {
+          logger?.warn({ error: error.message }, 'Rhino launch process emitted error');
+        });
+        child.unref();
       } else {
-        await execAsync(`open -a "${rhinoCli}" --args -nosplash`, { timeout: 5000 });
+        const openArgs = ['-a', rhinoCli, '--args', '-nosplash'];
+        if (startServerOnLaunch) {
+          openArgs.push('-runscript', startupMacro);
+        }
+        logger?.info({ rhinoCli, openArgs, startServerOnLaunch, startupMacro }, 'Launching Rhino with startup args');
+        await execFileAsync('open', openArgs, { timeout: 5000 });
       }
     } catch (err: any) {
       logger?.warn({ error: err?.message }, 'Launch command completed (this may be normal)');
