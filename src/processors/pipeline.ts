@@ -92,6 +92,14 @@ function getRhinoExecutionProbeWaitMs(): number {
   return Math.floor(raw);
 }
 
+function getRhinoStartupProbeGraceMs(): number {
+  const raw = Number(process.env.RHINO_STARTUP_PROBE_GRACE_MS ?? 3000);
+  if (!Number.isFinite(raw) || raw < 0) {
+    return 3000;
+  }
+  return Math.floor(raw);
+}
+
 function getSplintOutboxDir(): string {
   const home = process.env.HOME || process.env.USERPROFILE || '.';
   return path.join(home, 'SplintFactoryFiles', 'outbox');
@@ -168,6 +176,7 @@ async function getRhinoTargetCount(
 
 async function checkRhinoExecutionProbe(
   rhinoCodeCli: string,
+  startupExtraWaitMs: number,
   logger?: PinoLogger
 ): Promise<boolean> {
   const probeScriptPath = resolveRhinoHealthProbeScriptPath();
@@ -202,7 +211,7 @@ async function checkRhinoExecutionProbe(
     return false;
   }
 
-  const waitMs = getRhinoExecutionProbeWaitMs();
+  const waitMs = getRhinoExecutionProbeWaitMs() + startupExtraWaitMs;
   while (Date.now() - probeStart <= waitMs) {
     try {
       if (fs.existsSync(probeFilePath)) {
@@ -283,7 +292,8 @@ async function killRhinoProcess(logger?: PinoLogger): Promise<void> {
  */
 export async function checkRhinoHealth(
   rhinoCodeCli: string,
-  logger?: PinoLogger
+  logger?: PinoLogger,
+  options: { startupProbeGraceMs?: number } = {}
 ): Promise<boolean> {
   try {
     const targetCount = await getRhinoTargetCount(rhinoCodeCli, logger);
@@ -316,7 +326,8 @@ export async function checkRhinoHealth(
     }
 
     if (isRhinoExecutionProbeEnabled()) {
-      const probePassed = await checkRhinoExecutionProbe(rhinoCodeCli, logger);
+      const startupProbeGraceMs = options.startupProbeGraceMs ?? 0;
+      const probePassed = await checkRhinoExecutionProbe(rhinoCodeCli, startupProbeGraceMs, logger);
       if (!probePassed) {
         logger?.info({}, 'Rhino health check failed - execution probe did not produce marker file');
         return false;
@@ -385,10 +396,11 @@ export async function ensureRhinoRunning(
   // Poll for Rhino to become responsive to commands (uses full health check, not just list)
   const pollForRhino = async (maxAttempts: number, delayMs: number): Promise<boolean> => {
     let unhealthyWhileProcessExists = 0;
+    const startupProbeGraceMs = getRhinoStartupProbeGraceMs();
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
-      const responding = await checkRhinoHealth(rhinoCodeCli, logger);
+      const responding = await checkRhinoHealth(rhinoCodeCli, logger, { startupProbeGraceMs });
       const processExists = await rhinoProcessExists();
 
       if (!responding && processExists) {
@@ -397,7 +409,7 @@ export async function ensureRhinoRunning(
         unhealthyWhileProcessExists = 0;
       }
 
-      logger?.info({ attempt, maxAttempts, responding, processExists, unhealthyWhileProcessExists }, 'Polling for Rhino');
+      logger?.info({ attempt, maxAttempts, responding, processExists, unhealthyWhileProcessExists, startupProbeGraceMs }, 'Polling for Rhino');
 
       // Fail fast if Rhino process appears to be launched but stays unhealthy.
       if (!responding && unhealthyWhileProcessExists >= 3) {
