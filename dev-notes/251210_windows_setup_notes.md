@@ -139,6 +139,12 @@ Stop-ScheduledTask SplintGeoProcessor
 Get-Content ~\SplintFactoryFiles\logs\geo-processor.log -Tail 50
 ```
 
+### Disable Autosave
+
+- This is the source of many dialog pop ups when Rhino has to be force restarted
+- In GUI > Settings > Rhino Options > Files > AutoSave > uncheck "Save Every"
+- see: https://discourse.mcneel.com/t/turn-off-autosave/144465
+
 ## Installed Paths
 - Rhino 9 WIP: `C:\Program Files\Rhino 9 WIP\System\`
 - BambuStudio: `C:\Program Files\Bambu Studio\`

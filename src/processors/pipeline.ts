@@ -103,10 +103,7 @@ function shouldStartScriptServerOnRhinoLaunch(): boolean {
 
 function getRhinoStartupMacro(): string {
   const configured = (process.env.RHINO_STARTUP_COMMAND ?? 'StartScriptServer').trim();
-  const base = configured.length > 0 ? configured : 'StartScriptServer';
-  const stripped = base.replace(/^-+/, '');
-  const underscored = stripped.startsWith('_') ? stripped : `_${stripped}`;
-  return `-${underscored} _Enter`;
+  return configured.length > 0 ? configured : 'StartScriptServer';
 }
 
 // Check if Rhino process exists at OS level (independent of rhinocode)
@@ -198,10 +195,8 @@ async function checkRhinoExecutionProbe(
   }
 
   const probeStart = Date.now();
-  const probeCommand = `-_RunPythonScript "${probeScriptPath}"`;
-
   try {
-    await executeRhinoCommand(rhinoCodeCli, probeCommand, { timeout: 8000 }, logger);
+    await executeRhinoCodeCli(rhinoCodeCli, ['script', probeScriptPath], { timeout: 8000 }, logger);
   } catch (err: any) {
     logger?.warn({ error: err?.message }, 'Rhino execution probe command failed');
     return false;
@@ -304,6 +299,12 @@ export async function checkRhinoHealth(
       }
 
       logger?.info({ targetCount, processExists }, 'Rhino health check failed - no targetable Rhino instance');
+      if (processExists) {
+        logger?.warn(
+          {},
+          'Rhino process exists but RhinoCode cannot target it. A modal window (autosave/license/update) or script-server startup failure may be blocking automation.'
+        );
+      }
       return false;
     }
 
@@ -372,9 +373,7 @@ export async function ensureRhinoRunning(
         child.unref();
       } else {
         const openArgs = ['-a', rhinoCli, '--args', '-nosplash'];
-        if (startServerOnLaunch) {
-          openArgs.push('-runscript', startupMacro);
-        }
+        // Keep non-Windows launch conservative until Rhino flag parity is verified.
         logger?.info({ rhinoCli, openArgs, startServerOnLaunch, startupMacro }, 'Launching Rhino with startup args');
         await execFileAsync('open', openArgs, { timeout: 5000 });
       }
