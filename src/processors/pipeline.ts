@@ -358,6 +358,11 @@ export async function ensureRhinoRunning(
   rhinoCli: string,
   logger?: { info: (obj: any, msg?: string) => void; warn: (obj: any, msg?: string) => void }
 ): Promise<boolean> {
+  const startupProbeGraceMs = getRhinoStartupProbeGraceMs();
+
+  const checkHealthDuringStartup = async (): Promise<boolean> => {
+    return checkRhinoHealth(rhinoCodeCli, logger, { startupProbeGraceMs });
+  };
   
   // Launch Rhino via OS-specific command
   const launchRhino = async (): Promise<void> => {
@@ -396,7 +401,6 @@ export async function ensureRhinoRunning(
   // Poll for Rhino to become responsive to commands (uses full health check, not just list)
   const pollForRhino = async (maxAttempts: number, delayMs: number): Promise<boolean> => {
     let unhealthyWhileProcessExists = 0;
-    const startupProbeGraceMs = getRhinoStartupProbeGraceMs();
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
@@ -427,14 +431,23 @@ export async function ensureRhinoRunning(
   // Main logic: Check if already running, then implement launch strategy
   logger?.info('Checking if Rhino is running');
   
-  if (await checkRhinoHealth(rhinoCodeCli, logger)) {
+  if (await checkHealthDuringStartup()) {
     logger?.info('Rhino is already running and responding');
     return true;
   }
 
-  // If Rhino is unhealthy but a process exists, kill it to ensure a clean launch
+  // If Rhino is unhealthy but a process exists, wait once and re-check before killing.
+  // This keeps startup responsive while avoiding aggressive kill/relaunch churn.
   if (await rhinoProcessExists()) {
-    logger?.warn('Rhino process detected but not responding properly - killing before launch');
+    logger?.warn({ startupProbeGraceMs }, 'Rhino process detected but not healthy yet - applying startup grace before pre-launch kill');
+    await new Promise(resolve => setTimeout(resolve, startupProbeGraceMs));
+
+    if (await checkHealthDuringStartup()) {
+      logger?.info('Rhino became healthy during startup grace window');
+      return true;
+    }
+
+    logger?.warn('Rhino process still unhealthy after startup grace - killing before launch');
     await killRhinoProcess(logger);
     await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for cleanup
   }

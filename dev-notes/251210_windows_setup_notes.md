@@ -154,4 +154,3 @@ Get-Content ~\SplintFactoryFiles\logs\geo-processor.log -Tail 50
 ## Check for plugins that our gh files rely on and install them
 
 - SizingRings depends on planar grid control, for example. This suggests that each new design needs to be tried while watching Rhino!
-
