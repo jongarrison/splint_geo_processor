@@ -821,6 +821,29 @@ def save_mesh(input_meshes, directory, root_filename, format_type="stl"):
             m.Vertices.Count if hasattr(m, 'Vertices') else '?',
             m.Faces.Count if hasattr(m, 'Faces') else '?'))
 
+    # Pre-export mesh sanity pass: surface degeneracies that silently abort
+    # Rhino's _-Export macro. Logs V/F deltas so anomalies are visible in prod.
+    for i, m in enumerate(meshes):
+        try:
+            v0 = m.Vertices.Count
+            f0 = m.Faces.Count
+            naked0 = len(m.GetNakedEdges()) if m.GetNakedEdges() is not None else 0
+            closed0 = bool(m.IsClosed)
+            m.Vertices.CombineIdentical(True, True)
+            m.Vertices.CullUnused()
+            m.Faces.CullDegenerateFaces()
+            m.FaceNormals.ComputeFaceNormals()
+            m.Normals.ComputeNormals()
+            m.Compact()
+            v1 = m.Vertices.Count
+            f1 = m.Faces.Count
+            naked1 = len(m.GetNakedEdges()) if m.GetNakedEdges() is not None else 0
+            closed1 = bool(m.IsClosed)
+            log("  mesh {} sanity: V {}->{} (d={}), F {}->{} (d={}), naked {}->{}, closed {}->{}".format(
+                i, v0, v1, v0 - v1, f0, f1, f0 - f1, naked0, naked1, closed0, closed1))
+        except Exception as sanity_err:
+            log("  mesh {} sanity pass failed: {}".format(i, sanity_err))
+
     if directory is None or root_filename is None:
         raise ValueError("directory and root_filename are required")
     if "." in directory or "." in root_filename:
