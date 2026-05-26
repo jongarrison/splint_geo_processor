@@ -1,8 +1,21 @@
-Test Run: 2026-04-01T18:16:25.647Z
-Result: ALL PASSED
-Fixtures: 3 passed, 0 failed, 3 total
-Duration: 42s
+Test Run: 2026-05-08T23:05:18.950Z
+Result: 6 FAILED
+Fixtures: 2 passed, 6 failed, 8 total
+Duration: 10m 24s
 
-  [PASS] InfinityExtend_BA9Z vol:5340 vol_d:+0.00% time:21.6s time_d:-36% sliced:3.2s [Clean multi-brep union]
-  [PASS] InfinityExtend_JWA3 vol:1518 vol_d:+0.00% time:10.9s time_d:+2% sliced:1.2s [Clean multi-brep union]
-  [PASS] InfinityFlex_N3V3 vol:1482 vol_d:+0.00% time:9.5s time_d:-14% sliced:1.2s [Clean multi-brep union]
+  [PASS] BuddyRingsDuo_3YS1 vol:2724 vol_d:+0.00% time:32.1s time_d:+66% sliced:1.5s [Clean boolean difference]
+  [FAIL] BuddyRingsDuo_G495 time:122.9s time_d:+277% sliced:NO
+         Regression: was success, now failed (Rhino did not start successfully after launch attempts)
+         Slicing regression: was sliced, now missing .gcode.3mf
+  [FAIL] InfinityExtend_6Y4Y time:123.0s sliced:NO
+         No benchmark and run failed - cannot establish baseline
+  [FAIL] InfinityExtend_BA9Z time:121.5s time_d:+260% sliced:NO
+         Regression: was success, now failed (Rhino did not start successfully after launch attempts)
+  [FAIL] InfinityExtend_FHGM time:119.9s time_d:+190% sliced:NO
+         Regression: was success, now failed (Rhino did not start successfully after launch attempts)
+         Slicing regression: was sliced, now missing .gcode.3mf
+  [FAIL] InfinityExtend_JWA3 vol:1790 vol_d:+17.93% time:40.8s time_d:+280% sliced:1.2s [Clean multi-brep union]
+         Mesh[0] volume drift: 1517.6 -> 1789.7 (17.9%)
+  [FAIL] InfinityExtend_RDAQ vol:1771 vol_d:+17.52% time:32.5s time_d:+36% sliced:1.2s [Clean multi-brep union]
+         Mesh[0] volume drift: 1507.4 -> 1771.4 (17.5%)
+  [PASS] InfinityFlex_N3V3 vol:1482 vol_d:+0.01% time:31.1s time_d:+183% sliced:1.2s [Clean multi-brep union]

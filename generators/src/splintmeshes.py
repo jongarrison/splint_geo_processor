@@ -693,7 +693,13 @@ def convert_to_export_meshes(
         smoothing_iterations, repair_if_needed, shrinkwrap_fallback))
     log("  meshing_flags: jagged_seams={}, simple_planes={}, refine_grid={}".format(
         jagged_seams, simple_planes, refine_grid))
-    if weld_angle_degrees is not None and float(weld_angle_degrees) >= 120.0:
+    # Only warn about high weld angles when in-line smoothing is on; with
+    # smoothing_iterations=0 a high weld angle is correct (and required when
+    # downstream targeted mesh smoothing -- see MeshSmooth.py -- needs welded
+    # vertices to flow across creases).
+    if (smoothing_iterations and smoothing_iterations > 0
+            and weld_angle_degrees is not None
+            and float(weld_angle_degrees) >= 120.0):
         log("  Note: high weld_angle_degrees={} may visually soften sharp creases; try 30-60 for edge preservation".format(
             weld_angle_degrees))
 

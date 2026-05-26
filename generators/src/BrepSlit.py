@@ -20,6 +20,24 @@ class BrepSlitError(Exception):
     pass
 
 
+def _coerce_mesh(obj):
+    """Best-effort conversion of GH/Rhino references to Mesh."""
+    if obj is None:
+        return None
+    if isinstance(obj, rg.Mesh):
+        return obj
+
+    try:
+        import rhinoscriptsyntax as rs
+        mesh = rs.coercemesh(obj)
+        if mesh is not None:
+            return mesh
+    except Exception:
+        pass
+
+    return None
+
+
 def _thicken_surface(surface, thickness):
     """Extrude an untrimmed surface symmetrically along its normal to create a solid cutter.
 
@@ -84,6 +102,165 @@ def _dist_to_plane(point, plane_origin, normal):
     """Signed distance from a point to a plane defined by origin + unit normal."""
     vec = point - plane_origin
     return abs(vec.X * normal.X + vec.Y * normal.Y + vec.Z * normal.Z)
+
+
+def _count_naked_topology_edges(mesh):
+    """Count naked topology edges (connected to exactly one face)."""
+    topo = getattr(mesh, "TopologyEdges", None)
+    if topo is None:
+        return None
+
+    naked_count = 0
+    for i in range(topo.Count):
+        try:
+            connected = topo.GetConnectedFaces(i)
+            count = len(connected) if connected is not None else 0
+        except Exception:
+            count = 0
+        if count == 1:
+            naked_count += 1
+    return naked_count
+
+
+def _mesh_from_brep(brep, max_edge_length):
+    """Create a single joined mesh from a brep with explicit edge-length control."""
+    tol = sc.doc.ModelAbsoluteTolerance
+
+    params = rg.MeshingParameters.DefaultAnalysisMesh
+    try:
+        max_len = max(float(max_edge_length), tol * 4.0)
+        min_len = max(max_len * 0.15, tol)
+        if hasattr(params, "MaximumEdgeLength"):
+            params.MaximumEdgeLength = max_len
+        if hasattr(params, "MinimumEdgeLength"):
+            params.MinimumEdgeLength = min_len
+        if hasattr(params, "SimplePlanes"):
+            params.SimplePlanes = False
+        if hasattr(params, "RefineGrid"):
+            params.RefineGrid = True
+        if hasattr(params, "JaggedSeams"):
+            params.JaggedSeams = False
+    except Exception:
+        pass
+
+    parts = rg.Mesh.CreateFromBrep(brep, params)
+    if not parts or len(parts) == 0:
+        return None
+
+    out_mesh = rg.Mesh()
+    for part in parts:
+        out_mesh.Append(part)
+
+    try:
+        out_mesh.Faces.CullDegenerateFaces()
+    except Exception:
+        pass
+    try:
+        out_mesh.Vertices.CullUnused()
+    except Exception:
+        pass
+    try:
+        out_mesh.Normals.ComputeNormals()
+    except Exception:
+        pass
+    try:
+        out_mesh.Compact()
+    except Exception:
+        pass
+
+    if out_mesh.Faces.Count == 0:
+        return None
+    return out_mesh
+
+
+def _mesh_boolean_difference(minuend_mesh, subtrahend_mesh):
+    """Attempt mesh boolean difference across common RhinoCommon overloads."""
+    attempts = [
+        ("MeshBoolean(list,list)", ( [minuend_mesh], [subtrahend_mesh] )),
+        ("MeshBoolean(mesh,mesh)", ( minuend_mesh, subtrahend_mesh )),
+    ]
+
+    for method_name, args in attempts:
+        try:
+            result = rg.Mesh.CreateBooleanDifference(*args)
+            if not result:
+                continue
+
+            if isinstance(result, rg.Mesh):
+                return result, method_name
+
+            meshes = list(result)
+            if not meshes:
+                continue
+
+            joined = rg.Mesh()
+            for m in meshes:
+                if isinstance(m, rg.Mesh):
+                    joined.Append(m)
+
+            if joined.Faces.Count > 0:
+                return joined, method_name
+        except Exception:
+            pass
+
+    return None, None
+
+
+def _find_slit_topology_edges(mesh, original_mesh, slit_normal, slit_center, slit_thickness, tolerance):
+    """Find new mesh topology edges that lie on the two slit cut planes."""
+    match_tol = tolerance * 10
+    half = slit_thickness / 2.0
+    plane_tol = tolerance * 5
+
+    plane_a_origin = slit_center + slit_normal * half
+    plane_b_origin = slit_center + slit_normal * (-half)
+
+    original_midpoints = []
+    original_topo = getattr(original_mesh, "TopologyEdges", None)
+    if original_topo is not None:
+        for i in range(original_topo.Count):
+            try:
+                original_midpoints.append(original_topo.EdgeLine(i).PointAt(0.5))
+            except Exception:
+                pass
+
+    topo = getattr(mesh, "TopologyEdges", None)
+    if topo is None:
+        return [], []
+
+    side_a = []
+    side_b = []
+    skipped = 0
+
+    for i in range(topo.Count):
+        try:
+            line = topo.EdgeLine(i)
+        except Exception:
+            skipped += 1
+            continue
+
+        mid_pt = line.PointAt(0.5)
+        is_original = any(mid_pt.DistanceTo(op) < match_tol for op in original_midpoints)
+        if is_original:
+            continue
+
+        start_pt = line.From
+        end_pt = line.To
+
+        if (_dist_to_plane(mid_pt, plane_a_origin, slit_normal) < plane_tol and
+                _dist_to_plane(start_pt, plane_a_origin, slit_normal) < plane_tol and
+                _dist_to_plane(end_pt, plane_a_origin, slit_normal) < plane_tol):
+            side_a.append(i)
+        elif (_dist_to_plane(mid_pt, plane_b_origin, slit_normal) < plane_tol and
+                _dist_to_plane(start_pt, plane_b_origin, slit_normal) < plane_tol and
+                _dist_to_plane(end_pt, plane_b_origin, slit_normal) < plane_tol):
+            side_b.append(i)
+        else:
+            skipped += 1
+
+    log("Slit topology edge detection: {} + {} coplanar edges, {} wall/split edges skipped".format(
+        len(side_a), len(side_b), skipped))
+    return side_a, side_b
 
 
 def _find_slit_edges(brep, original_brep, slit_normal, slit_center, slit_thickness, tolerance):
@@ -283,3 +460,126 @@ def cut_slit(splint_brep, slit_panel, slit_thickness, fillet_radius,
     log("SLIT COMPLETE")
     log("=" * 60)
     return slit_brep, side_a, side_b, surface_a, surface_b
+
+
+def cut_slit_mesh(splint_mesh, slit_panel, slit_thickness, fillet_radius,
+                  tolerance=None):
+    """Cut a sizing slit directly on a mesh using a mesh boolean difference.
+
+    Signature and return tuple mirror cut_slit for easier drop-in usage.
+
+    Args:
+        splint_mesh: The input splint Mesh (or mesh-coercible reference).
+        slit_panel: Untrimmed planar surface defining the slit center plane.
+        slit_thickness: Total slit width in mm (removed symmetrically from panel).
+        fillet_radius: Reserved for API parity with cut_slit; currently unused.
+        tolerance: Model tolerance (uses doc tolerance if None).
+
+    Returns:
+        Tuple of (mesh, side_a_edges, side_b_edges, surface_a, surface_b).
+        side_a/b are mesh topology edge indices on each cut plane.
+        surface_a/b are single-face Breps of the two offset cut planes.
+
+    Raises:
+        BrepSlitError: If mesh boolean difference fails.
+    """
+    if tolerance is None:
+        tolerance = sc.doc.ModelAbsoluteTolerance
+
+    mesh_in = _coerce_mesh(splint_mesh)
+    if mesh_in is None or not mesh_in.IsValid:
+        raise BrepSlitError("Input splint mesh is None/uncoercible or invalid")
+    if slit_panel is None:
+        raise BrepSlitError("Slit panel is None")
+
+    log("=" * 60)
+    log("CUT SLIT MESH: thickness={:.3f}mm, fillet_r={:.3f}mm, tol={:.4f}".format(
+        slit_thickness, fillet_radius, tolerance))
+    log("=" * 60)
+    log("Mesh input: closed={}, verts={}, faces={}, naked_topo_edges={}".format(
+        bool(mesh_in.IsClosed), mesh_in.Vertices.Count, mesh_in.Faces.Count,
+        _count_naked_topology_edges(mesh_in)))
+
+    if fillet_radius not in (None, 0.0):
+        log("Note: cut_slit_mesh currently ignores fillet_radius (kept for API parity)")
+
+    # Step 1: Build a solid cutter from the slit panel, same as Brep path.
+    cutter_brep = _thicken_surface(slit_panel, slit_thickness)
+    if cutter_brep is None:
+        raise BrepSlitError("Failed to create slit cutter from panel")
+
+    bb_mesh = mesh_in.GetBoundingBox(True)
+    bb_cutter = cutter_brep.GetBoundingBox(True)
+    overlap = not (
+        bb_mesh.Min.X > bb_cutter.Max.X or bb_cutter.Min.X > bb_mesh.Max.X or
+        bb_mesh.Min.Y > bb_cutter.Max.Y or bb_cutter.Min.Y > bb_mesh.Max.Y or
+        bb_mesh.Min.Z > bb_cutter.Max.Z or bb_cutter.Min.Z > bb_mesh.Max.Z
+    )
+    if not overlap:
+        raise BrepSlitError("Slit cutter does not overlap splint mesh")
+
+    # Step 2: Mesh the cutter at a resolution that respects narrow slit widths.
+    cutter_edge_length = max(slit_thickness * 0.25, tolerance * 4.0)
+    cutter_mesh = _mesh_from_brep(cutter_brep, cutter_edge_length)
+    if cutter_mesh is None:
+        raise BrepSlitError("Failed to mesh slit cutter for mesh boolean")
+
+    # Step 3: Mesh boolean difference.
+    log("Subtracting slit cutter from mesh via mesh boolean...")
+    result_mesh, method = _mesh_boolean_difference(mesh_in, cutter_mesh)
+    if result_mesh is None:
+        raise BrepSlitError("Mesh boolean difference failed for slit operation")
+
+    try:
+        result_mesh.Faces.CullDegenerateFaces()
+    except Exception:
+        pass
+    try:
+        result_mesh.Vertices.CullUnused()
+    except Exception:
+        pass
+    try:
+        result_mesh.Normals.ComputeNormals()
+    except Exception:
+        pass
+    try:
+        result_mesh.Compact()
+    except Exception:
+        pass
+
+    log("Mesh boolean: method={}, closed={}, verts={}, faces={}, naked_topo_edges={}".format(
+        method,
+        bool(result_mesh.IsClosed),
+        result_mesh.Vertices.Count,
+        result_mesh.Faces.Count,
+        _count_naked_topology_edges(result_mesh),
+    ))
+
+    # Step 4: Build offset panel surfaces and classify new slit edges by plane.
+    if isinstance(slit_panel, rg.Brep):
+        srf = slit_panel.Faces[0].UnderlyingSurface()
+    elif isinstance(slit_panel, rg.Surface):
+        srf = slit_panel
+    else:
+        raise BrepSlitError("Slit panel must be a Surface or single-face Brep")
+
+    slit_center = srf.PointAt(srf.Domain(0).Mid, srf.Domain(1).Mid)
+    slit_normal = srf.NormalAt(srf.Domain(0).Mid, srf.Domain(1).Mid)
+    slit_normal.Unitize()
+    half = slit_thickness / 2.0
+
+    surface_a = srf.ToBrep()
+    surface_b = srf.ToBrep()
+    surface_a.Transform(rg.Transform.Translation(slit_normal * half))
+    surface_b.Transform(rg.Transform.Translation(slit_normal * (-half)))
+
+    side_a, side_b = _find_slit_topology_edges(
+        result_mesh, mesh_in, slit_normal, slit_center, slit_thickness, tolerance)
+
+    if not side_a and not side_b:
+        log("WARNING: no new slit topology edges detected from mesh cut")
+
+    log("=" * 60)
+    log("SLIT MESH COMPLETE")
+    log("=" * 60)
+    return result_mesh, side_a, side_b, surface_a, surface_b
