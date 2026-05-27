@@ -202,7 +202,6 @@ export class Processor {
           params: job?.inputParameters,
           metadata: {
             designName: job?.designName,
-            jobNote: job?.jobNote,
             jobLabel: job?.jobLabel,
             objectId: job?.objectId
           }
@@ -353,6 +352,13 @@ export class Processor {
           err?.cause?.code === 'ECONNREFUSED' ||
           errorMessage.includes('ECONNREFUSED');
         
+        // Server dropped the connection mid-request (restart, deploy, brief outage)
+        const isConnectionReset =
+          err?.code === 'ECONNRESET' ||
+          err?.cause?.code === 'ECONNRESET' ||
+          errorMessage.includes('ECONNRESET') ||
+          errorMessage.includes('socket hang up');
+        
         const isTimeout = 
           err?.code === 'ETIMEDOUT' ||
           err?.code === 'ECONNABORTED' ||
@@ -366,6 +372,8 @@ export class Processor {
         // Log appropriate message based on error type
         if (isConnectionRefused) {
           this.logger.warn({ errorCode, errorMessage }, 'Server is down or unreachable (ECONNREFUSED) - will retry');
+        } else if (isConnectionReset) {
+          this.logger.warn({ errorCode }, 'Server dropped connection (ECONNRESET) - will retry');
         } else if (isTimeout) {
           this.logger.warn({ 
             errorCode, 
@@ -748,7 +756,6 @@ export class Processor {
       params: job.inputParameters,
       metadata: {
         designName: job.designName,
-        jobNote: job.JobNote,
         objectId: job.objectId,
       }
     };
@@ -895,7 +902,6 @@ export class Processor {
       params: job.inputParameters,
       metadata: {
         designName: job.designName,
-        jobNote: job.JobNote,
         objectId,
       }
     };
