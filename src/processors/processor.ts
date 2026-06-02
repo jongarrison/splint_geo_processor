@@ -2,6 +2,7 @@ import type pino from 'pino';
 import axios, { AxiosInstance } from 'axios';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execSync } from 'node:child_process';
 import { sleep } from '../utils/sleep.js';
 import type { AppConfig } from '../config.js';
 import { runPipeline, executeRhinoCommand, ensureRhinoRunning } from './pipeline.js';
@@ -292,6 +293,27 @@ export class Processor {
               this.logger.info({ metaPath }, 'Read mesh metadata');
             } catch (metaErr: any) {
               this.logger.warn({ error: metaErr?.message }, 'Failed to read mesh metadata');
+            }
+          }
+
+          // Inject generator_version (git commit hash) into mesh metadata
+          if (meshMetadata) {
+            try {
+              let generatorVersion = 'unknown';
+              try {
+                const repoDir = path.resolve(this.config.ghScriptsDir, '..');
+                generatorVersion = execSync('git rev-parse --short HEAD', { cwd: repoDir, timeout: 5000 })
+                  .toString()
+                  .trim();
+              } catch (gitErr: any) {
+                this.logger.warn({ error: gitErr?.message }, 'Failed to get git version');
+              }
+              const meta = JSON.parse(meshMetadata);
+              meta.generator_version = generatorVersion;
+              meshMetadata = JSON.stringify(meta, null, 2);
+              this.logger.info({ generatorVersion }, 'Injected generator_version into mesh metadata');
+            } catch (injectErr: any) {
+              this.logger.warn({ error: injectErr?.message }, 'Failed to inject generator_version into mesh metadata');
             }
           }
           
