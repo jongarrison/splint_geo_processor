@@ -608,3 +608,157 @@ def trim_surface_with_direction(trim_surfaces, input_surface, keep_direction):
     log("FeatureIdentification.trim_surface_with_direction: Complete")
     return current
 
+
+def is_brep_intersected_by_curve(brep, curve):
+    """
+    Test whether a curve intersects (touches or crosses) a brep's surface.
+
+    Args:
+        brep: Rhino.Geometry.Brep to test against
+        curve: Rhino.Geometry.Curve to test
+
+    Returns:
+        bool: True if any intersection points or overlap curves exist
+    """
+    if brep is None or curve is None:
+        return False
+    tolerance = 0.001
+    success, overlap_curves, intersect_points = rg.Intersect.Intersection.CurveBrep(
+        curve, brep, tolerance)
+    if not success:
+        return False
+    return len(overlap_curves) > 0 or len(intersect_points) > 0
+
+
+def rotate_geometry(geometry, rotation_plane, rotation_origin_point, degrees):
+    """
+    Return a rotated copy of geometry around an axis defined by rotation_plane's
+    normal, anchored at rotation_origin_point.
+
+    Args:
+        geometry: Any Rhino.Geometry.GeometryBase subclass (Curve, Brep, etc.)
+        rotation_plane: Rhino.Geometry.Plane whose Normal defines the rotation axis
+        rotation_origin_point: Rhino.Geometry.Point3d centre of rotation
+        degrees: float rotation angle in degrees (positive = counter-clockwise
+                 when looking opposite to the plane normal)
+
+    Returns:
+        A new transformed copy of geometry, same type as input
+    """
+    import math
+    angle_radians = math.radians(degrees)
+    xform = rg.Transform.Rotation(angle_radians, rotation_plane.Normal, rotation_origin_point)
+    geo_copy = geometry.Duplicate()
+    geo_copy.Transform(xform)
+    return geo_copy
+
+
+def find_non_intersecting_curve_rotation(
+        input_brep, input_curve,
+        rotation_origin_point, rotation_plane,
+        test_rotation_degrees):
+    """
+    Rotate input_curve through each value in test_rotation_degrees (in order)
+    and return the first rotated curve that does not intersect input_brep.
+
+    Args:
+        input_brep: Rhino.Geometry.Brep to test against
+        input_curve: Rhino.Geometry.Curve to rotate and test
+        rotation_origin_point: Rhino.Geometry.Point3d centre of rotation
+        rotation_plane: Rhino.Geometry.Plane whose Normal defines the rotation axis
+        test_rotation_degrees: list of float degree values to try, in order
+
+    Returns:
+        Rhino.Geometry.Curve: The first rotated curve that clears input_brep,
+        or None if no candidate passes.
+    """
+    log("FeatureIdentification.find_non_intersecting_curve_rotation: {} candidates".format(
+        len(test_rotation_degrees)))
+
+    for degrees in test_rotation_degrees:
+        rotated = rotate_geometry(input_curve, rotation_plane, rotation_origin_point, degrees)
+        if not is_brep_intersected_by_curve(input_brep, rotated):
+            log("  Found non-intersecting rotation at {:.2f} degrees".format(degrees))
+            return rotated
+        log("  {:.2f} degrees: still intersecting".format(degrees))
+
+    log("  No non-intersecting rotation found")
+    return None
+
+
+def nudge_line_to_brep(input_line, input_brep, input_line_sample_count,
+                       move_direction, output_nudge_motion):
+    """
+    Translate input_line as close as possible to input_brep by ray-casting from
+    sample points along the line in move_direction, then apply a final nudge offset.
+
+    Sample points are obtained by dividing input_line into input_line_sample_count
+    equal intervals (yielding count+1 points including endpoints). A ray is shot
+    from each sample point in move_direction. Of the rays that hit input_brep, the
+    shortest intersection distance is used to translate the whole line so its nearest
+    sampled point lands on the brep surface. output_nudge_motion is then applied as
+    an additional translation.
+
+    Args:
+        input_line: rg.LineCurve to move
+        input_brep: rg.Brep to move toward
+        input_line_sample_count: int - number of division intervals along the line
+        move_direction: rg.Vector3d - direction to shoot rays (should point toward brep)
+        output_nudge_motion: rg.Vector3d - additional offset applied after moving to brep
+
+    Returns:
+        rg.LineCurve: Moved and nudged copy of input_line
+
+    Raises:
+        FeatureIdentificationError: If move_direction is zero-length or no rays hit the brep
+    """
+    if input_line is None:
+        raise FeatureIdentificationError("input_line is None")
+    if input_brep is None:
+        raise FeatureIdentificationError("input_brep is None")
+
+    ray_direction = rg.Vector3d(move_direction)
+    if not ray_direction.Unitize():
+        raise FeatureIdentificationError("move_direction has zero length")
+
+    log("FeatureIdentification.nudge_line_to_brep: {} sample intervals".format(
+        input_line_sample_count))
+
+    # Sample points along the line (count+1 points including endpoints)
+    t_params = input_line.DivideByCount(input_line_sample_count, True)
+    if t_params is None or len(t_params) == 0:
+        raise FeatureIdentificationError("Failed to divide input_line into sample points")
+
+    sample_points = [input_line.PointAt(t) for t in t_params]
+    log("  {} sample points".format(len(sample_points)))
+
+    # Shoot rays and collect distances where they hit the brep
+    hit_distances = []
+    for pt in sample_points:
+        ray = rg.Ray3d(pt, ray_direction)
+        hits = rg.Intersect.Intersection.RayShoot(ray, [input_brep], 1)
+        if hits and len(hits) > 0:
+            dist = pt.DistanceTo(hits[0])
+            hit_distances.append(dist)
+            log("  Ray ({:.2f},{:.2f},{:.2f}): hit dist={:.4f}".format(
+                pt.X, pt.Y, pt.Z, dist))
+        else:
+            log("  Ray ({:.2f},{:.2f},{:.2f}): no hit".format(pt.X, pt.Y, pt.Z))
+
+    if not hit_distances:
+        raise FeatureIdentificationError(
+            "No sample rays from input_line intersected input_brep in move_direction")
+
+    # Move by the shortest hit distance so the nearest point just reaches the brep
+    min_distance = min(hit_distances)
+    log("  Moving by min distance: {:.4f}".format(min_distance))
+
+    total_translation = rg.Transform.Translation(
+        ray_direction * min_distance + output_nudge_motion)
+
+    result = input_line.DuplicateCurve()
+    result.Transform(total_translation)
+
+    log("FeatureIdentification.nudge_line_to_brep: Complete")
+    return result
+
