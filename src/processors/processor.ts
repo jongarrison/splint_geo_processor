@@ -317,14 +317,16 @@ export class Processor {
             }
           }
           
-          // Log file sizes for debugging
+          // Log file sizes for debugging (total must stay under server body size limit)
+          const totalUploadBytes = geometrySize + (printSize || 0) + processingLog.length + (meshMetadata?.length || 0);
           this.logger.info({
             geometryFileSize: geometrySize,
             geometryFileName: geometryName,
             printFileSize: printSize || 0,
             printFileName: printName || null,
             processingLogSize: processingLog.length,
-            hasMeshMetadata: !!meshMetadata,
+            meshMetadataSize: meshMetadata?.length || 0,
+            totalUploadBytes,
           }, 'Uploading files via multipart');
 
           // Wrap reportSuccess in try-catch to prevent network errors from killing the process
@@ -334,8 +336,13 @@ export class Processor {
             this.logger.error({ 
               error: reportErr?.message,
               code: reportErr?.code,
-              stack: reportErr?.stack 
             }, 'Failed to report success - job completed but upload failed');
+            // Mark the job as failed on the server so it doesn't stay stuck in PROCESSING
+            try {
+              await this.reportResult(idPart, false, `Upload failed: ${reportErr?.message || 'Unknown error'}`, processingLog);
+            } catch (reportFailErr: any) {
+              this.logger.error({ error: reportFailErr?.message }, 'Failed to report upload failure to server');
+            }
           }
         } catch (procErr: any) {
           this.logger.error({ err: procErr?.message }, 'Processing failed');
@@ -477,6 +484,7 @@ export class Processor {
       }
     } catch (err) {
       this.logger.error({ err }, 'Error reporting result');
+      throw err; // rethrow so caller can report failure to server
     }
   }
 
