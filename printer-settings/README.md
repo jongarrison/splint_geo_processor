@@ -52,10 +52,8 @@ Active files used by the slicer pipeline: `filament-final.json`, `machine-final.
 
 | File | Setting | Old | New | Reason |
 |---|---|---|---|---|
-| filament | `nozzle_temperature_initial_layer` | 220 | 225 | Slightly hotter first layer improves flow into bed texture |
-| filament | `filament_flow_ratio` | 0.98 | 1.0 | Full extrusion on first layer improves squish and adhesion |
-| process | `initial_layer_speed` | 50 | 15 | Slow first layer is the biggest lever for small-footprint adhesion |
-| process | `initial_layer_infill_speed` | 60 | 15 | Match perimeter speed on first layer |
+| process | `initial_layer_speed` | 50 | 25 | Slow first layer improves adhesion; 15 mm/s was too slow — caused poor flow and worse adhesion |
+| process | `initial_layer_infill_speed` | 60 | 25 | Match perimeter speed on first layer |
 | process | `initial_layer_acceleration` | 500 | 200 | Reduces jerk/vibration that lifts small parts before they bond |
 | process | `skirt_loops` | 0 | 1 | Single skirt loop primes nozzle without touching the part |
 
