@@ -43,6 +43,28 @@
     /Users/jon/Library/Application Support/BambuStudio/system/BBL/filament/Generic PLA @base.json
 
 
+## First Layer Adhesion — Review and Recommendations (2026-06-04)
+
+Our splints have small footprints, making first-layer adhesion critical. No brims — finish quality matters.
+Active files used by the slicer pipeline: `filament-final.json`, `machine-final.json`, `process-final.json`.
+
+### Changes applied
+
+| File | Setting | Old | New | Reason |
+|---|---|---|---|---|
+| filament | `nozzle_temperature_initial_layer` | 220 | 225 | Slightly hotter first layer improves flow into bed texture |
+| filament | `filament_flow_ratio` | 0.98 | 1.0 | Full extrusion on first layer improves squish and adhesion |
+| process | `initial_layer_speed` | 50 | 15 | Slow first layer is the biggest lever for small-footprint adhesion |
+| process | `initial_layer_infill_speed` | 60 | 15 | Match perimeter speed on first layer |
+| process | `initial_layer_acceleration` | 500 | 200 | Reduces jerk/vibration that lifts small parts before they bond |
+| process | `skirt_loops` | 0 | 1 | Single skirt loop primes nozzle without touching the part |
+
+### Temperatures confirmed correct for PLA on PEI textured plate
+- Nozzle: 220°C (225°C first layer after change above)
+- Bed: 60°C — appropriate for PLA on textured PEI
+
+---
+
 ## Let's make fully expanded files, based on the system settings, so that we have full control over the files
 
   * JQ command for merging files:
