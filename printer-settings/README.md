@@ -57,6 +57,13 @@ Active files used by the slicer pipeline: `filament-final.json`, `machine-final.
 | process | `initial_layer_acceleration` | 500 | 200 | Reduces jerk/vibration that lifts small parts before they bond |
 | process | `skirt_loops` | 0 | 1 | Single skirt loop primes nozzle without touching the part |
 
+### What didn't work (2026-06-04)
+
+Tried simultaneously: `nozzle_temperature_initial_layer` 225°C, `filament_flow_ratio` 1.0, `initial_layer_speed` 15 mm/s.
+Result: **worse adhesion** — even the purge line failed to stick. Likely cause: PLA at higher temp moving very slowly becomes too fluid, slumps instead of pressing into the bed texture, reducing actual contact area. Hotter + slower is not always better.
+
+Reverted nozzle temp and flow to originals. Settled on 25 mm/s as a middle ground for first layer speed.
+
 ### Temperatures confirmed correct for PLA on PEI textured plate
 - Nozzle: 220°C (225°C first layer after change above)
 - Bed: 60°C — appropriate for PLA on textured PEI
