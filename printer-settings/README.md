@@ -55,7 +55,24 @@ Active files used by the slicer pipeline: `filament-final.json`, `machine-final.
 | process | `initial_layer_speed` | 50 | 25 | Slow first layer improves adhesion; 15 mm/s was too slow — caused poor flow and worse adhesion |
 | process | `initial_layer_infill_speed` | 60 | 25 | Match perimeter speed on first layer |
 | process | `initial_layer_acceleration` | 500 | 200 | Reduces jerk/vibration that lifts small parts before they bond |
-| process | `skirt_loops` | 0 | 1 | Single skirt loop primes nozzle without touching the part |
+| process | `initial_layer_acceleration` | 500 | 200 | Reduces jerk/vibration that lifts small parts before they bond |
+| process | `skirt_loops` | 0 | 3 | 3-ring skirt primes nozzle without touching the part; single ring fragments on removal |
+
+### splint_client MQTT print command — pre-print calibrations (2026-06-04)
+
+The MQTT `project_file` command sent to the printer includes calibration flags. These are set in
+`splint_client/src/main.js` in `startPrintInternalWithProgress()`:
+
+```js
+bedLeveling: true        // bed mesh leveling — always on, was in every historical print
+flowCalibration: true    // flow rate calibration
+vibrationCalibration: true  // resonance/vibration compensation
+```
+
+All three are now hardcoded `true`. The UI previously had a "Run printer calibration" checkbox that
+toggled these; the checkbox was removed and calibrations are always enabled. Historical log analysis
+confirmed all three were `true` in successful prints. The P1S appears to use its own internal logic
+to decide what it actually runs regardless of these flags — they are requests, not guarantees.
 
 ### What didn't work (2026-06-04)
 
