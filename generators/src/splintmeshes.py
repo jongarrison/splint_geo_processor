@@ -116,8 +116,12 @@ def _get_stl_settings():
 
 def _get_3mf_settings():
     """3MF export command-line settings."""
+    # _UseSimpleDialog=_Yes bypasses the detailed 3MF options dialog.
+    # Without it, Rhino opens the dialog but _Enter does not navigate it,
+    # causing a silent macro abort (RunScript returns True in ~0ms, no file).
+    # Same pattern as the STL fix -- see _get_stl_settings comments.
     e_str = "_ExportUnfinishedObjects=_Yes "
-    e_str += "_UseSimpleDialog=_No "
+    e_str += "_UseSimpleDialog=_Yes "
     e_str += "_Enter"
     return e_str, "3mf"
 

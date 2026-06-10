@@ -595,17 +595,18 @@ export class Processor {
       headers: uploadForm.getHeaders(),
       maxBodyLength: Infinity,
       maxContentLength: Infinity,
+      timeout: 120000, // 2 minutes for large file uploads
     });
     
     if (uploadResp.status < 200 || uploadResp.status >= 300) {
       this.logger.error({ status: uploadResp.status, data: uploadResp.data }, 'Failed to upload files');
-      return;
+      throw new Error(`Upload failed with status ${uploadResp.status}: ${JSON.stringify(uploadResp.data)}`);
     }
     
     const uploads = uploadResp.data.uploads;
     if (!uploads || uploads.length === 0) {
       this.logger.error('No uploads returned');
-      return;
+      throw new Error('Upload succeeded but no file URLs returned');
     }
     
     // Find geometry and print file uploads
@@ -614,7 +615,7 @@ export class Processor {
     
     if (!geometryUpload) {
       this.logger.error('Geometry file upload not found in response');
-      return;
+      throw new Error('Geometry file upload not found in server response');
     }
     
     // Step 2: Report result with blob URLs
