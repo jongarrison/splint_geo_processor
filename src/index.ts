@@ -119,9 +119,19 @@ function writeCrashLog(label: string, err: unknown): void {
     const home = process.env.HOME || process.env.USERPROFILE || '.';
     const logsDir = path.join(home, 'SplintFactoryFiles', 'logs');
     fs.mkdirSync(logsDir, { recursive: true });
+    const crashLog = path.join(logsDir, 'crashes.log');
+    // Cap crashes.log at ~1 MB with single-generation rollover to .old
+    try {
+      const stat = fs.statSync(crashLog);
+      if (stat.size > 1024 * 1024) {
+        const oldLog = path.join(logsDir, 'crashes.log.old');
+        try { fs.unlinkSync(oldLog); } catch { /* may not exist */ }
+        fs.renameSync(crashLog, oldLog);
+      }
+    } catch { /* file may not exist yet */ }
     const e = err as any;
     const line = `${new Date().toISOString()} [${label}] ${e?.stack || e?.message || JSON.stringify(e)}\n`;
-    fs.appendFileSync(path.join(logsDir, 'crashes.log'), line);
+    fs.appendFileSync(crashLog, line);
   } catch {
     // Last resort: stderr only
   }

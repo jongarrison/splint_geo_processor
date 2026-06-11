@@ -9,10 +9,18 @@ set "REPO_DIR=%~dp0.."
 set "ENTRY=%REPO_DIR%\dist\index.js"
 set "LOG_DIR=%USERPROFILE%\SplintFactoryFiles\logs"
 set "WRAPPER_LOG=%LOG_DIR%\wrapper.log"
+set "WRAPPER_LOG_OLD=%LOG_DIR%\wrapper.log.old"
 
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
 :loop
+REM Cap wrapper.log at ~1 MB by rolling to .old (single-generation rotation)
+if exist "%WRAPPER_LOG%" (
+    for %%F in ("%WRAPPER_LOG%") do if %%~zF GTR 1048576 (
+        if exist "%WRAPPER_LOG_OLD%" del "%WRAPPER_LOG_OLD%"
+        move /Y "%WRAPPER_LOG%" "%WRAPPER_LOG_OLD%" >nul
+    )
+)
 echo [%date% %time%] Starting node %ENTRY% >> "%WRAPPER_LOG%"
 "C:\Program Files\nodejs\node.exe" "%ENTRY%"
 set "EXITCODE=%ERRORLEVEL%"
