@@ -1,4 +1,5 @@
 import path from 'node:path';
+import fs from 'node:fs';
 import dotenv from 'dotenv';
 
 type CliArgs = {
@@ -96,21 +97,54 @@ async function main() {
     return;
   }
 
-  await processor.run();
+  // Poll mode: self-restart loop so a crash doesn't leave the process dead
+  while (true) {
+    try {
+      await processor.run();
+      break; // run() is an infinite loop; only breaks on clean exit
+    } catch (err: any) {
+      logger.error({
+        err: err?.message,
+        code: err?.code,
+      }, 'processor.run() crashed - restarting in 30 seconds');
+      await new Promise(resolve => setTimeout(resolve, 30_000));
+    }
+  }
 }
 
-// Main error handler with retry logic
-main().catch(async (err) => {
-  // Log to stderr for system logs
-  console.error({
-    error: err?.message,
-    code: err?.code,
-    stack: err?.stack,
-    name: err?.name,
-  });
-  console.error('FATAL: Main process crashed unexpectedly');
-  console.error('FATAL ERROR:', err);
-  console.error('Process will exit with code 1');
-  
+// Synchronously write crash details to a file before exit. pino's async transport
+// may not flush in time for uncaughtException; this file is our reliable post-mortem.
+function writeCrashLog(label: string, err: unknown): void {
+  try {
+    const home = process.env.HOME || process.env.USERPROFILE || '.';
+    const logsDir = path.join(home, 'SplintFactoryFiles', 'logs');
+    fs.mkdirSync(logsDir, { recursive: true });
+    const e = err as any;
+    const line = `${new Date().toISOString()} [${label}] ${e?.stack || e?.message || JSON.stringify(e)}\n`;
+    fs.appendFileSync(path.join(logsDir, 'crashes.log'), line);
+  } catch {
+    // Last resort: stderr only
+  }
+}
+
+// For truly unexpected errors that escape all try/catch blocks, exit cleanly so the
+// wrapper script can restart the process. The self-restart loop in main() handles
+// normal run() crashes; these handlers are last-resort for unknown bad states.
+process.on('uncaughtException', (err) => {
+  console.error('FATAL: Uncaught exception:', err?.message || err);
+  writeCrashLog('uncaughtException', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('FATAL: Unhandled rejection:', reason);
+  writeCrashLog('unhandledRejection', reason);
+  process.exit(1);
+});
+
+// Startup errors (config, env loading) are still fatal
+main().catch((err) => {
+  console.error('FATAL: Startup failed:', err?.message || err);
+  writeCrashLog('startup', err);
   process.exit(1);
 });

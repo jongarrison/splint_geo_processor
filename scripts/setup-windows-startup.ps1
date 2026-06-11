@@ -54,24 +54,27 @@ if ($existingTask) {
 Write-Host "Set ENV_MODE=production as persistent user environment variable" -ForegroundColor Green
 Write-Host ""
 
-# Create action - run node with the built JavaScript
-# ENV_MODE is now a persistent user env var; no need to pass it inline
-$nodePath = (Get-Command node).Source
-$scriptPath = Join-Path $repoPath "dist\index.js"
+# Create action - run the wrapper .cmd, which loops node forever so the process
+# self-restarts on any crash without depending on Task Scheduler RestartCount.
+$wrapperPath = Join-Path $repoPath "scripts\run-processor.cmd"
 $action = New-ScheduledTaskAction `
-    -Execute $nodePath `
-    -Argument "`"$scriptPath`"" `
+    -Execute "cmd.exe" `
+    -Argument "/c `"$wrapperPath`"" `
     -WorkingDirectory $repoPath
 
-# Create trigger - at user logon
+# Create trigger - at user logon. The wrapper handles per-process restart; this
+# trigger only needs to start the wrapper once after logon.
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
 
 # Create settings
+# Note: RunOnlyIfNetworkAvailable is intentionally omitted - the process handles
+# network outages gracefully and should not be prevented from running due to
+# connectivity issues. RestartCount is a safety net only; the wrapper does the
+# real restart work.
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
-    -RunOnlyIfNetworkAvailable `
     -DontStopOnIdleEnd `
     -ExecutionTimeLimit (New-TimeSpan -Days 0) `
     -MultipleInstances IgnoreNew `
@@ -112,12 +115,12 @@ Write-Host "Task Details:" -ForegroundColor Cyan
 Write-Host "  Name: $taskName" -ForegroundColor Gray
 Write-Host "  Trigger: At user logon" -ForegroundColor Gray
 Write-Host "  User: $currentUser" -ForegroundColor Gray
-Write-Host "  Node: $nodePath" -ForegroundColor Gray
-Write-Host "  Script: $scriptPath" -ForegroundColor Gray
+Write-Host "  Wrapper: $wrapperPath" -ForegroundColor Gray
 Write-Host ""
 Write-Host "Management Commands:" -ForegroundColor Cyan
 Write-Host "  Check status:  Get-ScheduledTask SplintGeoProcessor" -ForegroundColor Gray
 Write-Host "  Start task:    Start-ScheduledTask SplintGeoProcessor" -ForegroundColor Gray
 Write-Host "  Stop task:     Stop-ScheduledTask SplintGeoProcessor" -ForegroundColor Gray
-Write-Host "  View logs:     Get-Content ~\SplintFactoryFiles\logs\geo-processor.log -Tail 50" -ForegroundColor Gray
+Write-Host "  View logs:     Get-Content ~\SplintFactoryFiles\logs\processor-(date).log -Tail 50" -ForegroundColor Gray
+Write-Host "  Wrapper log:   Get-Content ~\SplintFactoryFiles\logs\wrapper.log -Tail 20" -ForegroundColor Gray
 Write-Host ""

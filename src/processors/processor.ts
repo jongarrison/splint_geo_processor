@@ -396,6 +396,7 @@ export class Processor {
         const isNetworkError = 
           err?.code === 'ENOTFOUND' ||
           err?.code === 'ENETUNREACH' ||
+          err?.code === 'EHOSTUNREACH' ||
           err?.code === 'EAI_AGAIN';
         
         // Log appropriate message based on error type
@@ -426,8 +427,12 @@ export class Processor {
       }
       
       // Run periodic cleanup (once or twice daily)
-      await this.runCleanupIfNeeded();
-      
+      try {
+        await this.runCleanupIfNeeded();
+      } catch (cleanupErr: any) {
+        this.logger.warn({ err: cleanupErr?.message }, 'Cleanup failed - continuing');
+      }
+
       // throttle loop regardless of outcome
       await sleep(intervalMs);
     }

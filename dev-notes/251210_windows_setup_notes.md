@@ -102,7 +102,11 @@ Start-Process "C:\Program Files\Rhino 9 WIP\System\Rhino.exe"
 **Note:** Windows services cannot launch GUI applications. We use a scheduled task instead,
 which runs in the user's interactive session.
 
-1. Run as Administrator:
+1. Run as Administrator (ExecutionPolicy Bypass is required for Git Bash SSH sessions):
+   ```powershell
+   powershell.exe -ExecutionPolicy Bypass -File .\scripts\setup-windows-startup.ps1
+   ```
+   Or from an interactive PowerShell session:
    ```powershell
    .\scripts\setup-windows-startup.ps1
    ```
@@ -121,7 +125,7 @@ $task.Settings | Select-Object ExecutionTimeLimit
 
 If not set correctly, fix with:
 ```powershell
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
 Set-ScheduledTask -TaskName SplintGeoProcessor -Settings $settings
 ```
 

@@ -19,10 +19,12 @@ ssh ${WINDOWS_HOST} "cd ${REMOTE_DIR} && git pull"
 echo "📦 Installing dependencies and building..."
 ssh ${WINDOWS_HOST} "cd ${REMOTE_DIR} && npm install && npm run build"
 
-# Kill any running node processes
-# Need to use cmd.exe since SSH opens Git Bash by default
+# Stop the scheduled task first so the wrapper doesn't relaunch node
 echo "🛑 Stopping running process, if necessary..."
-ssh ${WINDOWS_HOST} "cmd.exe /c 'taskkill /F /IM node.exe 2>nul || echo No node.exe process found'"
+ssh ${WINDOWS_HOST} "powershell.exe -Command 'Stop-ScheduledTask -TaskName SplintGeoProcessor -ErrorAction SilentlyContinue'"
+sleep 2
+# Kill any remaining processes (wrapper cmd loop and child node)
+ssh ${WINDOWS_HOST} "cmd.exe /c 'taskkill /F /FI \"IMAGENAME eq cmd.exe\" /FI \"WINDOWTITLE eq run-processor*\" 2>nul & taskkill /F /IM node.exe 2>nul & exit 0'"
 # Give it a moment to fully terminate
 sleep 2
 
