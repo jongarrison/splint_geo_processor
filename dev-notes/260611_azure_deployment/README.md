@@ -17,7 +17,7 @@ Same wrapper-based design as `lazyboy2000.local`:
 
 | Resource    | Value                                    | Why                                   |
 |-------------|------------------------------------------|---------------------------------------|
-| VM size     | `Standard_D4s_v5` (4 vCPU, 16 GB RAM)    | Matches Rhino's recommended minimum   |
+| VM size     | `Standard_D4s_v7` (4 vCPU, 16 GB RAM)    | Matches Rhino's recommended minimum   |
 | OS          | Windows Server 2022 Datacenter Azure Ed. | Standard supported Windows base       |
 | OS disk     | 128 GB Premium SSD                       | Rhino + Bambu Studio + archive room   |
 | GPU         | None                                     | Headless geometry shouldn't need one  |
@@ -25,6 +25,24 @@ Same wrapper-based design as `lazyboy2000.local`:
 | Networking  | RDP+SSH locked to provisioning IP        | Add other IPs in portal as needed     |
 
 Approximate cost: ~$140/mo on-demand. Deallocate when not in use to stop billing.
+
+### SKU availability
+
+Azure capacity varies by region. If `provision-vm.sh` fails with
+`SkuNotAvailable`, find an alternative 4-vCPU SKU with no restrictions:
+
+```bash
+az vm list-skus --location <region> --resource-type virtualMachines \
+  --query "[?starts_with(name,'Standard_D4') && length(restrictions)==\`0\`].name" -o tsv
+```
+
+Then override:
+```bash
+VM_SIZE=Standard_D4as_v5 ./scripts/azure/provision-vm.sh
+```
+
+Common fallbacks: `Standard_D4as_v5` (AMD), `Standard_D4ds_v7` (with local SSD),
+`Standard_D4s_v4` (older Intel, plentiful).
 
 ## Setup procedure
 

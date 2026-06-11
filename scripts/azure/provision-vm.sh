@@ -14,11 +14,18 @@
 set -e
 
 # ----- CONFIG -----
-VM_NAME="splintgeo1"
+VM_NAME="${VM_NAME:-splintgeo1}"
 RESOURCE_GROUP="${VM_NAME}-rg"
-REGION="eastus"
-VM_SIZE="Standard_D4s_v5"          # 4 vCPU, 16 GB RAM, ~$140/mo on-demand
-ADMIN_USERNAME="splintadmin"
+REGION="${REGION:-eastus}"
+# Default to D4s_v7 (4 vCPU, 16 GB RAM, Intel Sapphire Rapids) -- broadly
+# available in eastus. If you hit SkuNotAvailable, override:
+#   VM_SIZE=Standard_D4as_v5 ./scripts/azure/provision-vm.sh   (AMD, often plentiful)
+#   VM_SIZE=Standard_D4ds_v7 ./scripts/azure/provision-vm.sh   (with local SSD)
+# To list available 4-vCPU SKUs in your region:
+#   az vm list-skus --location <region> --resource-type virtualMachines \
+#     --query "[?starts_with(name,'Standard_D4') && length(restrictions)==\`0\`].name" -o tsv
+VM_SIZE="${VM_SIZE:-Standard_D4s_v7}"
+ADMIN_USERNAME="${ADMIN_USERNAME:-splintadmin}"
 OS_DISK_SIZE_GB=128
 IMAGE="MicrosoftWindowsServer:WindowsServer:2022-datacenter-azure-edition:latest"
 # ------------------
