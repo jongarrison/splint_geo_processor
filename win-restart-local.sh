@@ -22,11 +22,12 @@ npm run build
 
 # Stop the scheduled task first so the wrapper doesn't relaunch node mid-deploy.
 # Stop-ScheduledTask terminates the wrapper cmd.exe (and its node child).
+# Use `|| true` because PowerShell propagates non-zero exit when nothing matched.
 echo "🛑 Stopping scheduled task and running processes..."
-powershell.exe -NoProfile -Command 'Stop-ScheduledTask -TaskName SplintGeoProcessor -ErrorAction SilentlyContinue'
+powershell.exe -NoProfile -Command 'Stop-ScheduledTask -TaskName SplintGeoProcessor -ErrorAction SilentlyContinue' || true
 sleep 2
 # Belt-and-suspenders: kill any stray node that survived task stop
-powershell.exe -NoProfile -Command 'Stop-Process -Name node -Force -ErrorAction SilentlyContinue'
+powershell.exe -NoProfile -Command 'Get-Process -Name node -ErrorAction SilentlyContinue | Stop-Process -Force' || true
 sleep 1
 
 # Restart the scheduled task (relaunches the wrapper, which relaunches node)
