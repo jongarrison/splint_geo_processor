@@ -3,29 +3,36 @@
 #
 # Source: https://discourse.mcneel.com/ (Rhino on EC2 Windows Server thread)
 #
+# Windows re-stamps the Windows NT\CurrentVersion values on every boot, so
+# `-Action Apply` alone wears off. Use `-Action Persist` to also register an
+# AtStartup scheduled task that re-applies the values on every boot, BEFORE
+# the SplintGeoProcessor scheduled task (which is AtLogOn) fires Rhino.
+#
 # IMPORTANT:
-#   - Reboot required after applying.
-#   - Windows Update may revert ProductName/EditionID; re-run if Rhino breaks
-#     after a cumulative update.
-#   - This is NOT supported by McNeel.
+#   - Not officially supported by McNeel.
+#   - Reboot required for changes to take effect (and re-confirm persistence).
 #   - Run in elevated PowerShell.
 #
 # Usage:
-#   .\rhino-server-workaround.ps1                  # back up + apply (default)
-#   .\rhino-server-workaround.ps1 -Action Backup   # save current values only
-#   .\rhino-server-workaround.ps1 -Action Apply    # apply workaround values
-#   .\rhino-server-workaround.ps1 -Action Revert   # restore from backup file
+#   .\rhino-server-workaround.ps1                      # apply now (one-shot)
+#   .\rhino-server-workaround.ps1 -Action Backup       # snapshot current values
+#   .\rhino-server-workaround.ps1 -Action Apply        # apply workaround values
+#   .\rhino-server-workaround.ps1 -Action Persist      # apply + register boot task
+#   .\rhino-server-workaround.ps1 -Action Unpersist    # remove boot task only
+#   .\rhino-server-workaround.ps1 -Action Revert       # restore from backup + remove boot task
 
 #Requires -RunAsAdministrator
 
 param(
-    [ValidateSet('Apply', 'Backup', 'Revert')]
+    [ValidateSet('Apply', 'Backup', 'Revert', 'Persist', 'Unpersist')]
     [string]$Action = 'Apply',
 
     [string]$BackupFile = "$env:USERPROFILE\rhino-server-workaround-backup.json"
 )
 
 $ErrorActionPreference = 'Stop'
+
+$TaskName = 'RhinoServerWorkaround'
 
 $keys = @(
     @{ Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\ProductOptions';      Name = 'ProductType' },
@@ -78,10 +85,8 @@ function Apply-Workaround {
         Set-ItemProperty -Path $k.Path -Name $k.Name -Value $newVal
         Write-Host ("  {0,-18} -> {1}" -f $k.Name, $newVal) -ForegroundColor Green
     }
-
     Write-Host ""
-    Write-Host "Done. REBOOT the VM for the changes to take effect." -ForegroundColor Yellow
-    Write-Host "Revert with: .\rhino-server-workaround.ps1 -Action Revert" -ForegroundColor DarkGray
+    Write-Host "Done. REBOOT the VM for the changes to take full effect." -ForegroundColor Yellow
 }
 
 function Revert-Workaround {
@@ -99,8 +104,67 @@ function Revert-Workaround {
         Set-ItemProperty -Path $k.Path -Name $k.Name -Value $orig
         Write-Host ("  {0,-18} -> {1}" -f $k.Name, $orig) -ForegroundColor Green
     }
+
+    # Also remove the boot task if present
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        Write-Host "Removed boot task '$TaskName'." -ForegroundColor Green
+    }
+
     Write-Host ""
-    Write-Host "Done. REBOOT the VM for the changes to take effect." -ForegroundColor Yellow
+    Write-Host "Done. REBOOT the VM for the changes to take full effect." -ForegroundColor Yellow
+}
+
+function Persist-Workaround {
+    # Apply now first, so this boot is also covered
+    Apply-Workaround
+
+    # Build a single inline PowerShell command that re-applies the four values.
+    # Inlined (not referencing this script) so the task doesn't depend on the
+    # repo being checked out at any particular path.
+    $cmdParts = @()
+    foreach ($k in $keys) {
+        $newVal = $workaroundValues[$k.Name]
+        $cmdParts += "Set-ItemProperty -Path '$($k.Path)' -Name '$($k.Name)' -Value '$newVal' -ErrorAction SilentlyContinue"
+    }
+    $inlineCmd = $cmdParts -join '; '
+
+    $action = New-ScheduledTaskAction `
+        -Execute 'powershell.exe' `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$inlineCmd`""
+
+    # AtStartup fires during boot as SYSTEM, BEFORE any user logon. That guarantees
+    # this runs before the SplintGeoProcessor AtLogOn task launches Rhino.
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    }
+
+    Register-ScheduledTask -TaskName $TaskName `
+        -Action $action -Trigger $trigger `
+        -Principal $principal -Settings $settings `
+        -Description 'Re-apply Rhino-on-Server registry workaround at boot' | Out-Null
+
+    Write-Host ""
+    Write-Host "Boot task '$TaskName' registered (runs as SYSTEM AtStartup)." -ForegroundColor Green
+    Write-Host "Reboot to verify it fires before SplintGeoProcessor warms up Rhino." -ForegroundColor Yellow
+}
+
+function Unpersist-Workaround {
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        Write-Host "Removed boot task '$TaskName'." -ForegroundColor Green
+    } else {
+        Write-Host "Boot task '$TaskName' not present - nothing to remove." -ForegroundColor Yellow
+    }
 }
 
 Write-Host "Current values:" -ForegroundColor Cyan
@@ -110,7 +174,9 @@ Write-Host "Current values:" -ForegroundColor Cyan
 Write-Host ""
 
 switch ($Action) {
-    'Backup' { Save-Backup }
-    'Apply'  { Apply-Workaround }
-    'Revert' { Revert-Workaround }
+    'Backup'    { Save-Backup }
+    'Apply'     { Apply-Workaround }
+    'Revert'    { Revert-Workaround }
+    'Persist'   { Persist-Workaround }
+    'Unpersist' { Unpersist-Workaround }
 }
