@@ -25,5 +25,7 @@ echo [%date% %time%] Starting node %ENTRY% >> "%WRAPPER_LOG%"
 "C:\Program Files\nodejs\node.exe" "%ENTRY%"
 set "EXITCODE=%ERRORLEVEL%"
 echo [%date% %time%] node exited with code %EXITCODE%, restarting in 10s >> "%WRAPPER_LOG%"
-timeout /t 10 /nobreak >nul
+REM `ping` is used instead of `timeout` because Task Scheduler launches us without
+REM an interactive console, and `timeout` silently no-ops in that environment.
+ping -n 11 127.0.0.1 >nul
 goto loop
