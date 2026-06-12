@@ -20,17 +20,18 @@ echo "📦 Installing dependencies and building..."
 npm install
 npm run build
 
-# Stop the scheduled task first so the wrapper doesn't relaunch node mid-deploy
+# Stop the scheduled task first so the wrapper doesn't relaunch node mid-deploy.
+# Stop-ScheduledTask terminates the wrapper cmd.exe (and its node child).
 echo "🛑 Stopping scheduled task and running processes..."
-powershell.exe -Command 'Stop-ScheduledTask -TaskName SplintGeoProcessor -ErrorAction SilentlyContinue'
+powershell.exe -NoProfile -Command 'Stop-ScheduledTask -TaskName SplintGeoProcessor -ErrorAction SilentlyContinue'
 sleep 2
-# Kill both the wrapper (cmd.exe running run-processor) and node
-cmd.exe /c 'taskkill /F /FI "IMAGENAME eq cmd.exe" /FI "WINDOWTITLE eq run-processor*" 2>nul & taskkill /F /IM node.exe 2>nul & exit 0'
-sleep 2
+# Belt-and-suspenders: kill any stray node that survived task stop
+powershell.exe -NoProfile -Command 'Stop-Process -Name node -Force -ErrorAction SilentlyContinue'
+sleep 1
 
 # Restart the scheduled task (relaunches the wrapper, which relaunches node)
 echo "♻️  Restarting SplintGeoProcessor task..."
-powershell.exe -Command 'Start-ScheduledTask -TaskName SplintGeoProcessor'
+powershell.exe -NoProfile -Command 'Start-ScheduledTask -TaskName SplintGeoProcessor'
 
 # Check status
 echo "✅ Checking task status..."
