@@ -71,24 +71,43 @@ provisioned FQDN, sign in with `splintadmin` and the password from step 1.
 
 On the VM:
 1. Install **Rhino 8** from rhino3d.com.
-   - **Licensing caveat:** standalone Rhino licenses are tied to a hardware
-     fingerprint that changes if the VM is resized or redeployed. Use Cloud Zoo
-     (subscription) or a dedicated VM license. Confirm with McNeel that
-     unattended automated geometry generation in Azure is permitted under your
-     license type.
 2. Install **Bambu Studio** from bambulab.com.
 3. Open Grasshopper at least once and let plugins auto-install.
 
 ### 3. Bootstrap the VM (elevated PowerShell on the VM)
 
+You can either fetch the script directly from GitHub, or clone the repo first
+and run the local copy. Cloning first matches what the rest of the system
+expects (`C:\Users\splintadmin\work\splint_geo_processor`).
+
+**Option A: clone first (recommended)**
+
+In Git Bash on the VM:
+```bash
+mkdir -p /c/Users/splintadmin/work && cd /c/Users/splintadmin/work
+git clone https://github.com/jongarrison/splint_geo_processor.git
+```
+
+Then in elevated PowerShell:
 ```powershell
-# After the repo is publicly readable (or copy bootstrap-vm.ps1 manually):
+cd C:\Users\splintadmin\work\splint_geo_processor\scripts\azure
+.\bootstrap-vm.ps1
+```
+
+**Option B: fetch and run from GitHub**
+
+In elevated PowerShell:
+```powershell
 iwr -UseBasicParsing https://raw.githubusercontent.com/jongarrison/splint_geo_processor/main/scripts/azure/bootstrap-vm.ps1 | iex
 ```
 
-This installs Chocolatey, Node.js LTS, Git, OpenSSH Server (with Git Bash as
-default shell), sets `ENV_MODE=production`, and clones the repo to
-`C:\Users\splintadmin\work\splint_geo_processor`.
+Either way the script:
+- Installs Chocolatey, Node.js LTS, Git (skipped if already present), OpenSSH Server
+- Sets Git Bash as the SSH default shell
+- Opens firewall port 22
+- Sets `ENV_MODE=production` as a persistent user environment variable
+- Clones the repo to `C:\Users\splintadmin\work\splint_geo_processor` if not already there
+- Creates an empty `~/.ssh/authorized_keys` with locked-down ACLs
 
 ### 4. SSH key + secrets
 
@@ -96,7 +115,19 @@ On Mac:
 ```bash
 cat ~/.ssh/id_ed25519.pub
 ```
-Paste the output into `C:\Users\splintadmin\.ssh\authorized_keys` on the VM.
+
+Paste the output into **`C:\ProgramData\ssh\administrators_authorized_keys`**
+on the VM (NOT the per-user `~/.ssh/authorized_keys` — Windows OpenSSH ignores
+that file for accounts in the Administrators group).
+
+In elevated PowerShell on the VM:
+```powershell
+$key = 'PASTE-YOUR-PUBLIC-KEY-HERE'
+$adminKeys = "C:\ProgramData\ssh\administrators_authorized_keys"
+Add-Content -Path $adminKeys -Value $key
+icacls $adminKeys /inheritance:r /grant "Administrators:F" "SYSTEM:F"
+Restart-Service sshd
+```
 
 Create `C:\Users\splintadmin\work\splint_geo_processor\.env` containing at
 minimum:

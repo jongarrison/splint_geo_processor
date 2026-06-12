@@ -36,10 +36,21 @@ if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
 }
 
 # ---------- 2. Node.js LTS + Git ----------
-Write-Host "Installing Node.js LTS and Git..." -ForegroundColor Yellow
-choco install nodejs-lts git -y --no-progress
+# Install Node.js LTS via Chocolatey. Git is installed separately because choco's
+# git package fails if Git for Windows was already installed manually (common on
+# Azure Windows images and after a fresh Rhino/Bambu setup that may pull it in).
+Write-Host "Installing Node.js LTS..." -ForegroundColor Yellow
+choco install nodejs-lts -y --no-progress
 # Refresh PATH
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    Write-Host "Git already installed: $((git --version))" -ForegroundColor Green
+} else {
+    Write-Host "Installing Git..." -ForegroundColor Yellow
+    choco install git -y --no-progress
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+}
 
 # ---------- 3. OpenSSH Server ----------
 Write-Host "Installing OpenSSH Server..." -ForegroundColor Yellow
@@ -58,17 +69,25 @@ if (-not $rule) {
 }
 
 # Set Git Bash as default shell for SSH (matches lazyboy2000.local setup)
-$gitBash = "C:\Program Files\Git\bin\bash.exe"
+$gitBashCmd = Get-Command bash.exe -ErrorAction SilentlyContinue
+$gitBash = if ($gitBashCmd) { $gitBashCmd.Source } else { "C:\Program Files\Git\bin\bash.exe" }
 if (Test-Path $gitBash) {
     New-ItemProperty -Path "HKLM:\SOFTWARE\OpenSSH" -Name DefaultShell `
         -Value $gitBash -PropertyType String -Force | Out-Null
-    Write-Host "  SSH default shell set to Git Bash" -ForegroundColor Green
+    Write-Host "  SSH default shell set to: $gitBash" -ForegroundColor Green
 } else {
     Write-Host "  WARNING: Git Bash not found; SSH default shell unchanged" -ForegroundColor Yellow
 }
 
 # ---------- 4. SSH key setup ----------
+# IMPORTANT: Windows OpenSSH ignores per-user authorized_keys for admin accounts.
+# Admins must use C:\ProgramData\ssh\administrators_authorized_keys instead.
+# We prepare BOTH locations so things work regardless of whether splintadmin
+# stays an administrator or is later demoted.
+
 $adminUser = $env:USERNAME
+
+# Per-user file (used only if account is non-admin)
 $sshDir = "C:\Users\$adminUser\.ssh"
 if (-not (Test-Path $sshDir)) {
     New-Item -ItemType Directory -Path $sshDir | Out-Null
@@ -77,8 +96,21 @@ $authKeys = Join-Path $sshDir "authorized_keys"
 if (-not (Test-Path $authKeys)) {
     New-Item -ItemType File -Path $authKeys | Out-Null
 }
-# Lock down ACLs on authorized_keys (sshd refuses keys with loose permissions)
 icacls $authKeys /inheritance:r /grant "${adminUser}:F" "SYSTEM:F" | Out-Null
+
+# Admin file (the one that actually matters when logging in as splintadmin)
+$adminKeys = "C:\ProgramData\ssh\administrators_authorized_keys"
+$adminKeysDir = Split-Path $adminKeys
+if (-not (Test-Path $adminKeysDir)) {
+    New-Item -ItemType Directory -Path $adminKeysDir | Out-Null
+}
+if (-not (Test-Path $adminKeys)) {
+    New-Item -ItemType File -Path $adminKeys | Out-Null
+}
+icacls $adminKeys /inheritance:r /grant "Administrators:F" "SYSTEM:F" | Out-Null
+
+Write-Host "  Per-user authorized_keys : $authKeys" -ForegroundColor Green
+Write-Host "  Admin authorized_keys    : $adminKeys (use this one for splintadmin)" -ForegroundColor Green
 
 # ---------- 5. Persistent ENV_MODE ----------
 [System.Environment]::SetEnvironmentVariable('ENV_MODE', 'production', 'User')
@@ -108,8 +140,10 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  1. Paste your Mac's SSH public key into:"
-Write-Host "       $authKeys"
-Write-Host "     (Get the key on Mac with: cat ~/.ssh/id_ed25519.pub)"
+Write-Host "       $adminKeys"
+Write-Host "     NOTE: Because $adminUser is an administrator, Windows OpenSSH"
+Write-Host "     uses this central file (not C:\Users\$adminUser\.ssh\authorized_keys)."
+Write-Host "     Get the key on Mac with: cat ~/.ssh/id_ed25519.pub"
 Write-Host ""
 Write-Host "  2. Create the .env secrets file at:"
 Write-Host "       $repoDir\.env"
