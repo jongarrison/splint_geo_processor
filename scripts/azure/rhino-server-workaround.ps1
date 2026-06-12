@@ -104,7 +104,7 @@ function Revert-Workaround {
 }
 
 Write-Host "Current values:" -ForegroundColor Cyan
-Read-Current.GetEnumerator() | ForEach-Object {
+(Read-Current).GetEnumerator() | ForEach-Object {
     Write-Host ("  {0,-18} = {1}" -f $_.Key, $_.Value.Value)
 }
 Write-Host ""
