@@ -48,3 +48,8 @@ To stop billing (deallocate):
 
 To delete everything:
   az group delete --name splintgeo1-rg --yes
+
+
+
+
+

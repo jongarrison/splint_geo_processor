@@ -5,7 +5,13 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { sleep } from '../utils/sleep.js';
 import type { AppConfig } from '../config.js';
-import { runPipeline, executeRhinoCommand, ensureRhinoRunning } from './pipeline.js';
+import {
+  runPipeline,
+  executeRhinoCommand,
+  ensureRhinoRunning,
+  closeRhino,
+  isRhinoRunning,
+} from './pipeline.js';
 import { upload } from '@vercel/blob/client';
 import FormData from 'form-data';
 import { cleanupOldFiles } from '../utils/cleanup.js';
@@ -53,6 +59,9 @@ export class Processor {
   private lastCleanupTime: number = 0;
   private readonly CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours (twice daily)
   private readonly DAYS_TO_KEEP = 7;
+  // Wall-clock cutoff for the keep-warm lease pushed down by the factory.
+  // 0 means "no active lease". Updated from every poll response.
+  private keepWarmUntilMs: number = 0;
 
   constructor(private logger: pino.Logger, private config: AppConfig) {
     // Configure axios with appropriate timeouts and error handling
@@ -118,6 +127,10 @@ export class Processor {
         const resp = await this.http.get('/api/design-processing/next-job');
 
         if (resp.status === 404) {
+          // No job, but the response still carries the lease so we can decide
+          // whether to keep Rhino warm or shut it down to save licenses/cost.
+          this.ingestKeepWarmFromResponse(resp.data, env);
+          await this.reconcileRhinoToLease(env);
           this.logger.info(`[${env}] No jobs available`);
           await sleep(intervalMs);
           continue;
@@ -136,6 +149,9 @@ export class Processor {
         }
 
         const job = resp.data as any;
+        // Ingest lease from job-bearing response too, so the post-job decision
+        // (close vs. keep warm) sees the latest user activity.
+        this.ingestKeepWarmFromResponse(job, env);
         this.logger.info({ 
           apiUrl: this.config.apiUrl, 
           jobId: job?.id ?? job?.ID ?? job?.Id,
@@ -263,7 +279,7 @@ export class Processor {
             rhinoCodeCli: this.config.rhinoCodeCli,
             bambuCli: this.config.bambuCli,
             dryRun: this.config.dryRun,
-            keepRhinoAlive: this.config.keepRhinoAlive,
+            keepRhinoAlive: this.effectiveKeepRhinoAlive(),
             logger: this.logger,
             jobLog
           });
@@ -669,6 +685,62 @@ export class Processor {
       case '.obj': return 'text/plain';
       case '.gcode': return 'text/plain';
       default: return 'application/octet-stream';
+    }
+  }
+
+  // Update local keep-warm cutoff from the factory's poll response.
+  // Server sends relative seconds (no clock-sync needed) and we only ever
+  // extend the cutoff, never shorten it -- a freshly received longer lease
+  // wins, but a stale shorter one can't cancel an earlier one.
+  private ingestKeepWarmFromResponse(payload: any, env: string): void {
+    const raw = payload?.keepWarmForSeconds;
+    if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) {
+      return;
+    }
+    const candidate = Date.now() + Math.floor(raw * 1000);
+    if (candidate > this.keepWarmUntilMs) {
+      const prevSeconds = Math.max(0, Math.ceil((this.keepWarmUntilMs - Date.now()) / 1000));
+      this.keepWarmUntilMs = candidate;
+      this.logger.info(
+        { keepWarmForSeconds: raw, prevRemainingSeconds: prevSeconds },
+        `[${env}] Keep-warm lease extended by user activity`,
+      );
+    }
+  }
+
+  // True if Rhino should stay running: either the host is configured for it,
+  // or a user-triggered lease is currently active.
+  private effectiveKeepRhinoAlive(): boolean {
+    if (this.config.keepRhinoAlive) return true;
+    return Date.now() < this.keepWarmUntilMs;
+  }
+
+  // Between-jobs reconciliation: launch Rhino if a lease is active and it's
+  // not running, or close Rhino if no lease is active and it is running.
+  // Called from the poll loop only when there's no job to process.
+  private async reconcileRhinoToLease(env: string): Promise<void> {
+    if (!this.config.rhinoCli || !this.config.rhinoCodeCli) return;
+    const wantWarm = this.effectiveKeepRhinoAlive();
+    const running = await isRhinoRunning();
+
+    if (wantWarm && !running) {
+      const remainingSec = Math.max(0, Math.ceil((this.keepWarmUntilMs - Date.now()) / 1000));
+      this.logger.info(
+        { keepWarmRemainingSeconds: remainingSec },
+        `[${env}] Proactively warming Rhino (lease active)`,
+      );
+      const started = await ensureRhinoRunning(this.config.rhinoCodeCli, this.config.rhinoCli, this.logger);
+      if (started) {
+        this.logger.info(`[${env}] Rhino warm`);
+      } else {
+        this.logger.warn(`[${env}] Proactive Rhino warm failed - will retry next poll`);
+      }
+      return;
+    }
+
+    if (!wantWarm && running) {
+      this.logger.info(`[${env}] Keep-warm lease expired - closing Rhino`);
+      await closeRhino(this.config.rhinoCodeCli, this.logger);
     }
   }
 

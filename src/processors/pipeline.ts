@@ -483,6 +483,46 @@ export async function ensureRhinoRunning(
   return false;
 }
 
+/**
+ * Politely close Rhino: send `-_Exit N`, fall back to force-kill if needed.
+ * Safe to call when Rhino isn't running (returns quickly). Used by:
+ *   - pipeline end-of-job shutdown
+ *   - processor poll loop when the keep-warm lease expires
+ */
+export async function closeRhino(
+  rhinoCodeCli: string,
+  logger?: PinoLogger
+): Promise<void> {
+  // Skip the exit command if no process is even running.
+  if (!(await rhinoProcessExists())) {
+    logger?.info({}, 'Rhino not running; nothing to close');
+    return;
+  }
+
+  try {
+    // -_Exit N skips the unsaved-changes prompt.
+    await executeRhinoCommand(rhinoCodeCli, '-_Exit N', { timeout: 30_000 }, logger);
+    logger?.info({}, 'Rhino exit command sent');
+    await new Promise((r) => setTimeout(r, 2000));
+    if (await rhinoProcessExists()) {
+      logger?.warn({}, 'Rhino still running after Exit command - force killing');
+      await killRhinoProcess(logger);
+      await new Promise((r) => setTimeout(r, 1000));
+      logger?.info({}, 'Rhino force killed');
+    } else {
+      logger?.info({}, 'Rhino exited cleanly');
+    }
+  } catch (exitErr: any) {
+    logger?.warn({ error: exitErr?.message }, 'Rhino exit command failed - falling back to kill');
+    try { await killRhinoProcess(logger); } catch {}
+  }
+}
+
+// Re-exported so the processor can probe Rhino state without poking pipeline internals.
+export async function isRhinoRunning(): Promise<boolean> {
+  return rhinoProcessExists();
+}
+
 // ===========================
 // Pipeline Types & Main Function
 // ===========================
@@ -849,31 +889,16 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     }
   }
 
-  // Exit Rhino to free license unless keeping alive for next job
+  // End-of-job Rhino shutdown.
+  // Keep Rhino warm if (a) caller asked us to AND (b) we didn't just recover
+  // from a locked-state failure (a fresh process is safer in that case).
   if (!input.keepRhinoAlive || (pipelineError && shouldResetRhinoAfterFailure)) {
-    const keepAliveDisabledByRecovery = pipelineError && shouldResetRhinoAfterFailure;
-    if (keepAliveDisabledByRecovery) {
+    if (pipelineError && shouldResetRhinoAfterFailure) {
       logWarn('Resetting Rhino after locked-state failure (overriding keepRhinoAlive=true)');
+    } else {
+      logInfo('Closing Rhino (keepRhinoAlive=false)');
     }
-    logInfo('Closing Rhino (keepRhinoAlive=false)');
-    try {
-      // Use -_Exit N to exit without saving and without prompting
-      await executeRhinoCommand(rhinoCodeCliPath, '-_Exit N', { timeout: 30_000 }, { info: logInfo, warn: logWarn });
-      logInfo('Rhino exit command sent');
-      await new Promise((r) => setTimeout(r, 2000));
-      const stillRunning = await rhinoProcessExists();
-      if (stillRunning) {
-        logWarn('Rhino still running after Exit command - force killing');
-        await killRhinoProcess(input.logger);
-        await new Promise((r) => setTimeout(r, 1000));
-        logInfo('Rhino force killed');
-      } else {
-        logInfo('Rhino exited cleanly');
-      }
-    } catch (exitErr: any) {
-      logWarn('Rhino exit command failed', { error: exitErr?.message });
-      try { await killRhinoProcess(input.logger); } catch {}
-    }
+    await closeRhino(rhinoCodeCliPath, input.logger);
   } else {
     logInfo('Keeping Rhino alive for next job (keepRhinoAlive=true)');
   }
