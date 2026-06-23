@@ -2,13 +2,14 @@
 #
 # Restart script for Windows production deployment.
 # SSHes into the Windows machine, pulls latest code, rebuilds, and restarts the
-# scheduled task. Default target is lazyboy2000.local; override with env var:
-#   WINDOWS_HOST=splintgeo1 ./win-deploy-prod-ssh.sh
+# scheduled task. Target host is set in win-env-set.sh.
 #
 
 set -e
 
-WINDOWS_HOST="${WINDOWS_HOST:-lazyboy2000.local}"
+# Load target host config - edit win-env-set.sh to switch targets
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/win-env-set.sh"
 REMOTE_DIR="~/work/splint_geo_processor"
 
 echo "🔄 Deploying to ${WINDOWS_HOST}..."

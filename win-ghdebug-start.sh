@@ -6,7 +6,9 @@
 
 set -e
 
-WINDOWS_HOST="lazyboy2000.local"
+# Load target host config - edit win-env-set.sh to switch targets
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/win-env-set.sh"
 
 echo "▶️  Starting SplintGeoProcessor on ${WINDOWS_HOST}..."
 

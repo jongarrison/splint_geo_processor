@@ -1,9 +1,14 @@
 #!/bin/bash
 #
-# Tail logs from Windows production deployment (lazyboy2000.local)
+# Tail logs from Windows production deployment.
+# Target host is set in win-env-set.sh.
 #
 
-WINDOWS_HOST="lazyboy2000.local"
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/win-env-set.sh"
+
 LOG_DIR="~/SplintFactoryFiles/logs"
 LOG_GLOB="${LOG_DIR}/processor-*.log"
 
