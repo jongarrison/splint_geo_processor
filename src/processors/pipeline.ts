@@ -925,7 +925,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       '--arrange', '1',
       '--curr-bed-type', 'Textured PEI Plate',  // Must match string key in s_keys_map_BedType (PrintConfig.cpp line 723)
       '--load-settings', settingsJson,
-      '--load-filaments', filamentJson,  // Single filament → virtual slot 0 (runtime mapping via ams_mapping, see ../../agent-notes/ams_mapping_and_slicing.md)
+      '--load-filaments', filamentJson,  // Single filament -> virtual slot 0 (runtime mapping via ams_mapping, see ../../agent-notes/ams_mapping_and_slicing.md)
       '--slice', '0',
       '--debug', '2',
       '--export-3mf', printPath,
@@ -936,10 +936,87 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     const prettyArgs = args.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ');
     logInfo('execFile Bambu CLI: ', { cmd: `${input.bambuCli} ${prettyArgs}` });
 
-    const { stdout: bambuStdout, stderr: bambuStderr } = await execFileAsync(input.bambuCli, args, { timeout: 10 * 60_000 });
+    // Slicing is normally seconds; fail fast on hangs (e.g. UI dialogs blocking
+    // the CLI like the update-available popup or GLFW/OpenGL init failures).
+    const BAMBU_TIMEOUT_MS = 3 * 60_000;
+    let bambuStdout = '';
+    let bambuStderr = '';
+    let bambuErr: any = null;
+    try {
+      const result = await execFileAsync(input.bambuCli, args, {
+        timeout: BAMBU_TIMEOUT_MS,
+        killSignal: 'SIGKILL', // SIGTERM is unreliable on Windows GUI hangs
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      bambuStdout = result.stdout ?? '';
+      bambuStderr = result.stderr ?? '';
+    } catch (err: any) {
+      bambuErr = err;
+      bambuStdout = err?.stdout ?? '';
+      bambuStderr = err?.stderr ?? '';
+    }
     sliceDurationSeconds = (Date.now() - sliceStart) / 1000;
-    if (bambuStdout && bambuStdout.trim()) logInfo('stdout (bambu)', { stdout: bambuStdout.substring(0, 2000) });
-    if (bambuStderr && bambuStderr.trim()) logWarn('stderr (bambu)', { stderr: bambuStderr.substring(0, 2000) });
+
+    if (bambuStdout.trim()) logInfo('stdout (bambu)', { stdout: bambuStdout.substring(0, 2000) });
+    if (bambuStderr.trim()) logWarn('stderr (bambu)', { stderr: bambuStderr.substring(0, 2000) });
+
+    // On timeout, ensure no orphan bambu-studio.exe is left behind blocking the
+    // next job's slot or filesystem locks.
+    const timedOut = bambuErr?.killed === true || bambuErr?.signal === 'SIGKILL' || bambuErr?.signal === 'SIGTERM';
+    if (timedOut) {
+      logWarn(`Bambu CLI exceeded ${BAMBU_TIMEOUT_MS / 1000}s timeout - force killing any survivors`);
+      try {
+        if (process.platform === 'win32') {
+          await execAsync('taskkill /F /T /IM bambu-studio.exe', { timeout: 10_000 });
+        } else {
+          await execAsync('pkill -9 -i bambu-studio', { timeout: 10_000 });
+        }
+      } catch { /* best-effort */ }
+    }
+
+    // Classify known hostile failure modes from stderr so the error surfaced to
+    // the factory carries an actionable name, not just "Bambu failed".
+    const haystack = `${bambuStdout}\n${bambuStderr}`;
+    const knownFailures: Array<{ pattern: RegExp; label: string; hint?: string }> = [
+      {
+        pattern: /WGL: Failed to create OpenGL context|Failed to create GLFW window/i,
+        label: 'OpenGL/GLFW init failed',
+        hint: 'Bambu Studio could not create a window. Often caused by an interactive popup (e.g. "update available") that consumed the GL context. Try launching Bambu Studio interactively once to dismiss any pending dialog, then disable auto-update under Help > Settings.',
+      },
+      {
+        pattern: /update.*available/i,
+        label: 'Bambu update prompt blocked CLI',
+        hint: 'Disable auto-update in Bambu Studio settings.',
+      },
+    ];
+    const matchedFailures = knownFailures.filter(k => k.pattern.test(haystack));
+
+    // Verify the print file actually landed. Bambu can exit 0 without producing
+    // output when a hostile dialog is involved, so existence is the real gate.
+    const printOk = fs.existsSync(printPath) && fs.statSync(printPath).size > 0;
+
+    if (bambuErr || !printOk) {
+      const reasons: string[] = [];
+      if (timedOut) {
+        reasons.push(`Bambu CLI timed out after ${BAMBU_TIMEOUT_MS / 1000}s`);
+      } else if (bambuErr) {
+        const code = bambuErr.code ?? bambuErr.exitCode;
+        reasons.push(`Bambu CLI exited with error${code !== undefined ? ` (code=${code})` : ''}: ${bambuErr.message || 'unknown'}`);
+      } else if (!printOk) {
+        reasons.push('Bambu CLI exited cleanly but produced no print file');
+      }
+      for (const m of matchedFailures) {
+        reasons.push(`Detected: ${m.label}${m.hint ? ' -- ' + m.hint : ''}`);
+      }
+      // Include a short stderr tail so the failure cause is in the result log.
+      const stderrTail = bambuStderr.trim().split('\n').slice(-8).join('\n');
+      if (stderrTail) reasons.push(`stderr tail:\n${stderrTail}`);
+
+      const errorMsg = reasons.join('\n');
+      logWarn('Bambu slicing failed', { durationSeconds: sliceDurationSeconds, timedOut, printOk });
+      throw new Error(errorMsg);
+    }
+
     logInfo(`Bambu slicer completed in ${sliceDurationSeconds.toFixed(1)}s`);
   }
 
