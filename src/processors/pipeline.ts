@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile, exec, spawn, ChildProcess } from 'node:child_process';
+import { execFile, exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
@@ -96,6 +96,14 @@ function getRhinoStartupProbeGraceMs(): number {
   const raw = Number(process.env.RHINO_STARTUP_PROBE_GRACE_MS ?? 3000);
   if (!Number.isFinite(raw) || raw < 0) {
     return 3000;
+  }
+  return Math.floor(raw);
+}
+
+function getRhinoStartupFailFastUnhealthyAttempts(): number {
+  const raw = Number(process.env.RHINO_STARTUP_FAIL_FAST_UNHEALTHY_ATTEMPTS ?? 0);
+  if (!Number.isFinite(raw) || raw < 0) {
+    return 0;
   }
   return Math.floor(raw);
 }
@@ -239,15 +247,15 @@ async function rhinoProcessResponding(logger?: PinoLogger): Promise<boolean> {
   }
 
   try {
-    const command = [
-      'powershell.exe -NoProfile -Command',
-      '"$p = Get-Process Rhino -ErrorAction SilentlyContinue | Select-Object -First 1;',
-      'if ($null -eq $p) { Write-Output MISSING }',
-      'elseif ($p.Responding) { Write-Output RESPONDING }',
-      'else { Write-Output NOT_RESPONDING }"'
-    ].join(' ');
-    const { stdout } = await execAsync(command, { timeout: 5000 });
-    const state = (stdout || '').trim();
+    const script = [
+      '$proc = Get-Process -Name Rhino -ErrorAction SilentlyContinue | Select-Object -First 1',
+      'if ($null -eq $proc) { Write-Output MISSING; exit 0 }',
+      'if ($proc.Responding -eq $true) { Write-Output RESPONDING; exit 0 }',
+      'if ($proc.Responding -eq $false) { Write-Output NOT_RESPONDING; exit 0 }',
+      'Write-Output UNKNOWN; exit 0'
+    ].join('; ');
+    const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], { timeout: 5000 });
+    const state = ((stdout || '').trim().split(/\r?\n/).map(s => s.trim()).filter(Boolean).pop() || 'UNKNOWN');
 
     if (state === 'RESPONDING') {
       return true;
@@ -258,11 +266,16 @@ async function rhinoProcessResponding(logger?: PinoLogger): Promise<boolean> {
       return false;
     }
 
-    logger?.warn({ state }, 'Rhino process response state is unknown');
-    return false;
+    // Treat unknown states as non-blocking so transient PowerShell probe issues
+    // do not force unnecessary Rhino restarts.
+    logger?.info({ state }, 'Rhino process response state is non-blocking');
+    return true;
   } catch (err: any) {
-    logger?.warn({ error: err?.message }, 'Failed to read Rhino responding state from Windows');
-    return false;
+    logger?.warn(
+      { error: err?.message },
+      'Failed to read Rhino responding state from Windows; treating as non-blocking'
+    );
+    return true;
   }
 }
 
@@ -363,6 +376,7 @@ export async function ensureRhinoRunning(
   const checkHealthDuringStartup = async (): Promise<boolean> => {
     return checkRhinoHealth(rhinoCodeCli, logger, { startupProbeGraceMs });
   };
+  const startupFailFastUnhealthyAttempts = getRhinoStartupFailFastUnhealthyAttempts();
   
   // Launch Rhino via OS-specific command
   const launchRhino = async (): Promise<void> => {
@@ -389,7 +403,9 @@ export async function ensureRhinoRunning(
         child.unref();
       } else {
         const openArgs = ['-a', rhinoCli, '--args', '-nosplash'];
-        // Keep non-Windows launch conservative until Rhino flag parity is verified.
+        if (startServerOnLaunch) {
+          openArgs.push(`-runscript=${startupMacro}`);
+        }
         logger?.info({ rhinoCli, openArgs, startServerOnLaunch, startupMacro }, 'Launching Rhino with startup args');
         await execFileAsync('open', openArgs, { timeout: 5000 });
       }
@@ -406,18 +422,44 @@ export async function ensureRhinoRunning(
       await new Promise(resolve => setTimeout(resolve, delayMs));
       const responding = await checkRhinoHealth(rhinoCodeCli, logger, { startupProbeGraceMs });
       const processExists = await rhinoProcessExists();
+      let processResponding: boolean | null = null;
 
       if (!responding && processExists) {
-        unhealthyWhileProcessExists += 1;
+        processResponding = await rhinoProcessResponding(logger);
+        if (!processResponding) {
+          unhealthyWhileProcessExists += 1;
+        } else {
+          unhealthyWhileProcessExists = 0;
+        }
       } else {
         unhealthyWhileProcessExists = 0;
       }
 
-      logger?.info({ attempt, maxAttempts, responding, processExists, unhealthyWhileProcessExists, startupProbeGraceMs }, 'Polling for Rhino');
+      logger?.info(
+        {
+          attempt,
+          maxAttempts,
+          responding,
+          processExists,
+          processResponding,
+          unhealthyWhileProcessExists,
+          startupProbeGraceMs,
+          startupFailFastUnhealthyAttempts
+        },
+        'Polling for Rhino'
+      );
 
-      // Fail fast if Rhino process appears to be launched but stays unhealthy.
-      if (!responding && unhealthyWhileProcessExists >= 3) {
-        logger?.warn({ attempt, unhealthyWhileProcessExists }, 'Rhino process exists but remains unhealthy after launch attempts - failing early');
+      // Optional fail-fast for clearly hung Rhino windows. Disabled by default
+      // (0) so cold startup jitter does not trigger needless kill/relaunch loops.
+      if (
+        startupFailFastUnhealthyAttempts > 0 &&
+        !responding &&
+        unhealthyWhileProcessExists >= startupFailFastUnhealthyAttempts
+      ) {
+        logger?.warn(
+          { attempt, unhealthyWhileProcessExists, startupFailFastUnhealthyAttempts },
+          'Rhino process appears hung during startup - failing early by configuration'
+        );
         return false;
       }
 
@@ -938,33 +980,45 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
 
     // Slicing is normally seconds; fail fast on hangs (e.g. UI dialogs blocking
     // the CLI like the update-available popup or GLFW/OpenGL init failures).
-    const timeoutRaw = Number(process.env.BAMBU_TIMEOUT_MS ?? (3 * 60_000));
-    const BAMBU_TIMEOUT_MS = Number.isFinite(timeoutRaw) && timeoutRaw >= 30_000
-      ? Math.floor(timeoutRaw)
-      : (3 * 60_000);
-    const inactivityRaw = Number(process.env.BAMBU_INACTIVITY_TIMEOUT_MS ?? 30_000);
-    const BAMBU_INACTIVITY_TIMEOUT_MS = Number.isFinite(inactivityRaw) && inactivityRaw >= 10_000
-      ? Math.floor(inactivityRaw)
-      : 45_000;
-    const attemptsRaw = Number(process.env.BAMBU_MAX_ATTEMPTS ?? 2);
-    const BAMBU_MAX_ATTEMPTS = Number.isFinite(attemptsRaw) && attemptsRaw >= 1
-      ? Math.floor(attemptsRaw)
-      : 2;
+    const BAMBU_TIMEOUT_MS = 3 * 60_000;
+    let bambuStdout = '';
+    let bambuStderr = '';
+    let bambuErr: any = null;
+    try {
+      const result = await execFileAsync(input.bambuCli, args, {
+        timeout: BAMBU_TIMEOUT_MS,
+        killSignal: 'SIGKILL', // SIGTERM is unreliable on Windows GUI hangs
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      bambuStdout = result.stdout ?? '';
+      bambuStderr = result.stderr ?? '';
+    } catch (err: any) {
+      bambuErr = err;
+      bambuStdout = err?.stdout ?? '';
+      bambuStderr = err?.stderr ?? '';
+    }
+    sliceDurationSeconds = (Date.now() - sliceStart) / 1000;
 
-    const killBambuProcesses = async () => {
+    if (bambuStdout.trim()) logInfo('stdout (bambu)', { stdout: bambuStdout.substring(0, 2000) });
+    if (bambuStderr.trim()) logWarn('stderr (bambu)', { stderr: bambuStderr.substring(0, 2000) });
+
+    // On timeout, ensure no orphan bambu-studio.exe is left behind blocking the
+    // next job's slot or filesystem locks.
+    const timedOut = bambuErr?.killed === true || bambuErr?.signal === 'SIGKILL' || bambuErr?.signal === 'SIGTERM';
+    if (timedOut) {
+      logWarn(`Bambu CLI exceeded ${BAMBU_TIMEOUT_MS / 1000}s timeout - force killing any survivors`);
       try {
         if (process.platform === 'win32') {
           await execAsync('taskkill /F /T /IM bambu-studio.exe', { timeout: 10_000 });
         } else {
           await execAsync('pkill -9 -i bambu-studio', { timeout: 10_000 });
         }
-      } catch {
-        // best-effort cleanup
-      }
-    };
+      } catch { /* best-effort */ }
+    }
 
-    // Classify known hostile failure modes from stderr/stdout so the error surfaced to
+    // Classify known hostile failure modes from stderr so the error surfaced to
     // the factory carries an actionable name, not just "Bambu failed".
+    const haystack = `${bambuStdout}\n${bambuStderr}`;
     const knownFailures: Array<{ pattern: RegExp; label: string; hint?: string }> = [
       {
         pattern: /WGL: Failed to create OpenGL context|Failed to create GLFW window/i,
@@ -977,260 +1031,35 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
         hint: 'Disable auto-update in Bambu Studio settings.',
       },
     ];
+    const matchedFailures = knownFailures.filter(k => k.pattern.test(haystack));
 
-    const runBambuAttempt = async () => {
-      const MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
-      let stdout = '';
-      let stderr = '';
-      let stdoutBytes = 0;
-      let stderrBytes = 0;
-      const startedAt = Date.now();
-      let lastActivityAt = startedAt;
-      let lastPrintSize = 0;
+    // Verify the print file actually landed. Bambu can exit 0 without producing
+    // output when a hostile dialog is involved, so existence is the real gate.
+    const printOk = fs.existsSync(printPath) && fs.statSync(printPath).size > 0;
 
-      const appendChunk = (target: 'stdout' | 'stderr', chunk: Buffer | string) => {
-        const text = chunk.toString();
-        if (!text) return;
-        lastActivityAt = Date.now();
-        if (target === 'stdout') {
-          if (stdoutBytes >= MAX_CAPTURE_BYTES) return;
-          const remaining = MAX_CAPTURE_BYTES - stdoutBytes;
-          const clipped = text.length > remaining ? text.slice(0, remaining) : text;
-          stdout += clipped;
-          stdoutBytes += clipped.length;
-          return;
-        }
-        if (stderrBytes >= MAX_CAPTURE_BYTES) return;
-        const remaining = MAX_CAPTURE_BYTES - stderrBytes;
-        const clipped = text.length > remaining ? text.slice(0, remaining) : text;
-        stderr += clipped;
-        stderrBytes += clipped.length;
-      };
-
-      const command = input.bambuCli;
-      if (!command) {
-        throw new Error('Bambu CLI path is missing');
-      }
-
-      const child: ChildProcess = spawn(command, args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-        shell: false,
-      });
-
-      child.stdout?.on('data', (chunk: Buffer) => appendChunk('stdout', chunk));
-      child.stderr?.on('data', (chunk: Buffer) => appendChunk('stderr', chunk));
-
-      let watchdogTimedOut = false;
-      let watchdogInactivityTimedOut = false;
-      const watchdog = setInterval(() => {
-        const now = Date.now();
-
-        // Treat output file growth as real progress so long slices aren't killed
-        // just because stderr/stdout is quiet for a while.
-        try {
-          if (fs.existsSync(printPath)) {
-            const printSize = fs.statSync(printPath).size;
-            if (printSize > lastPrintSize) {
-              lastPrintSize = printSize;
-              lastActivityAt = now;
-            }
-          }
-        } catch {
-          // Ignore transient stat errors
-        }
-
-        if (watchdogTimedOut || watchdogInactivityTimedOut) return;
-        if ((now - startedAt) >= BAMBU_TIMEOUT_MS) {
-          watchdogTimedOut = true;
-          try { child.kill('SIGKILL'); } catch { /* best-effort */ }
-          return;
-        }
-        if ((now - lastActivityAt) >= BAMBU_INACTIVITY_TIMEOUT_MS) {
-          watchdogInactivityTimedOut = true;
-          try { child.kill('SIGKILL'); } catch { /* best-effort */ }
-        }
-      }, 1000);
-
-      let exitCode: number | null = null;
-      let exitSignal: NodeJS.Signals | null = null;
-      let processError: any = null;
-      try {
-        const exitState = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-          let settled = false;
-          child.once('error', (err: Error) => {
-            if (settled) return;
-            settled = true;
-            reject(err);
-          });
-          child.once('exit', (code: number | null, signal: NodeJS.Signals | null) => {
-            if (settled) return;
-            settled = true;
-            resolve({ code, signal });
-          });
-        });
-        exitCode = exitState.code;
-        exitSignal = exitState.signal;
-      } catch (err: any) {
-        processError = err;
-      } finally {
-        clearInterval(watchdog);
-      }
-
-      const durationMs = Date.now() - startedAt;
-      const timedOut = watchdogTimedOut;
-      const inactivityTimedOut = watchdogInactivityTimedOut;
-
-      let err: any = null;
-      if (processError) {
-        err = processError;
-      } else if (timedOut) {
-        err = new Error(`Bambu CLI timed out after ${BAMBU_TIMEOUT_MS / 1000}s`);
-        err.code = 'BAMBU_TIMEOUT';
-      } else if (inactivityTimedOut) {
-        err = new Error(`Bambu CLI had no output or file progress for ${BAMBU_INACTIVITY_TIMEOUT_MS / 1000}s`);
-        err.code = 'BAMBU_INACTIVITY_TIMEOUT';
-      } else if (exitCode !== 0) {
-        err = new Error(`Bambu CLI exited with code ${exitCode ?? 'unknown'}`);
-        err.code = exitCode;
-      }
-
-      if (err) {
-        err.killed = timedOut || inactivityTimedOut;
-        err.signal = exitSignal;
-        err.exitCode = exitCode;
-      }
-
-      return {
-        bambuStdout: stdout,
-        bambuStderr: stderr,
-        bambuErr: err,
-        timedOut,
-        inactivityTimedOut,
-        durationMs,
-      };
-    };
-
-    let completed = false;
-    let lastTimedOut = false;
-    let lastPrintOk = false;
-    let lastFailure = 'Bambu slicing failed with unknown error';
-
-    for (let attemptNumber = 1; attemptNumber <= BAMBU_MAX_ATTEMPTS; attemptNumber += 1) {
-      try {
-        if (fs.existsSync(printPath)) {
-          fs.unlinkSync(printPath);
-        }
-      } catch (err: any) {
-        logWarn('Failed to clear previous print artifact before Bambu attempt', { attemptNumber, printPath, error: err?.message });
-      }
-
-      logInfo('Bambu attempt start', {
-        attemptNumber,
-        maxAttempts: BAMBU_MAX_ATTEMPTS,
-        timeoutMs: BAMBU_TIMEOUT_MS,
-        inactivityTimeoutMs: BAMBU_INACTIVITY_TIMEOUT_MS,
-      });
-
-      const { bambuStdout, bambuStderr, bambuErr, timedOut, inactivityTimedOut, durationMs } = await runBambuAttempt();
-      let survivorsKilled = false;
-
-      sliceDurationSeconds = (Date.now() - sliceStart) / 1000;
-
-      if (timedOut || inactivityTimedOut) {
-        await killBambuProcesses();
-        survivorsKilled = true;
-      }
-
-      const haystack = `${bambuStdout}\n${bambuStderr}`;
-      const matchedFailures = knownFailures.filter(k => k.pattern.test(haystack));
-
-      // Verify the print file actually landed. Bambu can exit 0 without producing
-      // output when a hostile dialog is involved, so existence is the real gate.
-      const printOk = fs.existsSync(printPath) && fs.statSync(printPath).size > 0;
-
-      let outcome = 'success';
-      if (inactivityTimedOut) outcome = 'inactivity-timeout';
-      else if (timedOut) outcome = 'timeout';
-      else if (bambuErr) outcome = 'error';
-      else if (!printOk) outcome = 'missing-output';
-
-      const retryable = timedOut || inactivityTimedOut || matchedFailures.length > 0;
-      const willRetry = retryable && attemptNumber < BAMBU_MAX_ATTEMPTS;
-      logInfo('Bambu attempt summary', {
-        attemptNumber,
-        maxAttempts: BAMBU_MAX_ATTEMPTS,
-        outcome,
-        durationMs,
-        printOk,
-        retryable,
-        willRetry,
-        matchedFailures: matchedFailures.map(m => m.label),
-      });
-
-      if (!bambuErr && printOk) {
-        completed = true;
-        break;
-      }
-
+    if (bambuErr || !printOk) {
       const reasons: string[] = [];
-      if (inactivityTimedOut) {
-        reasons.push(`Bambu CLI had no output or file progress for ${BAMBU_INACTIVITY_TIMEOUT_MS / 1000}s`);
-      } else if (timedOut) {
+      if (timedOut) {
         reasons.push(`Bambu CLI timed out after ${BAMBU_TIMEOUT_MS / 1000}s`);
       } else if (bambuErr) {
         const code = bambuErr.code ?? bambuErr.exitCode;
         reasons.push(`Bambu CLI exited with error${code !== undefined ? ` (code=${code})` : ''}: ${bambuErr.message || 'unknown'}`);
-      } else {
+      } else if (!printOk) {
         reasons.push('Bambu CLI exited cleanly but produced no print file');
       }
       for (const m of matchedFailures) {
         reasons.push(`Detected: ${m.label}${m.hint ? ' -- ' + m.hint : ''}`);
       }
+      // Include a short stderr tail so the failure cause is in the result log.
       const stderrTail = bambuStderr.trim().split('\n').slice(-8).join('\n');
-      if (stderrTail) {
-        reasons.push(`stderr tail:\n${stderrTail}`);
-      }
-      if (!stderrTail && bambuStdout.trim()) {
-        const stdoutTail = bambuStdout.trim().split('\n').slice(-6).join('\n');
-        if (stdoutTail) reasons.push(`stdout tail:\n${stdoutTail}`);
-      }
+      if (stderrTail) reasons.push(`stderr tail:\n${stderrTail}`);
 
-      lastFailure = reasons.join('\n');
-      lastTimedOut = timedOut || inactivityTimedOut;
-      lastPrintOk = printOk;
-
-      if (willRetry) {
-        logWarn('Bambu retry scheduled', {
-          attemptNumber,
-          nextAttempt: attemptNumber + 1,
-          reason: outcome,
-          matchedFailures: matchedFailures.map(m => m.label),
-          survivorsKilled,
-        });
-        if (!survivorsKilled) {
-          await killBambuProcesses();
-        }
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        continue;
-      }
-
-      break;
+      const errorMsg = reasons.join('\n');
+      logWarn('Bambu slicing failed', { durationSeconds: sliceDurationSeconds, timedOut, printOk });
+      throw new Error(errorMsg);
     }
 
-    if (!completed) {
-      logWarn('Bambu slicing failed', {
-        durationSeconds: sliceDurationSeconds,
-        timedOut: lastTimedOut,
-        printOk: lastPrintOk,
-        attempts: BAMBU_MAX_ATTEMPTS,
-      });
-      throw new Error(lastFailure);
-    }
-
-    const finalSliceDurationSeconds = sliceDurationSeconds ?? ((Date.now() - sliceStart) / 1000);
-    sliceDurationSeconds = finalSliceDurationSeconds;
-    logInfo(`Bambu slicer completed in ${finalSliceDurationSeconds.toFixed(1)}s`);
+    logInfo(`Bambu slicer completed in ${sliceDurationSeconds.toFixed(1)}s`);
   }
 
   return { geometryPath, printPath: fs.existsSync(printPath) ? printPath : undefined, sliceDurationSeconds };

@@ -56,6 +56,7 @@ export class Processor {
   private http: AxiosInstance;
   private inbox: string;
   private outbox: string;
+  private noJobHeartbeatTick: number = 0;
   private lastCleanupTime: number = 0;
   private readonly CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours (twice daily)
   private readonly DAYS_TO_KEEP = 7;
@@ -83,6 +84,15 @@ export class Processor {
     this.outbox = this.config.outboxDir;
     fs.mkdirSync(this.inbox, { recursive: true });
     fs.mkdirSync(this.outbox, { recursive: true});
+  }
+
+  private nextNoJobHeartbeat(): string {
+    this.noJobHeartbeatTick = (this.noJobHeartbeatTick % 10) + 1;
+    return '>'.repeat(this.noJobHeartbeatTick);
+  }
+
+  private resetNoJobHeartbeat(): void {
+    this.noJobHeartbeatTick = 0;
   }
 
   async run() {
@@ -131,10 +141,14 @@ export class Processor {
           // whether to keep Rhino warm or shut it down to save licenses/cost.
           this.ingestKeepWarmFromResponse(resp.data, env);
           await this.reconcileRhinoToLease(env);
-          this.logger.info(`[${env}] No jobs available`);
+          const heartbeat = this.nextNoJobHeartbeat();
+          this.logger.info(`[${env}] No jobs available ${heartbeat}`);
           await sleep(intervalMs);
           continue;
         }
+
+        this.resetNoJobHeartbeat();
+
         if (resp.status === 401) {
           this.logger.warn(`[${env}] Unauthorized (401). Check SF_API_KEY in .env file.`);
           await sleep(intervalMs);
@@ -149,29 +163,36 @@ export class Processor {
         }
 
         const job = resp.data as any;
+        const idPart = job?.id ?? job?.ID ?? job?.Id ?? `ts_${Date.now()}`;
+        const algoPart = job?.algorithmName || 'algorithm';
+        const objectId = String(job?.objectId ?? job?.ObjectId ?? 'unknown');
         // Ingest lease from job-bearing response too, so the post-job decision
         // (close vs. keep warm) sees the latest user activity.
         this.ingestKeepWarmFromResponse(job, env);
         this.logger.info({ 
           apiUrl: this.config.apiUrl, 
-          jobId: job?.id ?? job?.ID ?? job?.Id,
+          jobId: idPart,
+          objectId,
+          algorithm: algoPart,
         }, `[${env}] Job received from factory`);
         
         try {
           const markStartedResp = await this.http.post('/api/design-processing/mark-started', {
-            jobId: job?.id
+            jobId: idPart
           });
           if (markStartedResp.status === 200) {
-            this.logger.info({ jobId: job?.id }, 'Marked job as started');
+            this.logger.info({ jobId: idPart, objectId }, 'Marked job as started');
           } else {
             this.logger.warn({ 
-              jobId: job?.id, 
+              jobId: idPart,
+              objectId,
               status: markStartedResp.status 
             }, 'Failed to mark job as started (continuing anyway)');
           }
         } catch (markErr: any) {
           this.logger.warn({ 
-            jobId: job?.id, 
+            jobId: idPart,
+            objectId,
             error: markErr?.message 
           }, 'Error marking job as started (continuing anyway)');
         }
@@ -182,9 +203,6 @@ export class Processor {
         } catch {}
 
   // Write input JSON to inbox. Filename: {algorithmName}_{designJobId}.json
-  const idPart = job?.id ?? job?.ID ?? job?.Id ?? `ts_${Date.now()}`;
-  const algoPart = job?.algorithmName || 'algorithm';
-  
   // Clean out all files in the inbox before writing new input
   try {
     const existingFiles = fs.readdirSync(this.inbox);
@@ -224,7 +242,7 @@ export class Processor {
           }
         };
         fs.writeFileSync(inboxJson, JSON.stringify(inputPayload, null, 2), 'utf8');
-        this.logger.info({ inboxJson, objectId: job?.objectId }, 'Wrote input JSON to inbox');
+        this.logger.info({ inboxJson, objectId }, 'Wrote input JSON to inbox');
 
         // Prepare per-job archive directory and job-specific log file immediately
         const home = process.env.HOME || process.env.USERPROFILE || '.';
@@ -248,7 +266,7 @@ export class Processor {
         let currentLogSize = 0;
         
         const jobLog = (level: 'info'|'warn', message: string, extra?: any) => {
-          const line = `${new Date().toISOString()} [${level}] ${message}${extra ? ' ' + JSON.stringify(extra) : ''}\n`;
+          const line = `${new Date().toISOString()} [${level}] [objectId=${objectId}] ${message}${extra ? ' ' + JSON.stringify(extra) : ''}\n`;
           try { 
             jobLogStream.write(line); 
             // Add to in-memory log if under size limit
@@ -264,9 +282,28 @@ export class Processor {
           } catch {}
         };
 
+        const jobLogger = {
+          info: (objOrMsg: any, maybeMsg?: string) => {
+            if (typeof objOrMsg === 'string') {
+              this.logger.info({ objectId }, objOrMsg);
+              return;
+            }
+            const extra = objOrMsg && typeof objOrMsg === 'object' ? objOrMsg : {};
+            this.logger.info({ objectId, ...extra }, maybeMsg);
+          },
+          warn: (objOrMsg: any, maybeMsg?: string) => {
+            if (typeof objOrMsg === 'string') {
+              this.logger.warn({ objectId }, objOrMsg);
+              return;
+            }
+            const extra = objOrMsg && typeof objOrMsg === 'object' ? objOrMsg : {};
+            this.logger.warn({ objectId, ...extra }, maybeMsg);
+          }
+        };
+
         // Single-threaded processing section: pause polling while we process this job
         try {
-          this.logger.info({ id: idPart, algo: algoPart }, 'Starting geometry processing');
+          this.logger.info({ id: idPart, algo: algoPart, objectId }, 'Starting geometry processing');
           const outputs = await runPipeline({
             id: String(idPart),
             algorithm: String(algoPart),
@@ -280,7 +317,7 @@ export class Processor {
             bambuCli: this.config.bambuCli,
             dryRun: this.config.dryRun,
             keepRhinoAlive: this.effectiveKeepRhinoAlive(),
-            logger: this.logger,
+            logger: jobLogger,
             jobLog
           });
 
@@ -347,29 +384,31 @@ export class Processor {
 
           // Wrap reportSuccess in try-catch to prevent network errors from killing the process
           try {
-            await this.reportSuccess(idPart, geometryPath, geometryName, printPath, printName, processingLog, meshMetadata);
+            await this.reportSuccess(idPart, geometryPath, geometryName, printPath, printName, processingLog, meshMetadata, objectId);
           } catch (reportErr: any) {
             this.logger.error({ 
+              objectId,
               error: reportErr?.message,
               code: reportErr?.code,
             }, 'Failed to report success - job completed but upload failed');
             // Mark the job as failed on the server so it doesn't stay stuck in PROCESSING
             try {
-              await this.reportResult(idPart, false, `Upload failed: ${reportErr?.message || 'Unknown error'}`, processingLog);
+              await this.reportResult(idPart, false, `Upload failed: ${reportErr?.message || 'Unknown error'}`, processingLog, objectId);
             } catch (reportFailErr: any) {
-              this.logger.error({ error: reportFailErr?.message }, 'Failed to report upload failure to server');
+              this.logger.error({ error: reportFailErr?.message, objectId }, 'Failed to report upload failure to server');
             }
           }
         } catch (procErr: any) {
-          this.logger.error({ err: procErr?.message }, 'Processing failed');
+          this.logger.error({ err: procErr?.message, objectId, id: idPart }, 'Processing failed');
           // Log the error to jobLog so it appears in processing log sent to server
           jobLog('warn', `Processing failed: ${procErr?.message || 'Unknown error'}`);
           const processingLog = logLines.join('');
           // Wrap reportResult in try-catch to prevent network errors from killing the process
           try {
-            await this.reportResult(idPart, false, String(procErr?.message || 'Processing failed'), processingLog);
+            await this.reportResult(idPart, false, String(procErr?.message || 'Processing failed'), processingLog, objectId);
           } catch (reportErr: any) {
             this.logger.error({ 
+              objectId,
               error: reportErr?.message,
               code: reportErr?.code,
               stack: reportErr?.stack 
@@ -380,10 +419,10 @@ export class Processor {
           try {
             await this.archiveJobFiles(archiveDirName, inboxJson);
           } catch (archiveErr: any) {
-            this.logger.warn({ err: archiveErr?.message }, 'Archiving job files failed');
+            this.logger.warn({ err: archiveErr?.message, objectId, id: idPart }, 'Archiving job files failed');
           }
           try { jobLogStream.end(); } catch {}
-          this.logger.info({ id: idPart }, 'Finished processing');
+          this.logger.info({ id: idPart, objectId }, 'Finished processing');
         }
       } catch (err: any) {
         // Enhanced error handling with detailed logging for better debugging
@@ -454,7 +493,7 @@ export class Processor {
     }
   }
 
-  private async reportResult(jobId: string, isSuccess: boolean, errorMessage?: string, processingLog?: string) {
+  private async reportResult(jobId: string, isSuccess: boolean, errorMessage?: string, processingLog?: string, objectId?: string) {
     const payload: any = {
       designJobId: jobId,
       isSuccess,
@@ -473,45 +512,45 @@ export class Processor {
     try {
       const resp = await this.http.post('/api/design-processing/result', payload);
       if (resp.status >= 200 && resp.status < 300) {
-        this.logger.info({ jobId }, 'Reported result');
+        this.logger.info({ jobId, objectId }, 'Reported result');
       } else {
-        this.logger.warn({ status: resp.status, data: resp.data }, 'Failed to report result');
+        this.logger.warn({ status: resp.status, data: resp.data, objectId, jobId }, 'Failed to report result');
       }
     } catch (err: any) {
       // Re-throw to allow caller to handle (e.g., suppress 404 for debug jobs)
       if (err?.response?.status) {
-        this.logger.warn({ status: err.response.status, data: err.response.data }, 'Failed to report result');
+        this.logger.warn({ status: err.response.status, data: err.response.data, objectId, jobId }, 'Failed to report result');
         throw err;
       }
-      this.logger.error({ err }, 'Error reporting result');
+      this.logger.error({ err, objectId, jobId }, 'Error reporting result');
       throw err;
     }
   }
 
-  private async reportSuccess(jobId: string, geometryPath: string, geometryName: string, printPath?: string, printName?: string, processingLog?: string, meshMetadata?: string) {
+  private async reportSuccess(jobId: string, geometryPath: string, geometryName: string, printPath?: string, printName?: string, processingLog?: string, meshMetadata?: string, objectId?: string) {
     // Upload files to blob storage
     // Local dev uses multipart upload, production uses Vercel Blob client upload
     try {
-      this.logger.info({ geometryName, printName, environment: this.config.environment }, 'Uploading files to blob storage');
+      this.logger.info({ geometryName, printName, environment: this.config.environment, objectId, jobId }, 'Uploading files to blob storage');
 
       const isLocalDev = this.config.environment === 'local';
 
       if (isLocalDev) {
         // Local development: Use multipart upload (legacy format for filesystem storage)
-        await this.reportSuccessMultipart(jobId, geometryPath, geometryName, printPath, printName, processingLog, meshMetadata);
+        await this.reportSuccessMultipart(jobId, geometryPath, geometryName, printPath, printName, processingLog, meshMetadata, objectId);
       } else {
         // Production: Use Vercel Blob client upload
-        await this.reportSuccessClientUpload(jobId, geometryPath, geometryName, printPath, printName, processingLog, meshMetadata);
+        await this.reportSuccessClientUpload(jobId, geometryPath, geometryName, printPath, printName, processingLog, meshMetadata, objectId);
       }
     } catch (err) {
-      this.logger.error({ err }, 'Error reporting result');
+      this.logger.error({ err, objectId, jobId }, 'Error reporting result');
       throw err; // rethrow so caller can report failure to server
     }
   }
 
-  private async reportSuccessClientUpload(jobId: string, geometryPath: string, geometryName: string, printPath?: string, printName?: string, processingLog?: string, meshMetadata?: string) {
+  private async reportSuccessClientUpload(jobId: string, geometryPath: string, geometryName: string, printPath?: string, printName?: string, processingLog?: string, meshMetadata?: string, objectId?: string) {
     // Production: Upload directly to Vercel Blob using client upload pattern
-    this.logger.info({ environment: this.config.environment }, 'Using Vercel Blob client upload (production mode)');
+    this.logger.info({ environment: this.config.environment, objectId, jobId }, 'Using Vercel Blob client upload (production mode)');
 
     // Step 1: Upload geometry file
     const geometryBuffer = fs.readFileSync(geometryPath);
@@ -530,7 +569,9 @@ export class Processor {
     this.logger.info({ 
       pathname: geometryUpload.pathname, 
       url: geometryUpload.url,
-      size: geometryBuffer.length
+      size: geometryBuffer.length,
+      objectId,
+      jobId
     }, 'Geometry file uploaded');
 
     // Step 2: Upload print file if present
@@ -552,7 +593,9 @@ export class Processor {
       this.logger.info({ 
         pathname: printUpload.pathname, 
         url: printUpload.url,
-        size: printBuffer.length
+        size: printBuffer.length,
+        objectId,
+        jobId
       }, 'Print file uploaded');
     }
 
@@ -588,15 +631,15 @@ export class Processor {
     
     const resp = await this.http.post('/api/design-processing/result', payload);
     if (resp.status >= 200 && resp.status < 300) {
-      this.logger.info({ jobId }, 'Reported success with blob URLs');
+      this.logger.info({ jobId, objectId }, 'Reported success with blob URLs');
     } else {
-      this.logger.warn({ status: resp.status, data: resp.data }, 'Failed to report success');
+      this.logger.warn({ status: resp.status, data: resp.data, objectId, jobId }, 'Failed to report success');
     }
   }
 
-  private async reportSuccessMultipart(jobId: string, geometryPath: string, geometryName: string, printPath?: string, printName?: string, processingLog?: string, meshMetadata?: string) {
+  private async reportSuccessMultipart(jobId: string, geometryPath: string, geometryName: string, printPath?: string, printName?: string, processingLog?: string, meshMetadata?: string, objectId?: string) {
     // Local development: Use multipart upload to filesystem storage
-    this.logger.info({ environment: this.config.environment }, 'Using multipart upload to filesystem (local development mode)');
+    this.logger.info({ environment: this.config.environment, objectId, jobId }, 'Using multipart upload to filesystem (local development mode)');
 
     // Step 1: Upload files via multipart form
     const uploadForm = new FormData();
@@ -620,13 +663,13 @@ export class Processor {
     });
     
     if (uploadResp.status < 200 || uploadResp.status >= 300) {
-      this.logger.error({ status: uploadResp.status, data: uploadResp.data }, 'Failed to upload files');
+      this.logger.error({ status: uploadResp.status, data: uploadResp.data, objectId, jobId }, 'Failed to upload files');
       throw new Error(`Upload failed with status ${uploadResp.status}: ${JSON.stringify(uploadResp.data)}`);
     }
     
     const uploads = uploadResp.data.uploads;
     if (!uploads || uploads.length === 0) {
-      this.logger.error('No uploads returned');
+      this.logger.error({ objectId, jobId }, 'No uploads returned');
       throw new Error('Upload succeeded but no file URLs returned');
     }
     
@@ -635,7 +678,7 @@ export class Processor {
     const printUpload = printPath && printName ? uploads.find((u: any) => u.filename === printName) : null;
     
     if (!geometryUpload) {
-      this.logger.error('Geometry file upload not found in response');
+      this.logger.error({ objectId, jobId }, 'Geometry file upload not found in response');
       throw new Error('Geometry file upload not found in server response');
     }
     
@@ -671,9 +714,9 @@ export class Processor {
     
     const resp = await this.http.post('/api/design-processing/result', payload);
     if (resp.status >= 200 && resp.status < 300) {
-      this.logger.info({ jobId }, 'Reported success with blob URLs');
+      this.logger.info({ jobId, objectId }, 'Reported success with blob URLs');
     } else {
-      this.logger.warn({ status: resp.status, data: resp.data }, 'Failed to report success');
+      this.logger.warn({ status: resp.status, data: resp.data, objectId, jobId }, 'Failed to report success');
     }
   }
 

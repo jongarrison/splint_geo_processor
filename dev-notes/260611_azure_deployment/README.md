@@ -64,6 +64,22 @@ On the VM:
    first-run dialogs.
 6. Open Grasshopper at least once to let plugins auto-install.
 
+### Rhino startup reliability tuning (recommended)
+
+On some Windows Server boots, Rhino can be present but not yet targetable by
+`RhinoCode.exe` for the first few probes. To avoid unnecessary kill/relaunch
+churn, set these in `.env.platform.win`:
+
+```
+RHINO_STARTUP_FAIL_FAST_UNHEALTHY_ATTEMPTS=0
+RHINO_EXECUTION_PROBE_WAIT_MS=8000
+```
+
+- `RHINO_STARTUP_FAIL_FAST_UNHEALTHY_ATTEMPTS=0` disables early fail-fast during
+      startup and lets the normal phase timeout windows decide.
+- `RHINO_EXECUTION_PROBE_WAIT_MS=8000` gives first-run script execution probe a
+      bit more time on VM cold starts.
+
 ### 3. Bootstrap the VM (elevated PowerShell)
 
 In Git Bash on the VM:
