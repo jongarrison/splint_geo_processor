@@ -370,10 +370,10 @@ segment closest to the neighbor being bridged (keying on near/far ends instead o
 +Y/-Y keeps handedness and elevation sign automatic).
 
 Support side:
-- create_supportpath_bridge_anchor_to_support - extends a straight line off the support arc's
-  near end, tangent to the arc there, until it strikes the anchor hemisphere. G1-continuous with
-  the support arc; meets the anchor with a small (acceptable) angular discontinuity. Trims only
-  the anchor hemisphere back to the strike point (the support arc is left whole).
+- create_supportpath_bridge_anchor_to_support - a tangent (G1) blend that leaves the support
+  arc's near end as a smooth continuation and meets the anchor hemisphere tangentially a short
+  way up from its near end (high and round, not a sharp strike). Trims only the anchor hemisphere
+  back to the attach point (the support arc is left whole).
 - create_supportpath_bridge_support_to_support - a simple tangent arc joining the near ends of
   the two support arcs.
 - create_supportpath_bridge_anchor_to_anchor - hourglass blend (TwoDFormHelper) on the support
@@ -399,21 +399,31 @@ support_bridge_radius_mm (the finger contacts them, so they need a smoother blen
 
 Anchor-to-anchor joints go through create_anchor_to_anchor_bridge instead. Adjacent anchor rings
 are designed to overlap (neighbouring fingers share a single wall, like two wedding rings pressed
-together), so the two hemispheres usually cross. When they do, the exterior perimeter simply
-meets at the outer crossing: each hemisphere is trimmed back to it (dropping the stub that pokes
-into the neighbour) and no bridge is inserted - a plain fillet would otherwise pick the interior
-tangent, which is valid but on the wrong side. Only when the rings are genuinely separated does
-it fall back to create_rounded_corner_bridge at a tight anchor_bridge_radius_mm (structural only).
-The radius policy lives in the dispatcher (weld_perimeter_walk), not the helpers.
+together), so the two hemispheres cross and leave a sharp concave crotch at the outer crossing.
+That crotch is rounded with a small fillet at anchor_bridge_radius_mm: pick points on each ring's
+far (outer) side steer Curve.CreateFilletCurves to the exterior corner (not the interior tangent)
+and keep each ring's outer arc. If the fillet will not fit, the rings fall back to meeting
+directly at the crossing (a sharp cusp); genuinely separated rings fall back to a rounded corner
+between their facing ends. The radius policy lives in the dispatcher (weld_perimeter_walk), not
+the helpers.
 
-anchor_to_support keeps its own function (create_supportpath_bridge_anchor_to_support) that
-extends a straight tangent line off the support arc's near end until it strikes the anchor
-hemisphere, then trims the anchor there (no fillet yet - deferred). The leap
-(create_return_leap_bridge) finds a true common tangent line to the two rings via an iterative
-supporting-line fixpoint and trims both return hemispheres. weld_perimeter_walk dispatches these,
-logs the outcome of every adjacent pair (bridged + length, direct join, turn-around, skip, or
-failure), and JoinCurves the result. End-support caps are handled up front (see below) so they
-arrive at the walk as a single pre-capped cradle.
+anchor_to_support keeps its own function (create_supportpath_bridge_anchor_to_support), a smooth
+tangent (G1) blend: Curve.CreateBlendCurve leaves the support band's near end as a continuation
+of the arc and meets the anchor hemisphere tangentially a short way up from the end nearest the
+support (anchor_attach_fraction, default 0.4, of the hemisphere's remaining arc length from that
+near end - roughly 20% down from the apex, so the junction is high and round rather than a sharp
+straight strike). Only the anchor is trimmed, back to the attach point. It serves the mid-support
+arcs and the support-side prong of an end-support cradle. The return-side prong is different:
+there the anchor hemisphere is the ring's outer wall and must stay round, so blending high onto
+it (which trims a chunk out of the hemisphere) is wrong. create_returnpath_bridge_anchor_to_support
+rounds that crotch like the A-A joints instead - a fillet at anchor_bridge_radius_mm with far-side
+pick points, keeping each curve's far portion and trimming only to the tangency points, so the
+hemisphere is left un-dented (falling back to a direct crossing join, then a gap, if the fillet
+will not fit). The leap (create_return_leap_bridge) finds a true common tangent line to the two
+rings via an iterative supporting-line fixpoint and trims both return hemispheres.
+weld_perimeter_walk dispatches these, logs the outcome of every adjacent pair (bridged + length,
+direct join, turn-around, skip, or failure), and JoinCurves the result. End-support caps are
+handled up front (see below) so they arrive at the walk as a single pre-capped cradle.
 
 #### End-support special case
 
@@ -430,16 +440,17 @@ left open. The two open near ends are the support prong and the return prong.
 plan_perimeter_walk emits this cradle as the finger's single 'end_support_cradle' visit (in
 place of the plain support arc). weld_perimeter_walk then bridges its two prongs to the same
 adjacent anchor: the support prong to that anchor's support hemisphere (support-side pair,
-anchor_support_side + end_support_cradle) and the return prong to its return hemisphere
-(return-side pair, anchor_return_side + end_support_cradle). Both reuse
-create_supportpath_bridge_anchor_to_support. The two prongs sit only a band thickness apart, so
-nearest-endpoint guessing is unreliable: build_end_support_cradles orients the cradle so its
-start endpoint is the support prong and its end endpoint is the return prong, and the weld pins
-each bridge to the matching endpoint via support_param. This condenses the three visits into one
-and works at either end via the near/far endpoint test (no hardcoded +Y / -Y).
-single_sided_support_thickness_mm is a distinct parameter (not radial_band_thickness_mm) because
-the cradle is a single-sided support band, a structurally different form from a full anchor ring
-wall.
+anchor_support_side + end_support_cradle) via create_supportpath_bridge_anchor_to_support (the
+high tangent blend), and the return prong to its return hemisphere (return-side pair,
+anchor_return_side + end_support_cradle) via create_returnpath_bridge_anchor_to_support (the
+A-A-style crotch fillet, which keeps the return hemisphere round). The two prongs sit only a
+band thickness apart, so nearest-endpoint guessing is unreliable: build_end_support_cradles
+orients the cradle so its start endpoint is the support prong and its end endpoint is the return
+prong, and the weld pins each bridge to the matching endpoint via support_param. This condenses
+the three visits into one and works at either end via the near/far endpoint test (no hardcoded
++Y / -Y). single_sided_support_thickness_mm is a distinct parameter (not
+radial_band_thickness_mm) because the cradle is a single-sided support band, a structurally
+different form from a full anchor ring wall.
 
 #### Worked example
 

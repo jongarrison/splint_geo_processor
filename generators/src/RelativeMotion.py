@@ -872,18 +872,15 @@ def create_anchor_to_anchor_bridge(curve_a, curve_b, radius_mm):
     """Join two adjacent anchor-ring hemispheres on their exterior side.
 
     Adjacent anchor rings usually overlap (neighbouring fingers share a wall - picture two
-    wedding rings pressed together), so the two hemispheres physically cross. In that case the
-    exterior perimeter simply meets at the outer crossing: each hemisphere is trimmed back to
-    that crossing (dropping the stub that pokes into the neighbour) and no bridge curve is
-    inserted, since the overlapping walls already supply the material. A plain fillet/blend
-    between the facing ends would instead pick the interior tangent - valid, but wrong side.
+    wedding rings pressed together), so the two hemispheres physically cross, leaving a sharp
+    concave crotch at the outer crossing. We round that crotch with a small fillet (radius_mm):
+    pick points on each ring's far (outer) side select the exterior corner and keep each ring's
+    outer arc, and the fillet arc bridges them. If the fillet will not fit, the rings fall back
+    to meeting directly at the crossing (the earlier sharp behaviour), and genuinely separated
+    rings fall back to a rounded corner between their facing ends.
 
-    When the rings are genuinely separated (a real exterior gap) it falls back to a
-    rounded-corner fillet at radius_mm.
-
-    Returns (bridge, curve_a_revised, curve_b_revised) where bridge is _DIRECT_JOIN for the
-    overlap case (curves meet directly), a fillet/blend Curve for the gap case, or None on
-    failure.
+    Returns (bridge, curve_a_revised, curve_b_revised) where bridge is a fillet arc, _DIRECT_JOIN
+    for the sharp-crossing fallback (curves meet directly), or None on failure.
     """
     events = Intersection.CurveCurve(curve_a, curve_b, _INTERSECT_TOL, _INTERSECT_TOL)
     if events is not None and events.Count > 0:
@@ -893,13 +890,24 @@ def create_anchor_to_anchor_bridge(curve_a, curve_b, radius_mm):
         gap_mid = Point3d((face_a.X + face_b.X) / 2.0, (face_a.Y + face_b.Y) / 2.0,
                           (face_a.Z + face_b.Z) / 2.0)
         # Overlapping circles cross twice (one per hemisphere); take the crossing nearest the
-        # facing gap so we trim on the correct (this-side) exterior corner.
+        # facing gap so we round the correct (this-side) exterior corner.
         best = min(events, key=lambda ev: ev.PointA.DistanceTo(gap_mid))
-        # Keep each hemisphere's outer (far, non-facing) portion up to the crossing.
+        # Each hemisphere's outer (far, non-facing) endpoint - the side we keep.
         far_a = curve_a.PointAt(curve_a.Domain.T1 if _blend_reverse(curve_a, ta_face)
                                 else curve_a.Domain.T0)
         far_b = curve_b.PointAt(curve_b.Domain.T1 if _blend_reverse(curve_b, tb_face)
                                 else curve_b.Domain.T0)
+        # Round the exterior crotch: fillet keeping each ring's outer arc (pick points far_a/far_b
+        # sit on the retained side, steering the fillet to the exterior rather than interior).
+        if radius_mm > 0.0:
+            pieces = Curve.CreateFilletCurves(curve_a, far_a, curve_b, far_b, radius_mm,
+                                              False, True, False, _INTERSECT_TOL, _INTERSECT_TOL)
+            arc, rev_a, rev_b = _split_fillet_pieces(pieces, curve_a, curve_b, ta_face, tb_face)
+            if arc is not None:
+                return arc, rev_a, rev_b
+            log("create_anchor_to_anchor_bridge: overlap fillet at {0:.2f} mm did not fit; "
+                "meeting sharply at the crossing".format(radius_mm))
+        # Fallback: meet directly at the crossing (sharp), trimming each outer arc to it.
         rev_a = _trim_keep_near(curve_a, best.ParameterA, far_a)
         rev_b = _trim_keep_near(curve_b, best.ParameterB, far_b)
         return _DIRECT_JOIN, rev_a, rev_b
@@ -908,65 +916,111 @@ def create_anchor_to_anchor_bridge(curve_a, curve_b, radius_mm):
 
 
 def create_supportpath_bridge_anchor_to_support(anchor_curve, support_curve, support_center,
-                                                support_param=None):
-    """Bridge from an anchor ring hemisphere to a supported finger's support arc.
+                                                support_param=None, anchor_attach_fraction=0.4):
+    """Smooth (G1) bridge from an anchor ring hemisphere to a supported finger's support band.
 
-    Deliberately simple: extend a straight line off the support arc's near end, tangent to the
-    arc there, until it strikes the anchor hemisphere. The bridge is G1-continuous with the
-    support arc and meets the anchor with a small (acceptable) angular discontinuity. Only the
-    anchor is trimmed - back to the strike point, dropping the stub that faced the support; the
-    support arc is left whole.
+    A tangent blend leaves the support band's near end as a smooth continuation of the arc and
+    meets the anchor hemisphere tangentially a short way up from the end nearest the support -
+    anchor_attach_fraction of the hemisphere's remaining arc length from that near end (0.4
+    lands roughly 20% down from the apex, i.e. high on the ring). The anchor is trimmed back to
+    that attach point, dropping the stub that faced the support; the support band is left whole.
+    Tangent continuity at both ends replaces the earlier straight-tangent strike, which met the
+    anchor at a sharp angle. Used for every anchor-to-support joint: mid-support arcs and both
+    prongs of an end-support cradle (support side and return side).
 
     support_param pins which end of support_curve to bridge from (used for end-support cradles,
     whose two prongs sit only a band thickness apart); when None the facing endpoint is picked
     automatically.
 
-    Returns (bridge_line, anchor_curve_revised, support_curve_revised); on failure the bridge
-    is None and the curves are returned untrimmed.
+    Returns (blend_curve, anchor_curve_revised, support_curve_revised); on failure the bridge is
+    None and the curves are returned untrimmed.
     """
-    # Near end of the support arc (the endpoint closest to the anchor) and its outward tangent.
     if support_param is None:
         ta, _tb = _facing_endpoints(support_curve, anchor_curve)
     else:
         ta = support_param
-    p_near = support_curve.PointAt(ta)
-    tan = support_curve.TangentAt(ta)
-    if _blend_reverse(support_curve, ta):
-        tan.Reverse()  # TangentAt follows increasing param; at the start end that aims inward
-    tan.Unitize()
+    p_support = support_curve.PointAt(ta)
 
-    # Cast a generous ray from the near end toward the anchor and take the closest hit.
-    reach = p_near.DistanceTo(anchor_curve.GetBoundingBox(True).Center) * 2.0
-    probe = LineCurve(p_near, p_near + tan * reach)
-    events = Intersection.CurveCurve(probe, anchor_curve, _INTERSECT_TOL, _INTERSECT_TOL)
-    hit = None
-    th_anchor = None
-    if events is not None and events.Count > 0:
-        best_d = None
-        for ev in events:
-            d = ev.PointA.DistanceTo(p_near)
-            if best_d is None or d < best_d:
-                best_d = d
-                hit = ev.PointA
-                th_anchor = ev.ParameterB
+    # Anchor end nearest the support prong is the stub we drop; attach a fraction of the
+    # hemisphere's arc up from it (toward the apex) so the blend meets the ring high and round.
+    if (anchor_curve.PointAtStart.DistanceTo(p_support)
+            <= anchor_curve.PointAtEnd.DistanceTo(p_support)):
+        near_anchor_t = anchor_curve.Domain.T0
+        attach_nl = anchor_attach_fraction
     else:
-        # The tangent extension can graze past the anchor (e.g. a shifted profile_plane skews
-        # the arc's end tangent away from the ring). Fall back to a straight chord to the
-        # anchor's nearest point - a slightly larger discontinuity, but always connects.
-        ok, t_close = anchor_curve.ClosestPoint(p_near)
-        if not ok:
-            log("create_supportpath_bridge_anchor_to_support: tangent extension missed and "
-                "closest-point fallback failed; leaving gap")
-            return None, anchor_curve, support_curve
-        th_anchor = t_close
-        hit = anchor_curve.PointAt(t_close)
-        log("create_supportpath_bridge_anchor_to_support: tangent extension missed the "
-            "anchor; using closest-point chord fallback (gap {0:.2f} mm)".format(
-                p_near.DistanceTo(hit)))
+        near_anchor_t = anchor_curve.Domain.T1
+        attach_nl = 1.0 - anchor_attach_fraction
+    ok, t_attach = anchor_curve.NormalizedLengthParameter(attach_nl)
+    if not ok:
+        t_attach = near_anchor_t
 
-    bridge = LineCurve(p_near, hit)
-    rev_anchor = _trim_keep_far(anchor_curve, th_anchor, support_center)
-    return bridge, rev_anchor, support_curve
+    # Blend heads into the gap at both ends: off the support body at its prong, and back toward
+    # the dropped near stub at the anchor so the kept far portion continues smoothly.
+    rev_support = _blend_reverse(support_curve, ta)
+    rev_anchor = near_anchor_t == anchor_curve.Domain.T0
+    blend = Curve.CreateBlendCurve(support_curve, ta, rev_support, BlendContinuity.Tangency,
+                                   anchor_curve, t_attach, rev_anchor, BlendContinuity.Tangency)
+    if blend is None:
+        log("create_supportpath_bridge_anchor_to_support: tangent blend failed; leaving gap")
+        return None, anchor_curve, support_curve
+
+    rev_anchor_curve = _trim_keep_far(anchor_curve, t_attach, support_center)
+    return blend, rev_anchor_curve, support_curve
+
+
+def create_returnpath_bridge_anchor_to_support(anchor_curve, support_curve, support_param,
+                                               radius_mm):
+    """Round the concave crotch where an end-support cradle's return prong meets the adjacent
+    anchor's return hemisphere - the return-side analogue of create_anchor_to_anchor_bridge.
+
+    The return hemisphere is the ring's outer wall and must stay round, so (unlike the support
+    side, which deliberately blends high onto the hemisphere) this only rounds the corner and
+    keeps each curve's far portion: pick points on each curve's far side steer
+    Curve.CreateFilletCurves to the exterior crotch and trim only back to the tangency points,
+    leaving the hemisphere un-dented. support_param pins the cradle's return prong; its two
+    prongs sit a band thickness apart, so auto facing-endpoint detection is unreliable.
+
+    Returns (bridge, anchor_curve_revised, support_curve_revised); bridge is a fillet arc,
+    _DIRECT_JOIN (curves meet directly at the crossing), or None on failure.
+    """
+    ta = support_param
+    p_prong = support_curve.PointAt(ta)
+    # Anchor's facing (near) endpoint faces the prong; the opposite end is the apex / turn-around.
+    if (anchor_curve.PointAtStart.DistanceTo(p_prong)
+            <= anchor_curve.PointAtEnd.DistanceTo(p_prong)):
+        tb_face = anchor_curve.Domain.T0
+    else:
+        tb_face = anchor_curve.Domain.T1
+    far_anchor = anchor_curve.PointAt(
+        anchor_curve.Domain.T1 if tb_face == anchor_curve.Domain.T0 else anchor_curve.Domain.T0)
+    far_support = support_curve.PointAt(
+        support_curve.Domain.T0 if ta == support_curve.Domain.T1 else support_curve.Domain.T1)
+    # The cradle's two prongs sit only a band thickness apart, so its far endpoint (the opposite
+    # prong) is a poor fillet pick point - Rhino can keep the wrong tiny stub. Use the cradle's
+    # arc-length midpoint (out on the cap, unambiguously on the retained U body) instead.
+    pick_support = support_curve.PointAtNormalizedLength(0.5)
+
+    if radius_mm > 0.0:
+        pieces = Curve.CreateFilletCurves(support_curve, pick_support, anchor_curve, far_anchor,
+                                          radius_mm, False, True, False,
+                                          _INTERSECT_TOL, _INTERSECT_TOL)
+        arc, rev_support, rev_anchor = _split_fillet_pieces(
+            pieces, support_curve, anchor_curve, ta, tb_face)
+        if arc is not None:
+            return arc, rev_anchor, rev_support
+        log("create_returnpath_bridge_anchor_to_support: fillet at {0:.2f} mm did not fit; "
+            "meeting sharply at the crossing".format(radius_mm))
+
+    # Fallback: meet directly at the crossing (sharp), keeping each far portion un-dented.
+    events = Intersection.CurveCurve(support_curve, anchor_curve, _INTERSECT_TOL, _INTERSECT_TOL)
+    if events is not None and events.Count > 0:
+        best = min(events, key=lambda ev: ev.PointB.DistanceTo(p_prong))
+        rev_support = _trim_keep_near(support_curve, best.ParameterA, far_support)
+        rev_anchor = _trim_keep_near(anchor_curve, best.ParameterB, far_anchor)
+        return _DIRECT_JOIN, rev_anchor, rev_support
+
+    log("create_returnpath_bridge_anchor_to_support: no fillet fit and no crossing; leaving gap")
+    return None, anchor_curve, support_curve
 
 
 def create_return_leap_bridge(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0):
@@ -1074,15 +1128,16 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
             work[ai] = rev_anchor
             work[si] = rev_support
         elif set([ka, kb]) == set(["anchor_return_side", "end_support_cradle"]):
-            # End-support cradle: bridge its return prong (the cradle's end endpoint) to the
-            # adjacent anchor's return hemisphere, closing the capped end onto the return side.
+            # End-support cradle: round the crotch where its return prong (the cradle's end
+            # endpoint) meets the adjacent anchor's return hemisphere. Uses a fillet at the
+            # anchor radius (like the A-A joints) so the hemisphere wall stays round rather than
+            # being carved into by a deep tangent blend.
             if ka == "anchor_return_side":
                 ai, si = k, j
             else:
                 ai, si = j, k
-            support_center = work[si].GetBoundingBox(True).Center
-            bridge, rev_anchor, rev_support = create_supportpath_bridge_anchor_to_support(
-                work[ai], work[si], support_center, support_param=work[si].Domain.T1)
+            bridge, rev_anchor, rev_support = create_returnpath_bridge_anchor_to_support(
+                work[ai], work[si], work[si].Domain.T1, anchor_bridge_radius_mm)
             work[ai] = rev_anchor
             work[si] = rev_support
         elif ka == "anchor_support_side" and kb == "anchor_support_side":
