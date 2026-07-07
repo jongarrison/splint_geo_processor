@@ -39,6 +39,19 @@ Coordinate frame (hand imagined laying flat on a table, as in prior designs):
   Z is its own circle radius (see step 3), so it is not exactly (0,0,0). Later construction
   may translate away from this.
 
+### Input validation rules (future splint_factory web form)
+
+The geometry pipeline assumes the collected raw_data already satisfies these; the web form
+must enforce them:
+- At least two anchor fingers per splint (the profile plane needs >= 2 anchors, and the splint
+  is mechanically carried by the anchors).
+- At least one supported finger (no relative motion = not a RelativeMotion splint).
+- Included fingers are contiguous: an excluded finger (is_included == False) can only sit at an
+  end of the finger run, never between two included fingers.
+- Only anchor fingers may be slitted (is_slitted True only where is_anchor_finger is True).
+- pip_neighbor_fwd_offset is 0 for the first included finger (the reference finger).
+- relative_elevation_angle within [-120, +45] degrees (provisional; matches the Phase 2 clamp).
+
 ### First function: setup_finger_positions
 
 Takes the json below (schema is provisional and may change as needs emerge) and returns,
@@ -270,113 +283,200 @@ full_intersection_curves, preserved_intersection_curves = extract_finger_cross_s
     raw_data, profile_plane, p1_cylinders_oriented, p1_lines_oriented, support_arc_deg=120.0)
 ```
 
-### Draft Phase 5: Building the outer profile (two distinct paths)
+### Phase 5: Walking the profile perimeter
 
-Phase 4 gives us, per finger, the finger-contact curve: a full closed ellipse for anchors
-and a support arc for supported fingers. Phase 5 turns those contact curves into the outer
-boundary of the splint's extruded profile. There are two clearly different jobs here, so we
-expect two functions.
+Rethink: rather than assembling the profile from independent pieces, we build the full closed
+perimeter by walking it once. The walk has two legs:
+- Support side - the run that incorporates the supported fingers' support arcs.
+- Return side - the more direct run back, chosen for structural rigidity.
 
-Inside / outside model (important - keep this straight):
-- Anchor fingers sit INSIDE their rings. The Phase 4 closed ellipse is the inner
-  (finger-contact) boundary; the exterior ring we build is the outer boundary. The anchor
-  finger ends up enclosed inside the profile shape.
-- Supported fingers sit OUTSIDE the support structure. The Phase 4 support arc IS the outer
-  profile edge at that finger (the finger presses on it from the outside); the splint
-  material lies on the inner side of the arc, contiguous with the anchor rings. Supported
-  fingers therefore end up on the outside of the profile, and support arcs need no offset.
+Framing the walk as support side then return side (rather than clockwise / counter-clockwise)
+keeps it robust to the sign of relative_elevation_angle and to handedness: the same visit logic
+produces a valid closed perimeter for every permutation.
+
+Inside / outside model (still holds):
+- Anchor fingers sit INSIDE their rings; the Phase 4 closed ellipse is the inner boundary and
+  the exterior ring (Path A) is the outer boundary.
+- Supported fingers sit OUTSIDE the support structure; the Phase 4 support arc IS the outer
+  profile edge at that finger, so support arcs need no offset.
+
++Z / -Z convention (mind what each is relative to):
+- Phase 4's -Z / +Z are relative to the finger cross-section (which part of the finger ellipse
+  we keep). For relative_elevation_angle >= 0 the finger is raised, so its support arc is the
+  lower (-Z) part of the finger.
+- Phase 5's +Z / -Z are relative to the splint perimeter. The raised finger rests on top of the
+  splint, so that same support arc is the top (+Z) edge of the profile. So for angle >= 0 the
+  support side is the +Z side of the perimeter and the return side is the -Z side; for a
+  negative angle they swap. This is consistent with Phase 4.
 
 New input parameter for this phase:
 - radial_band_thickness_mm - the wall thickness of an anchor ring (the radial gap between the
   anchor's finger-contact ellipse and the ring's outer boundary).
 
-#### Path A: exterior anchor rings
+#### Path A: exterior anchor rings + hemispheres
 
-Each anchor finger becomes a full ring (like a wedding ring): its Phase 4 closed ellipse is
-the inner boundary, and we build the matching outer boundary.
+Build each anchor's exterior ring: offset the Phase 4 closed ellipse outward within the profile
+plane by radial_band_thickness_mm, and verify the offset comes back closed and longer than the
+input (confirming it is outside).
 
-- Offset each anchor's preserved (closed) curve outward, within the profile plane, by
-  radial_band_thickness_mm. Curve.Offset needs the profile_plane and a signed distance /
-  outward direction relative to the section center. Verify that the offset curve produces a closed 
-  curve that is longer than the input curve (ensuring that it is outside)
+Addition: also split each exterior ring into a +Z hemisphere and a -Z hemisphere at the ring's
++Y-extreme and -Y-extreme points (the extremes along the in-plane horizontal axis). Splitting
+there gives the hemispheres the same +Y-start / -Y-end convention as the Phase 4 support arcs,
+so the bridges line up naturally.
 
-inputs: 
-- raw_data (for is_anchor_finger), 
-- profile_plane, 
-- preserved_intersection_curves (the anchor closed curves), 
-- radial_band_thickness_mm.
+Inputs: raw_data (for is_anchor_finger), profile_plane, preserved_intersection_curves (anchor
+closed curves), radial_band_thickness_mm.
+Returns (index-aligned to included fingers, None for supported fingers):
+- exterior_anchor_rings
+- exterior_ring_pos_hemispheres (+Z halves)
+- exterior_ring_neg_hemispheres (-Z halves)
 
-returns: 
-exterior_anchor_rings, index-aligned to the included fingers with None for the
-  supported fingers (keeping the same None-padded indexing convention as every other list).
+#### The perimeter walk (two passes)
 
-#### Path B: connecting curves across the gaps
+Pass 1 - lay down the ordered finger visits into perimeter_construction_segments (no bridges
+yet). Each slot holds {kind, finger_index, curve} where kind is anchor_support_side /
+anchor_return_side / support_arc. Walk the support side over the included fingers in if->sf
+order, then the return side back:
+- Support side (each included finger, if->sf):
+  - anchor finger -> its support-side hemisphere (+Z when angle >= 0, else -Z)
+  - support finger -> its Phase 4 support arc
+- Return side (walking sf->if, landing only on anchors; support runs are leapt over):
+  - anchor finger -> its return-side hemisphere (the opposite hemisphere)
 
-Between neighboring fingers we build a continuous, smooth curve that ties the supported-finger
-support arcs together (and bridges toward the anchors) into one outer profile. The goals are a
-shape comfortable for the finger web spaces and a mechanically sound transition that minimizes
-stress concentration (no sharp inside corners).
+Pass 2 - bridge adjacent slots. For each adjacent pair of different fingers, call the matching
+bridge, which returns (bridge_segment, from_segment_revised, to_segment_revised); write the two
+revised curves back into their slots and insert bridge_segment between them.
 
-Working strategy (to be validated against Phase 4 output):
-- Each gap is bridged by a concave blend tangent to both neighbors. A connector joins one
-  finger's -Y end to the next finger's +Y start (support arcs are oriented +Y start to -Y end
-  in Phase 4). On the anchor side, place the connector tangent to the exterior_anchor_ring
-  (Path A); we reference the ring for placement now and weld the paths together in Phase 6.
-- Shape control: describe the blend with a target concave radius plus a minimum neck (isthmus)
-  width safeguard, mirroring the BuddyRingsDuo hourglass helpers in TwoDFormHelper.py. If the
-  requested radius would pinch the neck below the minimum, grow the radius until the minimum is
-  met (the bisection approach in _solve_hourglass_r_for_min_isthmus). Exact parameter names and
-  the fixed-vs-gap-derived choice are still under discussion (see notes below).
+Why revisions compose: a middle segment borders exactly two bridges, and each trims the opposite
+end of it (the end nearest that neighbor). The two trims are disjoint, so they compose regardless
+of order - the slot just holds the current curve and each bridge reads/writes it. A small helper
+(ordered slots plus prev/curr/next accessors and replace(i, curve)) keeps this readable; bridges
+stay pure and the walker owns the writes.
 
-Gap coverage in this phase:
-- Anchor-support and support-support gaps get a connector now.
-- Anchor-anchor gaps are deferred to Phase 6 (where we join the exterior ring path); their
-  slots come back None from this function.
+Turn-arounds (no bridge): at the first and last included anchors the walk reverses; that anchor's
+two hemispheres join directly at its far +Y / -Y extreme (the split point), so no bridge is
+needed there. Bridges only ever connect two different fingers.
 
-Returns (both, for observability):
-- connecting_segments - a fixed-length list of (number of included fingers - 1). Slot k is the
-  connector for the gap between included finger k and finger k+1, or None for a deferred
-  anchor-anchor gap. This departs from the per-finger index (gaps live between fingers) but
-  keeps a stable, None-padded gap->index mapping.
-- continuous_curve - the support arcs joined with their connectors into one curve (the
-  support-side run of the profile). It does NOT weld to the exterior_anchor_rings yet. Where an
-  anchor-anchor gap (None) interrupts the run, continuous_curve covers only the contiguous
-  support-side portion; in the common two-anchor configs there are no anchor-anchor gaps, so it
-  is a single continuous curve.
+Visit counts: anchors are visited twice (a hemisphere per side); supported fingers are visited
+once (support side only), since the return side leaps over support runs.
 
-Special case to keep in mind: a supported finger can land at the END of the splint (not
-between two anchors), leaving only one adjacent gap. That is acceptable here; closing off that
-end support shape into the loop is future work.
+Final step: JoinCurves the ordered segments + bridges into one closed profile curve.
 
-Still under discussion:
-- How to parameterize the connector radius (a fixed target radius vs. gap-derived), and the
-  name/units of the min-neck safeguard. Leaning toward the BuddyRingsDuo pattern (target
-  radius + min isthmus width).
-- Build orientation: the eventual build plate will be roughly parallel to the profile_plane
-  when the final profile is extruded, so the "one largely flat surface" requirement is handled
-  at extrusion time; the full closed loop is still a phase or two away.
+#### Bridge functions
 
-### Draft Phase 6: Joining the exterior path (anchor-anchor joints and welding)
+All bridges take (from_index, from_segment, to_index, to_segment, raw_data) and return
+(bridge_segment, from_segment_revised, to_segment_revised). "Near end" = the endpoint of a
+segment closest to the neighbor being bridged (keying on near/far ends instead of hardcoded
++Y/-Y keeps handedness and elevation sign automatic).
 
-Phase 6 completes the outer profile by handling everything Phase 5 deferred:
-- Anchor-anchor joints: build the exterior connector between each pair of adjacent anchor
-  exterior_anchor_rings. This is the two-ring bridge case the BuddyRingsDuo design already
-  solves - see create_two_circle_hourglass_bridge_perimeter in TwoDFormHelper.py, which bridges
-  two co-planar circles with concave waist arcs of a target radius (hourglass_r) and a
-  guaranteed neck (min_isthmus_width, via _build_pure_arc_hourglass, or the straight-bar variant
-  when the radius must be preserved). Our anchor sections are near-circular (anchors are cut
-  nearly perpendicular to their axes), so this helper should apply directly or with a small
-  ellipse adaptation.
-- Weld the exterior path: join the exterior_anchor_rings, the anchor-anchor connectors, and the
-  Phase 5 support-side continuous_curve into a single closed outer profile loop.
-- Close the end-support shape: the end supported finger (single-gap case from Phase 5) needs its
-  open side closed into the loop here.
+Support side:
+- create_supportpath_bridge_anchor_to_support - extends a straight line off the support arc's
+  near end, tangent to the arc there, until it strikes the anchor hemisphere. G1-continuous with
+  the support arc; meets the anchor with a small (acceptable) angular discontinuity. Trims only
+  the anchor hemisphere back to the strike point (the support arc is left whole).
+- create_supportpath_bridge_support_to_support - a simple tangent arc joining the near ends of
+  the two support arcs.
+- create_supportpath_bridge_anchor_to_anchor - hourglass blend (TwoDFormHelper) on the support
+  side (+Z when angle >= 0, else -Z).
 
-Output (draft): the full closed profile curve, ready for extrusion in a later phase.
+Return side:
+- create_returnpath_bridge_anchor_across_support_leap - a tangent line on the return side across
+  the exterior rings of the two anchors bracketing a support run (the direct, rigid leap); trims
+  both anchors' return-side hemispheres at the tangent points.
+- create_returnpath_bridge_anchor_to_anchor - hourglass blend on the return side (the opposite
+  side from the support-side anchor-to-anchor bridge).
 
-Open questions:
-- Where exactly the support-side run meets the ring path (tangency/blend at those junctions).
-- Whether the whole loop is rebuilt as one blended curve or assembled from the phase outputs and
-  welded with JoinCurves.
-- How to guarantee the "one largely flat surface" for the build plate as the loop closes.
+Shape control for the arc / hourglass bridges reuses the BuddyRingsDuo approach via two knobs:
+web_fillet_r_mm (target concave blend radius at a joint) and min_web_width_mm (minimum neck
+width). Adjacent-finger separation is already bounded by setup_finger_positions' min_center_gap,
+but bridges should still guard against short / partial Phase 4 arcs.
+
+Implementation note (first attempt, in RelativeMotion.py, pending Rhino validation): because the
+anchor sections can be skewed ellipses (a tilted profile_plane), the bridges work against the
+true curves rather than best-fit circles. This collapses the smooth bridges into a shared
+Curve.CreateBlendCurve (G1 tangent) helper, create_tangent_blend_bridge, used for
+support-to-support and both anchor-to-anchor sides (each side computed independently - a tangent
+blend is cheap, so no shared-hourglass caching). anchor_to_support keeps its own function
+(create_supportpath_bridge_anchor_to_support) that extends a straight tangent line off the
+support arc's near end until it strikes the anchor hemisphere, then trims the anchor there. The
+leap (create_return_leap_bridge) finds a true common
+tangent line to the two rings via an iterative supporting-line fixpoint and trims both return
+hemispheres. weld_perimeter_walk dispatches these and JoinCurves the result. Still deferred:
+enforcing min_web_width_mm, the optional anchor-joint fillet, and the end-support cap below.
+
+#### End-support special case
+
+When the first or last included finger is a supported finger (e.g. the A-A-S or S-A-A configs),
+the support side has no anchor to turn around on at that end. Cap it: close the support-side end
+with a semicircle and run the return side back parallel to the support side, offset by
+radial_band_thickness_mm (the semicircle radius is half that offset, so the two parallel runs
+close cleanly). This can occur at either end, so the walker needs both a start-cap and an
+end-cap case.
+
+#### Worked example
+
+Sample raw_data (if anchor, mf support, rf anchor, sf excluded; angle +20). angle >= 0, so the
+support side is +Z and the return side is -Z. sf is excluded, so the walk runs if->rf.
+
+Support side:
+- Visit 1 - if (anchor): append if's +Z hemisphere.
+- Visit 2 - gap if->mf (anchor to support): create_supportpath_bridge_anchor_to_support.
+- Visit 3 - mf (support): append mf's support arc.
+- Visit 4 - gap mf->rf (support to anchor): create_supportpath_bridge_anchor_to_support.
+- Visit 5 - rf (anchor): append rf's +Z hemisphere. Support side complete; turn around on rf's
+  far extreme (no bridge) into its -Z hemisphere.
+
+Return side (land on anchors, leap over supports):
+- Visit 6 - rf (anchor): append rf's -Z hemisphere.
+- Visit 7 - gap rf..if (leaping over mf): create_returnpath_bridge_anchor_across_support_leap
+  using rf's and if's -Z hemispheres.
+- Visit 8 - if (anchor): append if's -Z hemisphere; the loop closes back to Visit 1 at if's far
+  extreme (no bridge).
+
+JoinCurves the slots + bridges into the closed profile perimeter. (This config does not exercise
+the support-to-support or anchor-to-anchor bridges; those appear when two supports are adjacent,
+or when three or more anchors are adjacent, respectively.)
+
+Returns (for observability):
+- perimeter_construction_segments - the ordered slots + bridges (previewable piece by piece).
+- closed_profile_curve - the joined closed perimeter.
+
+Open items:
+- Enforce min_web_width_mm (grow web_fillet_r_mm when a blend pinches the neck too thin).
+- Exact fillet handling at the perpendicular anchor-to-support joint (deferred; optional).
+- Confirm the hemisphere split points (+Y / -Y extremes) once we see Phase 4 output in Rhino.
+- Implement the end-support cap (semicircle + parallel return) for A-A-S / S-A-A configs.
+
+#### Usage example
+
+Phase 5 calls (assuming profile_plane and the Phase 4 `preserved` sections are already wired):
+
+```python
+rings, pos_hemis, neg_hemis = build_exterior_anchor_rings(
+    raw_data, profile_plane, preserved)  # radial_band_thickness_mm optional
+
+walk_segments = plan_perimeter_walk(raw_data, pos_hemis, neg_hemis, preserved)
+
+closed_profile, bridge_curves = weld_perimeter_walk(
+    raw_data, walk_segments, profile_plane, rings)  # web_fillet_r_mm / min_web_width_mm optional
+```
+
+Recommended incremental bring-up (bake / preview each stage before wiring the next, since the
+bridges are a first attempt):
+
+1. build_exterior_anchor_rings - preview `rings`, then `pos_hemis` and `neg_hemis` separately;
+   confirm each ring is closed and outside its Phase 4 ellipse, and that the split lands cleanly
+   at the +Y / -Y extremes.
+2. plan_perimeter_walk - preview `[s["curve"] for s in walk_segments]` in order; confirm the
+   support-side then return-side visit sequence looks right for the config.
+3. weld_perimeter_walk - first preview `bridge_curves` alone to check each bridge shape, then
+   `closed_profile`; confirm it reports as closed (IsClosed) with no gaps or self-crossings.
+
+### Later phases (future work)
+
+With the closed profile perimeter in hand, remaining work (to be specified as we get there):
+- Extrude the profile by band_width_mm along the profile-plane normal.
+- Build finger solids and boolean-subtract them (this is where capped / solid cylinders return).
+- Apply is_slitted to the anchor rings.
+- Orient for printing (build plate roughly parallel to the profile plane) and mesh to STL / 3mf.
 

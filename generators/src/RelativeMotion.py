@@ -10,7 +10,8 @@ See dev-notes/260702_Dev_Process_RelativeMotion_splint.md for the construction r
 
 import math
 from importlib import reload
-from Rhino.Geometry import Point3d, Vector3d, Line, Plane, Circle, Cylinder, Transform, LineCurve
+from Rhino.Geometry import (Point3d, Vector3d, Line, Plane, Circle, Cylinder, Transform,
+                            LineCurve, Curve, CurveOffsetCornerStyle, BlendContinuity)
 from Rhino.Geometry.Intersect import Intersection
 from splintcommon import log
 
@@ -29,8 +30,21 @@ MAX_ELEVATION_ANGLE = 45.0
 # Total angular width (deg) of a supported finger's preserved support arc. Provisional.
 DEFAULT_SUPPORT_ARC_DEG = 120.0
 
+# Radial wall thickness (mm) of an anchor ring: the gap between the finger-contact ellipse
+# and the ring's outer boundary. Provisional pending fit review.
+DEFAULT_RADIAL_BAND_THICKNESS_MM = 3.0
+
+# Bridge shape-control (mm). web_fillet_r_mm is the target concave blend radius at a joint;
+# min_web_width_mm is the minimum neck width the blend should preserve (enforcement deferred).
+# Provisional; mirrors the BuddyRingsDuo hourglass_r / min_isthmus_width knobs.
+DEFAULT_WEB_FILLET_R_MM = 4.0
+DEFAULT_MIN_WEB_WIDTH_MM = 2.0
+
 # Tolerance (document units, mm) for plane/curve intersection and trim operations.
 _INTERSECT_TOL = 1e-6
+
+# Looser tolerance (mm) for stitching the finished perimeter pieces with Curve.JoinCurves.
+_JOIN_TOL = 1e-2
 
 
 def setup_finger_positions(raw_data, min_center_gap=DEFAULT_MIN_CENTER_GAP):
@@ -392,3 +406,468 @@ def extract_finger_cross_sections(raw_data, profile_plane, p1_cylinders_oriented
     log("extract_finger_cross_sections: built {0} section(s), {1} preserved".format(
         len(included), kept))
     return full_curves, preserved_curves
+
+
+def _offset_curve_outward(curve, plane, distance, tolerance):
+    """Offset a closed planar curve outward by 'distance' within 'plane'.
+
+    Curve.Offset's direction depends on the curve's orientation, so we try both signs and
+    keep the closed result that is longer than the input (i.e. the one that encloses it).
+    Returns the offset Curve, or None if neither sign yields a valid outer curve.
+    """
+    input_len = curve.GetLength()
+    best = None
+    best_len = None
+    for signed in (distance, -distance):
+        pieces = curve.Offset(plane, signed, tolerance, CurveOffsetCornerStyle.Round)
+        if pieces is None or len(pieces) == 0:
+            continue
+        candidate = pieces[0]
+        if len(pieces) > 1:
+            joined = Curve.JoinCurves(pieces, tolerance)
+            if joined is None or len(joined) == 0:
+                continue
+            candidate = joined[0]
+        if not candidate.IsClosed:
+            continue
+        clen = candidate.GetLength()
+        # An outward offset lengthens the perimeter; skip the inward (shorter) result.
+        if clen <= input_len:
+            continue
+        if best_len is None or clen > best_len:
+            best = candidate
+            best_len = clen
+    return best
+
+
+def _split_ring_hemispheres(ring, h):
+    """Split a closed ring curve into (+Z hemisphere, -Z hemisphere) at its extreme points
+    along the in-plane horizontal axis h (the +Y and -Y extremes).
+
+    Each hemisphere is oriented +Y start to -Y end, matching the Phase 4 support arcs so the
+    perimeter walk's bridges line up. Returns (pos_hemi, neg_hemi), or (None, None) if the
+    split fails.
+    """
+    center = ring.GetBoundingBox(True).Center
+    far = 1.0e6
+    ok_p, t_p = ring.ClosestPoint(center + h * far)   # +Y extreme (nearest to a far +h point)
+    ok_m, t_m = ring.ClosestPoint(center - h * far)   # -Y extreme
+    if not ok_p or not ok_m:
+        return None, None
+    segments = ring.Split([t_p, t_m])
+    if segments is None or len(segments) != 2:
+        return None, None
+    a, b = segments[0], segments[1]
+    # The segment with the higher mid-point world Z is the dorsal (+Z) hemisphere.
+    a_z = a.PointAtNormalizedLength(0.5).Z
+    b_z = b.PointAtNormalizedLength(0.5).Z
+    pos_hemi, neg_hemi = (a, b) if a_z >= b_z else (b, a)
+    _orient_start_plus_y(pos_hemi, center, h)
+    _orient_start_plus_y(neg_hemi, center, h)
+    return pos_hemi, neg_hemi
+
+
+def build_exterior_anchor_rings(raw_data, profile_plane, preserved_intersection_curves,
+                                radial_band_thickness_mm=DEFAULT_RADIAL_BAND_THICKNESS_MM):
+    """Build each anchor finger's exterior ring and split it into +Z/-Z hemispheres (Path A).
+
+    Each anchor's preserved (closed) Phase 4 section is the ring's inner boundary; we offset
+    it outward within the profile plane by radial_band_thickness_mm to form the outer
+    boundary, then split the ring at its +Y/-Y extremes into a dorsal (+Z) and a volar (-Z)
+    hemisphere so the perimeter walk can bridge to it from either side. Supported fingers,
+    and any anchor whose ring cannot be built, come back None.
+
+    Inputs are index-aligned to the included fingers (anatomical order):
+      - raw_data:                      authority for is_anchor_finger.
+      - profile_plane:                 from build_profile_plane (the ring's work plane).
+      - preserved_intersection_curves: Phase 4 sections; anchors are closed curves.
+      - radial_band_thickness_mm:      radial wall thickness of the ring.
+
+    Returns three index-aligned lists (None where supported or the build fails):
+      - exterior_anchor_rings          (closed Curve, the ring's outer boundary)
+      - exterior_ring_pos_hemispheres  (+Z / dorsal half, oriented +Y start to -Y end)
+      - exterior_ring_neg_hemispheres  (-Z / volar half, oriented +Y start to -Y end)
+    """
+    included = [f for f in raw_data["finger_data"] if f.get("is_included")]
+    h = _plane_horizontal_axis(profile_plane)
+
+    rings = []
+    pos_hemis = []
+    neg_hemis = []
+
+    for i, finger in enumerate(included):
+        section = preserved_intersection_curves[i]
+        if not finger.get("is_anchor_finger") or section is None:
+            rings.append(None)
+            pos_hemis.append(None)
+            neg_hemis.append(None)
+            continue
+
+        ring = _offset_curve_outward(section, profile_plane, radial_band_thickness_mm,
+                                     _INTERSECT_TOL)
+        if ring is None:
+            log("build_exterior_anchor_rings: outward offset failed for finger index "
+                "{0}".format(i))
+            rings.append(None)
+            pos_hemis.append(None)
+            neg_hemis.append(None)
+            continue
+
+        pos_hemi, neg_hemi = _split_ring_hemispheres(ring, h)
+        if pos_hemi is None or neg_hemi is None:
+            log("build_exterior_anchor_rings: hemisphere split failed for finger index "
+                "{0}; keeping the ring only".format(i))
+        rings.append(ring)
+        pos_hemis.append(pos_hemi)
+        neg_hemis.append(neg_hemi)
+
+    built = sum(1 for r in rings if r is not None)
+    log("build_exterior_anchor_rings: built {0} anchor ring(s)".format(built))
+    return rings, pos_hemis, neg_hemis
+
+
+def plan_perimeter_walk(raw_data, exterior_ring_pos_hemispheres,
+                        exterior_ring_neg_hemispheres, preserved_intersection_curves):
+    """Lay out the ordered profile-perimeter walk (Phase 5, Pass 1 - no bridges yet).
+
+    Walks the support side over the included fingers in if->sf order, then the return side
+    back over the anchors only (support runs are leapt over on the return). Each entry is a
+    slot dict {kind, finger_index, curve} where kind is one of 'anchor_support_side',
+    'support_arc', or 'anchor_return_side' and finger_index is the included-list index. The
+    curves can be previewed in walk order to sanity-check the layout before bridges are added.
+
+    Support side uses the +Z hemispheres and the return side the -Z hemispheres when
+    relative_elevation_angle >= 0; the two swap for a negative angle (the raised finger, and
+    therefore the support arcs, sit on the opposite side of the perimeter).
+    """
+    included = [f for f in raw_data["finger_data"] if f.get("is_included")]
+    angle = raw_data["relative_elevation_angle"]
+    if angle >= 0:
+        support_hemis = exterior_ring_pos_hemispheres
+        return_hemis = exterior_ring_neg_hemispheres
+    else:
+        support_hemis = exterior_ring_neg_hemispheres
+        return_hemis = exterior_ring_pos_hemispheres
+
+    segments = []
+
+    # Support side: forward over every included finger.
+    for i, finger in enumerate(included):
+        if finger.get("is_anchor_finger"):
+            segments.append({"kind": "anchor_support_side", "finger_index": i,
+                             "curve": support_hemis[i]})
+        else:
+            segments.append({"kind": "support_arc", "finger_index": i,
+                             "curve": preserved_intersection_curves[i]})
+
+    # Return side: backward, landing on anchors only (support runs are leapt over).
+    for i in range(len(included) - 1, -1, -1):
+        if included[i].get("is_anchor_finger"):
+            segments.append({"kind": "anchor_return_side", "finger_index": i,
+                             "curve": return_hemis[i]})
+
+    log("plan_perimeter_walk: laid out {0} segment(s)".format(len(segments)))
+    return segments
+
+
+def _facing_endpoints(curve_a, curve_b):
+    """Return (param_a, param_b) of the closest pair of endpoints between two curves - i.e.
+    the ends that face each other across a gap."""
+    ends_a = [(curve_a.Domain.T0, curve_a.PointAtStart),
+              (curve_a.Domain.T1, curve_a.PointAtEnd)]
+    ends_b = [(curve_b.Domain.T0, curve_b.PointAtStart),
+              (curve_b.Domain.T1, curve_b.PointAtEnd)]
+    best_d = None
+    best_ta = curve_a.Domain.T0
+    best_tb = curve_b.Domain.T0
+    for ta, pa in ends_a:
+        for tb, pb in ends_b:
+            d = pa.DistanceTo(pb)
+            if best_d is None or d < best_d:
+                best_d = d
+                best_ta = ta
+                best_tb = tb
+    return best_ta, best_tb
+
+
+def _blend_reverse(curve, t):
+    """Reverse flag for Curve.CreateBlendCurve: the blend must head into the gap. The natural
+    (non-reversed) tangent follows increasing parameter, which points off the curve at its end
+    (T1) but into the curve body at its start (T0) - so reverse only at the start endpoint."""
+    return abs(t - curve.Domain.T0) < abs(t - curve.Domain.T1)
+
+
+def _extreme_point_param(curve, direction):
+    """Curve param maximizing dot(point, direction), by dense sampling. Robust for the convex
+    ring / arc curves used here (avoids relying on analytic extrema of skewed ellipses)."""
+    dom = curve.Domain
+    steps = 240
+    span = dom.T1 - dom.T0
+    best_t = dom.T0
+    best_v = None
+    for i in range(steps + 1):
+        t = dom.T0 + span * (float(i) / steps)
+        p = curve.PointAt(t)
+        v = p.X * direction.X + p.Y * direction.Y + p.Z * direction.Z
+        if best_v is None or v > best_v:
+            best_v = v
+            best_t = t
+    return best_t
+
+
+def _common_tangent(curve_a, curve_b, plane, outward):
+    """Common tangent line to two convex coplanar curves on the 'outward' side, found by an
+    iterative supporting-line fixpoint (works on the true ellipse/arc curves, so it tolerates
+    a skewed profile_plane). Returns (ta, tb, pa, pb) or None."""
+    n = Vector3d(outward)
+    if n.Length < 1e-9:
+        return None
+    n.Unitize()
+    ta = curve_a.Domain.T0
+    tb = curve_b.Domain.T0
+    for _ in range(60):
+        ta = _extreme_point_param(curve_a, n)
+        tb = _extreme_point_param(curve_b, n)
+        pa = curve_a.PointAt(ta)
+        pb = curve_b.PointAt(tb)
+        d = pb - pa
+        if d.Length < 1e-9:
+            return None
+        d.Unitize()
+        n_new = Vector3d.CrossProduct(plane.Normal, d)
+        if n_new.Length < 1e-9:
+            break
+        n_new.Unitize()
+        if Vector3d.Multiply(n_new, outward) < 0.0:
+            n_new.Reverse()
+        if (n_new - n).Length < 1e-7:
+            n = n_new
+            break
+        n = n_new
+    return ta, tb, curve_a.PointAt(ta), curve_b.PointAt(tb)
+
+
+def _trim_keep_far(curve, t, ref_point):
+    """Split curve at param t and keep the piece whose midpoint is farther from ref_point
+    (drops the stub nearest the leapt-over neighbor)."""
+    pieces = curve.Split([t])
+    if pieces is None or len(pieces) == 0:
+        return curve
+    if len(pieces) == 1:
+        return pieces[0]
+    best = None
+    best_d = None
+    for p in pieces:
+        d = p.PointAtNormalizedLength(0.5).DistanceTo(ref_point)
+        if best_d is None or d > best_d:
+            best_d = d
+            best = p
+    return best
+
+
+def create_tangent_blend_bridge(curve_a, curve_b):
+    """Smooth G1 (tangent) blend joining the facing near ends of two profile segments.
+
+    Used for support-to-support and anchor-to-anchor gaps on both the support and return
+    sides. Each side is built independently (no shared-hourglass caching - a tangent blend is
+    cheap, so the two halves are computed separately for simplicity). Returns the bridge
+    Curve, or None if the blend fails.
+    """
+    ta, tb = _facing_endpoints(curve_a, curve_b)
+    return Curve.CreateBlendCurve(curve_a, ta, _blend_reverse(curve_a, ta),
+                                  BlendContinuity.Tangency,
+                                  curve_b, tb, _blend_reverse(curve_b, tb),
+                                  BlendContinuity.Tangency)
+
+
+def create_supportpath_bridge_anchor_to_support(anchor_curve, support_curve, support_center):
+    """Bridge from an anchor ring hemisphere to a supported finger's support arc.
+
+    Deliberately simple: extend a straight line off the support arc's near end, tangent to the
+    arc there, until it strikes the anchor hemisphere. The bridge is G1-continuous with the
+    support arc and meets the anchor with a small (acceptable) angular discontinuity. Only the
+    anchor is trimmed - back to the strike point, dropping the stub that faced the support; the
+    support arc is left whole.
+
+    Returns (bridge_line, anchor_curve_revised, support_curve_revised); on failure the bridge
+    is None and the curves are returned untrimmed.
+    """
+    # Near end of the support arc (the endpoint closest to the anchor) and its outward tangent.
+    ta, _tb = _facing_endpoints(support_curve, anchor_curve)
+    p_near = support_curve.PointAt(ta)
+    tan = support_curve.TangentAt(ta)
+    if _blend_reverse(support_curve, ta):
+        tan.Reverse()  # TangentAt follows increasing param; at the start end that aims inward
+    tan.Unitize()
+
+    # Cast a generous ray from the near end toward the anchor and take the closest hit.
+    reach = p_near.DistanceTo(anchor_curve.GetBoundingBox(True).Center) * 2.0
+    probe = LineCurve(p_near, p_near + tan * reach)
+    events = Intersection.CurveCurve(probe, anchor_curve, _INTERSECT_TOL, _INTERSECT_TOL)
+    hit = None
+    th_anchor = None
+    if events is not None and events.Count > 0:
+        best_d = None
+        for ev in events:
+            d = ev.PointA.DistanceTo(p_near)
+            if best_d is None or d < best_d:
+                best_d = d
+                hit = ev.PointA
+                th_anchor = ev.ParameterB
+    else:
+        # The tangent extension can graze past the anchor (e.g. a shifted profile_plane skews
+        # the arc's end tangent away from the ring). Fall back to a straight chord to the
+        # anchor's nearest point - a slightly larger discontinuity, but always connects.
+        ok, t_close = anchor_curve.ClosestPoint(p_near)
+        if not ok:
+            log("create_supportpath_bridge_anchor_to_support: tangent extension missed and "
+                "closest-point fallback failed; leaving gap")
+            return None, anchor_curve, support_curve
+        th_anchor = t_close
+        hit = anchor_curve.PointAt(t_close)
+        log("create_supportpath_bridge_anchor_to_support: tangent extension missed the "
+            "anchor; using closest-point chord fallback (gap {0:.2f} mm)".format(
+                p_near.DistanceTo(hit)))
+
+    bridge = LineCurve(p_near, hit)
+    rev_anchor = _trim_keep_far(anchor_curve, th_anchor, support_center)
+    return bridge, rev_anchor, support_curve
+
+
+def create_return_leap_bridge(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0):
+    """Return-side leap: a straight common-tangent line across the return-side of the two
+    anchor rings that bracket a support run, trimming each anchor's return hemisphere at its
+    tangent point.
+
+    Tangency is computed against the true ring curves (not best-fit circles) so a skewed
+    profile_plane is handled. Returns (bridge_line, hemi_a_revised, hemi_b_revised); the
+    revised hemispheres drop the stub facing the leapt-over supports.
+    """
+    # Return side is the volar (-Z) side when the finger is raised, dorsal (+Z) otherwise.
+    outward = Vector3d(0.0, 0.0, -1.0) if elevation_ge0 else Vector3d(0.0, 0.0, 1.0)
+    result = _common_tangent(ring_a, ring_b, profile_plane, outward)
+    if result is None:
+        log("create_return_leap_bridge: common tangent not found; leaving gap")
+        return None, hemi_a, hemi_b
+    _ta, _tb, pa, pb = result
+    bridge = LineCurve(pa, pb)
+
+    center_a = ring_a.GetBoundingBox(True).Center
+    center_b = ring_b.GetBoundingBox(True).Center
+    ok_a, th_a = hemi_a.ClosestPoint(pa)
+    ok_b, th_b = hemi_b.ClosestPoint(pb)
+    rev_a = _trim_keep_far(hemi_a, th_a, center_b) if ok_a else hemi_a
+    rev_b = _trim_keep_far(hemi_b, th_b, center_a) if ok_b else hemi_b
+    return bridge, rev_a, rev_b
+
+
+def _support_between(included, i, j):
+    """True if any included finger strictly between indices i and j is a supported finger."""
+    lo, hi = (i, j) if i < j else (j, i)
+    return any(not included[k].get("is_anchor_finger") for k in range(lo + 1, hi))
+
+
+def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_rings,
+                        web_fillet_r_mm=DEFAULT_WEB_FILLET_R_MM,
+                        min_web_width_mm=DEFAULT_MIN_WEB_WIDTH_MM):
+    """Bridge the ordered walk slots and join them into one closed profile perimeter (Pass 2).
+
+    For each adjacent slot pair (including the loop-closing pair) the matching bridge is built
+    and any trimmed hemispheres are written back, then every piece is stitched with
+    Curve.JoinCurves. Same-anchor hemisphere pairs (the two turn-arounds) join directly with
+    no bridge. End-support caps (a supported finger at either end of the walk) are not yet
+    implemented and are logged as an unhandled pair.
+
+    Inputs:
+      - walk_segments:         ordered slots from plan_perimeter_walk.
+      - profile_plane:         the shared work plane (from build_profile_plane).
+      - exterior_anchor_rings: full rings from build_exterior_anchor_rings (for the leap's
+                               true-curve tangency), index-aligned to the included fingers.
+      - web_fillet_r_mm:       reserved for the deferred stress-relief fillet at anchor joints.
+      - min_web_width_mm:      minimum neck width (safeguard; enforcement deferred).
+
+    Returns (closed_profile_curve, bridge_curves) - the second list is for observability /
+    previewing the individual bridges. Raises ValueError if the pieces do not join into a
+    closed perimeter (the failing bridges are named in the message).
+    """
+    included = [f for f in raw_data["finger_data"] if f.get("is_included")]
+    elevation_ge0 = raw_data["relative_elevation_angle"] >= 0
+    count = len(walk_segments)
+    work = [s["curve"] for s in walk_segments]
+    bridges = []
+    failures = []
+
+    for k in range(count):
+        a = walk_segments[k]
+        b = walk_segments[(k + 1) % count]
+        j = (k + 1) % count
+        ka, kb = a["kind"], b["kind"]
+        fa, fb = a["finger_index"], b["finger_index"]
+        ca, cb = work[k], work[j]
+        if ca is None or cb is None:
+            continue
+
+        # Turn-around / loop closure: same anchor's two hemispheres meet at the far extreme.
+        if fa == fb and set([ka, kb]) <= set(["anchor_support_side", "anchor_return_side"]):
+            continue
+
+        bridge = None
+        if ka == "support_arc" and kb == "support_arc":
+            bridge = create_tangent_blend_bridge(ca, cb)
+        elif set([ka, kb]) == set(["anchor_support_side", "support_arc"]):
+            if ka == "anchor_support_side":
+                ai, si = k, j
+            else:
+                ai, si = j, k
+            support_center = work[si].GetBoundingBox(True).Center
+            bridge, rev_anchor, rev_support = create_supportpath_bridge_anchor_to_support(
+                work[ai], work[si], support_center)
+            work[ai] = rev_anchor
+            work[si] = rev_support
+        elif ka == "anchor_support_side" and kb == "anchor_support_side":
+            bridge = create_tangent_blend_bridge(ca, cb)
+        elif ka == "anchor_return_side" and kb == "anchor_return_side":
+            if _support_between(included, fa, fb):
+                bridge, rev_a, rev_b = create_return_leap_bridge(
+                    ca, exterior_anchor_rings[fa], cb, exterior_anchor_rings[fb],
+                    profile_plane, elevation_ge0)
+                work[k] = rev_a
+                work[j] = rev_b
+            else:
+                bridge = create_tangent_blend_bridge(ca, cb)
+        else:
+            log("weld_perimeter_walk: unhandled pair {0}->{1} (finger {2}->{3}); likely an "
+                "end-support cap (not yet implemented)".format(ka, kb, fa, fb))
+            failures.append("{0}->{1} (finger {2}->{3}): unhandled pair".format(ka, kb, fa, fb))
+            continue
+
+        if bridge is None:
+            log("weld_perimeter_walk: bridge failed for {0}->{1} (finger {2}->{3})".format(
+                ka, kb, fa, fb))
+            failures.append("{0}->{1} (finger {2}->{3}): bridge returned None".format(
+                ka, kb, fa, fb))
+            continue
+        bridges.append(bridge)
+
+    pieces = [c for c in work if c is not None] + bridges
+    joined = Curve.JoinCurves(pieces, _JOIN_TOL)
+    closed = None
+    if joined is not None and len(joined) > 0:
+        for jc in joined:
+            if jc.IsClosed:
+                closed = jc
+                break
+
+    joined_count = 0 if joined is None else len(joined)
+    piece_count = len([c for c in work if c is not None])
+    log("weld_perimeter_walk: {0} segment piece(s), {1} bridge(s), joined into {2} curve(s)"
+        "{3}".format(piece_count, len(bridges), joined_count,
+                     "" if closed is not None else " (not closed)"))
+
+    if closed is None:
+        detail = "; ".join(failures) if failures else "no failed bridges reported"
+        raise ValueError(
+            "weld_perimeter_walk: failed to build a closed profile perimeter "
+            "({0} segment piece(s) + {1} bridge(s) joined into {2} curve(s), none closed). "
+            "Failures: {3}".format(piece_count, len(bridges), joined_count, detail))
+    return closed, bridges
