@@ -386,32 +386,60 @@ Return side:
 - create_returnpath_bridge_anchor_to_anchor - hourglass blend on the return side (the opposite
   side from the support-side anchor-to-anchor bridge).
 
-Shape control for the arc / hourglass bridges reuses the BuddyRingsDuo approach via two knobs:
-web_fillet_r_mm (target concave blend radius at a joint) and min_web_width_mm (minimum neck
-width). Adjacent-finger separation is already bounded by setup_finger_positions' min_center_gap,
-but bridges should still guard against short / partial Phase 4 arcs.
+Adjacent-finger separation is already bounded by setup_finger_positions' min_center_gap, but
+bridges should still guard against short / partial Phase 4 arcs.
 
 Implementation note (first attempt, in RelativeMotion.py, pending Rhino validation): because the
 anchor sections can be skewed ellipses (a tilted profile_plane), the bridges work against the
-true curves rather than best-fit circles. This collapses the smooth bridges into a shared
-Curve.CreateBlendCurve (G1 tangent) helper, create_tangent_blend_bridge, used for
-support-to-support and both anchor-to-anchor sides (each side computed independently - a tangent
-blend is cheap, so no shared-hourglass caching). anchor_to_support keeps its own function
-(create_supportpath_bridge_anchor_to_support) that extends a straight tangent line off the
-support arc's near end until it strikes the anchor hemisphere, then trims the anchor there. The
-leap (create_return_leap_bridge) finds a true common
-tangent line to the two rings via an iterative supporting-line fixpoint and trims both return
-hemispheres. weld_perimeter_walk dispatches these and JoinCurves the result. Still deferred:
-enforcing min_web_width_mm, the optional anchor-joint fillet, and the end-support cap below.
+true curves rather than best-fit circles. The generic corner is create_rounded_corner_bridge: it
+fits a constant-radius fillet (Curve.CreateFilletCurves) tangent to both curves and trims them
+back to the tangency points, falling back to a plain Curve.CreateBlendCurve (G1 tangent, no
+trim) if the radius will not fit. It is used directly for support-to-support joints, at a larger
+support_bridge_radius_mm (the finger contacts them, so they need a smoother blend).
+
+Anchor-to-anchor joints go through create_anchor_to_anchor_bridge instead. Adjacent anchor rings
+are designed to overlap (neighbouring fingers share a single wall, like two wedding rings pressed
+together), so the two hemispheres usually cross. When they do, the exterior perimeter simply
+meets at the outer crossing: each hemisphere is trimmed back to it (dropping the stub that pokes
+into the neighbour) and no bridge is inserted - a plain fillet would otherwise pick the interior
+tangent, which is valid but on the wrong side. Only when the rings are genuinely separated does
+it fall back to create_rounded_corner_bridge at a tight anchor_bridge_radius_mm (structural only).
+The radius policy lives in the dispatcher (weld_perimeter_walk), not the helpers.
+
+anchor_to_support keeps its own function (create_supportpath_bridge_anchor_to_support) that
+extends a straight tangent line off the support arc's near end until it strikes the anchor
+hemisphere, then trims the anchor there (no fillet yet - deferred). The leap
+(create_return_leap_bridge) finds a true common tangent line to the two rings via an iterative
+supporting-line fixpoint and trims both return hemispheres. weld_perimeter_walk dispatches these,
+logs the outcome of every adjacent pair (bridged + length, direct join, turn-around, skip, or
+failure), and JoinCurves the result. End-support caps are handled up front (see below) so they
+arrive at the walk as a single pre-capped cradle.
 
 #### End-support special case
 
-When the first or last included finger is a supported finger (e.g. the A-A-S or S-A-A configs),
-the support side has no anchor to turn around on at that end. Cap it: close the support-side end
-with a semicircle and run the return side back parallel to the support side, offset by
-radial_band_thickness_mm (the semicircle radius is half that offset, so the two parallel runs
-close cleanly). This can occur at either end, so the walker needs both a start-cap and an
-end-cap case.
+When the first or last included finger is a supported finger (e.g. the A-A-S or S-A-A configs -
+or an if supported by mf..., the mirror of an sf supported by rf...), the support side has no
+anchor to turn around on at that end. Because this always lands at the very start or end of the
+chain, we get extra leeway: build the whole finger as one closed-end cradle instead of three
+separate visits (arc, cap, return). build_end_support_cradles turns the support arc into a
+U-shaped curve = the support arc + a parallel return edge (the arc offset outward by
+single_sided_support_thickness_mm) + a semicircle cap (radius = thickness / 2) joining their
+free ends. The free end is the arc endpoint farther from the adjacent anchor; the near end is
+left open. The two open near ends are the support prong and the return prong.
+
+plan_perimeter_walk emits this cradle as the finger's single 'end_support_cradle' visit (in
+place of the plain support arc). weld_perimeter_walk then bridges its two prongs to the same
+adjacent anchor: the support prong to that anchor's support hemisphere (support-side pair,
+anchor_support_side + end_support_cradle) and the return prong to its return hemisphere
+(return-side pair, anchor_return_side + end_support_cradle). Both reuse
+create_supportpath_bridge_anchor_to_support. The two prongs sit only a band thickness apart, so
+nearest-endpoint guessing is unreliable: build_end_support_cradles orients the cradle so its
+start endpoint is the support prong and its end endpoint is the return prong, and the weld pins
+each bridge to the matching endpoint via support_param. This condenses the three visits into one
+and works at either end via the near/far endpoint test (no hardcoded +Y / -Y).
+single_sided_support_thickness_mm is a distinct parameter (not radial_band_thickness_mm) because
+the cradle is a single-sided support band, a structurally different form from a full anchor ring
+wall.
 
 #### Worked example
 
@@ -442,10 +470,7 @@ Returns (for observability):
 - closed_profile_curve - the joined closed perimeter.
 
 Open items:
-- Enforce min_web_width_mm (grow web_fillet_r_mm when a blend pinches the neck too thin).
-- Exact fillet handling at the perpendicular anchor-to-support joint (deferred; optional).
 - Confirm the hemisphere split points (+Y / -Y extremes) once we see Phase 4 output in Rhino.
-- Implement the end-support cap (semicircle + parallel return) for A-A-S / S-A-A configs.
 
 #### Usage example
 
@@ -455,10 +480,14 @@ Phase 5 calls (assuming profile_plane and the Phase 4 `preserved` sections are a
 rings, pos_hemis, neg_hemis = build_exterior_anchor_rings(
     raw_data, profile_plane, preserved)  # radial_band_thickness_mm optional
 
-walk_segments = plan_perimeter_walk(raw_data, pos_hemis, neg_hemis, preserved)
+cradles = build_end_support_cradles(
+    raw_data, profile_plane, preserved, rings, single_sided_support_thickness_mm)
+
+walk_segments = plan_perimeter_walk(raw_data, pos_hemis, neg_hemis, preserved, cradles)
 
 closed_profile, bridge_curves = weld_perimeter_walk(
-    raw_data, walk_segments, profile_plane, rings)  # web_fillet_r_mm / min_web_width_mm optional
+    raw_data, walk_segments, profile_plane, rings,
+    anchor_bridge_radius_mm, support_bridge_radius_mm)
 ```
 
 Recommended incremental bring-up (bake / preview each stage before wiring the next, since the
