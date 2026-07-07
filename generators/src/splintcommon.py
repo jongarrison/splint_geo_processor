@@ -68,7 +68,8 @@ log(f"Splint Home Dirs verified: {splint_home_dir=}")
 
 # -- GH Python data transit utilities --
 # Python objects passing through GH wires get wrapped in GH_ObjectWrapper.
-# Use gh_encode on output and gh_decode on input for reliable round-tripping.
+# Use gh_encode on output when you need reliable object round-tripping
+# (especially dicts), and gh_decode on input to unwrap.
 
 def _gh_unwrap_item(item):
     """Unwrap a single item from its GH wrapper if needed."""
@@ -78,21 +79,65 @@ def _gh_unwrap_item(item):
             return item.Value
     except ImportError:
         pass
+
+    # Most GH goo types expose ScriptVariable() and/or Value.
+    script_variable = getattr(item, "ScriptVariable", None)
+    if callable(script_variable):
+        try:
+            return script_variable()
+        except Exception:
+            pass
+
+    if hasattr(item, "Value"):
+        try:
+            return item.Value
+        except Exception:
+            pass
+
     return item
 
-def gh_decode(data):
-    """Decode GH input to a list of Python objects.
+def gh_encode(data):
+    """Encode Python data for GH output.
+
+    Wraps data in GH_ObjectWrapper so GH does not auto-iterate dict keys.
+    For list/tuple outputs, wraps each item.
+    """
+    try:
+        from Grasshopper.Kernel.Types import GH_ObjectWrapper
+    except ImportError:
+        return data
+
+    if isinstance(data, (list, tuple)):
+        return [GH_ObjectWrapper(item) for item in data]
+    return GH_ObjectWrapper(data)
+
+
+def gh_decode(data, as_list=True):
+    """Decode GH input to Python objects.
 
     Handles all common GH input shapes:
-      - Single item (Item Access): returns [unwrapped_item]
+      - Single item (Item Access): decodes to [unwrapped_item]
       - List of items (List Access, possibly flattened tree): returns [unwrapped, ...]
       - Already a plain Python list/tuple: unwraps each element
 
-    Use with List Access input + Flatten for best results.
+    Args:
+      data: GH input value.
+      as_list: When True (default), always return a list.
+               When False, return the single item for 1-item input.
     """
     if isinstance(data, (list, tuple)):
-        return [_gh_unwrap_item(item) for item in data]
-    return [_gh_unwrap_item(data)]
+        decoded = [_gh_unwrap_item(item) for item in data]
+    else:
+        decoded = [_gh_unwrap_item(data)]
+
+    if as_list:
+        return decoded
+    return decoded[0] if len(decoded) == 1 else decoded
+
+
+def gh_decode_one(data):
+    """Decode GH input and prefer a scalar return for single-item input."""
+    return gh_decode(data, as_list=False)
 
 def confirm_job_is_processed_and_exit(jobname, is_success, message):
     job_path = Path(get_inbox_job_filepath(jobname))
