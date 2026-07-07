@@ -519,4 +519,4 @@ With the closed profile perimeter in hand, remaining work (to be specified as we
 - Build finger solids and boolean-subtract them (this is where capped / solid cylinders return).
 - Apply is_slitted to the anchor rings.
 - Orient for printing (build plate roughly parallel to the profile plane) and mesh to STL / 3mf.
-
+- Use the pipe subtraction method for creating fillets on sharp edges.

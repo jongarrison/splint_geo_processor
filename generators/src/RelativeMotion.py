@@ -580,6 +580,26 @@ def _build_cradle_curve(arc, anchor_center, plane, thickness):
         return None
     ret_free = return_edge.PointAt(rt_free)
 
+    # --- TEMP DIAGNOSTIC: dump the cradle-assembly geometry so +20 (works) vs -20 (fails) can be
+    # compared step by step. Remove once the negative-elevation cradle is fixed.
+    _as, _ae = arc.PointAtStart, arc.PointAtEnd
+    _rs, _re = return_edge.PointAtStart, return_edge.PointAtEnd
+    log("  cradle.dbg arc.start=({0:.2f},{1:.2f},{2:.2f}) arc.end=({3:.2f},{4:.2f},{5:.2f})".format(
+        _as.X, _as.Y, _as.Z, _ae.X, _ae.Y, _ae.Z))
+    log("  cradle.dbg anchor_center=({0:.2f},{1:.2f},{2:.2f}) d(start)={3:.2f} d(end)={4:.2f} "
+        "-> near_end={5}".format(
+            anchor_center.X, anchor_center.Y, anchor_center.Z,
+            _as.DistanceTo(anchor_center), _ae.DistanceTo(anchor_center),
+            "start" if near_t == arc.Domain.T0 else "end"))
+    log("  cradle.dbg return_edge.start=({0:.2f},{1:.2f},{2:.2f}) "
+        "return_edge.end=({3:.2f},{4:.2f},{5:.2f}) len={6:.2f}".format(
+            _rs.X, _rs.Y, _rs.Z, _re.X, _re.Y, _re.Z, return_edge.GetLength()))
+    log("  cradle.dbg arc_near=({0:.2f},{1:.2f},{2:.2f}) arc_free=({3:.2f},{4:.2f},{5:.2f}) "
+        "ret_free=({6:.2f},{7:.2f},{8:.2f})".format(
+            arc_near.X, arc_near.Y, arc_near.Z, arc_free.X, arc_free.Y, arc_free.Z,
+            ret_free.X, ret_free.Y, ret_free.Z))
+    # --- END TEMP DIAGNOSTIC
+
     # Semicircle cap through the two free ends, bulging off the arc (away from the anchor).
     cap_dir = arc.TangentAt(free_t)
     if _blend_reverse(arc, free_t):
@@ -603,6 +623,12 @@ def _build_cradle_curve(arc, anchor_center, plane, thickness):
     # this fixed orientation rather than nearest-endpoint guessing.
     if cradle.PointAtStart.DistanceTo(arc_near) > cradle.PointAtEnd.DistanceTo(arc_near):
         cradle.Reverse()
+    # --- TEMP DIAGNOSTIC: final prong positions after orientation.
+    _cs, _ce = cradle.PointAtStart, cradle.PointAtEnd
+    log("  cradle.dbg FINAL support_prong=({0:.2f},{1:.2f},{2:.2f}) "
+        "return_prong=({3:.2f},{4:.2f},{5:.2f})".format(
+            _cs.X, _cs.Y, _cs.Z, _ce.X, _ce.Y, _ce.Z))
+    # --- END TEMP DIAGNOSTIC
     return cradle
 
 
@@ -970,18 +996,20 @@ def create_supportpath_bridge_anchor_to_support(anchor_curve, support_curve, sup
 
 def create_returnpath_bridge_anchor_to_support(anchor_curve, support_curve, support_param,
                                                radius_mm):
-    """Round the concave crotch where an end-support cradle's return prong meets the adjacent
-    anchor's return hemisphere - the return-side analogue of create_anchor_to_anchor_bridge.
+    """Round the corner where an end-support cradle's return prong meets the adjacent anchor's
+    return hemisphere.
 
-    The return hemisphere is the ring's outer wall and must stay round, so (unlike the support
-    side, which deliberately blends high onto the hemisphere) this only rounds the corner and
-    keeps each curve's far portion: pick points on each curve's far side steer
-    Curve.CreateFilletCurves to the exterior crotch and trim only back to the tangency points,
-    leaving the hemisphere un-dented. support_param pins the cradle's return prong; its two
-    prongs sit a band thickness apart, so auto facing-endpoint detection is unreliable.
+    Unlike two overlapping anchor rings, the cradle does not cross the ring - its return prong
+    sits in a small gap off the hemisphere's near end. So this is a facing-end rounded corner:
+    a constant-radius fillet placed at the two facing endpoints (arc-extended across the gap),
+    trimming each curve back only to its tangency point. That keeps the hemisphere's outer wall
+    round while robustly closing the gap for either elevation sign. support_param pins the
+    cradle's return prong (its two prongs sit only a band thickness apart, so auto
+    facing-endpoint detection is unreliable); the anchor's facing end is the endpoint nearest
+    that prong. Falls back to a plain G1 tangent blend (no trim) if the fillet will not fit.
 
-    Returns (bridge, anchor_curve_revised, support_curve_revised); bridge is a fillet arc,
-    _DIRECT_JOIN (curves meet directly at the crossing), or None on failure.
+    Returns (bridge, anchor_curve_revised, support_curve_revised); bridge is a fillet arc, a
+    tangent blend curve, or None on failure.
     """
     ta = support_param
     p_prong = support_curve.PointAt(ta)
@@ -991,36 +1019,31 @@ def create_returnpath_bridge_anchor_to_support(anchor_curve, support_curve, supp
         tb_face = anchor_curve.Domain.T0
     else:
         tb_face = anchor_curve.Domain.T1
-    far_anchor = anchor_curve.PointAt(
-        anchor_curve.Domain.T1 if tb_face == anchor_curve.Domain.T0 else anchor_curve.Domain.T0)
-    far_support = support_curve.PointAt(
-        support_curve.Domain.T0 if ta == support_curve.Domain.T1 else support_curve.Domain.T1)
-    # The cradle's two prongs sit only a band thickness apart, so its far endpoint (the opposite
-    # prong) is a poor fillet pick point - Rhino can keep the wrong tiny stub. Use the cradle's
-    # arc-length midpoint (out on the cap, unambiguously on the retained U body) instead.
-    pick_support = support_curve.PointAtNormalizedLength(0.5)
+    p_anchor = anchor_curve.PointAt(tb_face)
 
     if radius_mm > 0.0:
-        pieces = Curve.CreateFilletCurves(support_curve, pick_support, anchor_curve, far_anchor,
-                                          radius_mm, False, True, False,
+        # Pick points AT the two facing ends steer CreateFilletCurves to round the near corner
+        # (the gap between prong and hemisphere) and keep each curve's far body; arcExtension
+        # lets the fillet bridge the gap even though the curves do not actually cross.
+        pieces = Curve.CreateFilletCurves(support_curve, p_prong, anchor_curve, p_anchor,
+                                          radius_mm, False, True, True,
                                           _INTERSECT_TOL, _INTERSECT_TOL)
         arc, rev_support, rev_anchor = _split_fillet_pieces(
             pieces, support_curve, anchor_curve, ta, tb_face)
         if arc is not None:
             return arc, rev_anchor, rev_support
         log("create_returnpath_bridge_anchor_to_support: fillet at {0:.2f} mm did not fit; "
-            "meeting sharply at the crossing".format(radius_mm))
+            "falling back to tangent blend".format(radius_mm))
 
-    # Fallback: meet directly at the crossing (sharp), keeping each far portion un-dented.
-    events = Intersection.CurveCurve(support_curve, anchor_curve, _INTERSECT_TOL, _INTERSECT_TOL)
-    if events is not None and events.Count > 0:
-        best = min(events, key=lambda ev: ev.PointB.DistanceTo(p_prong))
-        rev_support = _trim_keep_near(support_curve, best.ParameterA, far_support)
-        rev_anchor = _trim_keep_near(anchor_curve, best.ParameterB, far_anchor)
-        return _DIRECT_JOIN, rev_anchor, rev_support
-
-    log("create_returnpath_bridge_anchor_to_support: no fillet fit and no crossing; leaving gap")
-    return None, anchor_curve, support_curve
+    # Fallback: plain G1 tangent blend across the facing-end gap, no trimming.
+    blend = Curve.CreateBlendCurve(support_curve, ta, _blend_reverse(support_curve, ta),
+                                   BlendContinuity.Tangency,
+                                   anchor_curve, tb_face, _blend_reverse(anchor_curve, tb_face),
+                                   BlendContinuity.Tangency)
+    if blend is None:
+        log("create_returnpath_bridge_anchor_to_support: tangent blend failed; leaving gap")
+        return None, anchor_curve, support_curve
+    return blend, anchor_curve, support_curve
 
 
 def create_return_leap_bridge(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0):
@@ -1056,6 +1079,52 @@ def _support_between(included, i, j):
     return any(not included[k].get("is_anchor_finger") for k in range(lo + 1, hi))
 
 
+def _log_walk_chain_gaps(walk_segments, work, bridge_after):
+    """Diagnostic: walk the ordered chain (each slot then the bridge that follows it) and log
+    any junction whose two pieces do not share an endpoint within _JOIN_TOL - i.e. exactly where
+    the perimeter fails to close. Endpoints are compared in both orientations since pieces are
+    not consistently oriented.
+    """
+    count = len(work)
+    ordered = []  # (label, curve) in perimeter order
+    for k in range(count):
+        seg = walk_segments[k]
+        if work[k] is not None:
+            ordered.append(("seg[{0}] {1} f{2}".format(k, seg["kind"], seg["finger_index"]),
+                            work[k]))
+        if bridge_after[k] is not None:
+            ordered.append(("bridge after seg[{0}] ({1})".format(k, seg["kind"]),
+                            bridge_after[k]))
+    if len(ordered) < 2:
+        return
+    # Full ordered-chain dump: every piece's endpoints in perimeter order, so a sign / side
+    # mismatch (e.g. a prong on the wrong Z side) is visible at a glance.
+    for label, c in ordered:
+        s, e = c.PointAtStart, c.PointAtEnd
+        log("  chain {0}: start=({1:.2f},{2:.2f},{3:.2f}) end=({4:.2f},{5:.2f},{6:.2f})".format(
+            label, s.X, s.Y, s.Z, e.X, e.Y, e.Z))
+    reported = 0
+    for i in range(len(ordered)):
+        label_a, ca = ordered[i]
+        label_b, cb = ordered[(i + 1) % len(ordered)]
+        ends_a = (ca.PointAtStart, ca.PointAtEnd)
+        ends_b = (cb.PointAtStart, cb.PointAtEnd)
+        gap = min(ea.DistanceTo(eb) for ea in ends_a for eb in ends_b)
+        if gap > _JOIN_TOL:
+            log("weld_perimeter_walk GAP {0:.3f} mm between {1} and {2}".format(
+                gap, label_a, label_b))
+            log("  {0} ends: start=({1:.2f},{2:.2f},{3:.2f}) end=({4:.2f},{5:.2f},{6:.2f})".format(
+                label_a, ends_a[0].X, ends_a[0].Y, ends_a[0].Z,
+                ends_a[1].X, ends_a[1].Y, ends_a[1].Z))
+            log("  {0} ends: start=({1:.2f},{2:.2f},{3:.2f}) end=({4:.2f},{5:.2f},{6:.2f})".format(
+                label_b, ends_b[0].X, ends_b[0].Y, ends_b[0].Z,
+                ends_b[1].X, ends_b[1].Y, ends_b[1].Z))
+            reported += 1
+    if reported == 0:
+        log("weld_perimeter_walk: no endpoint gaps > {0} mm found in walk order; the open end "
+            "may be a self-crossing or a mis-oriented piece".format(_JOIN_TOL))
+
+
 def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_rings,
                         anchor_bridge_radius_mm, support_bridge_radius_mm):
     """Bridge the ordered walk slots and join them into one closed profile perimeter (Pass 2).
@@ -1089,6 +1158,7 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
     work = [s["curve"] for s in walk_segments]
     bridges = []
     failures = []
+    bridge_after = [None] * count  # bridge inserted after slot k in walk order (for diagnostics)
 
     for k in range(count):
         a = walk_segments[k]
@@ -1173,6 +1243,7 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
         log("weld_perimeter_walk: bridged {0} (length {1:.2f} mm)".format(
             pair_desc, bridge.GetLength()))  # type: ignore[union-attr]
         bridges.append(bridge)
+        bridge_after[k] = bridge  # type: ignore[assignment]
 
     pieces = [c for c in work if c is not None] + bridges
     joined = Curve.JoinCurves(pieces, _JOIN_TOL)
@@ -1191,6 +1262,7 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
 
     if closed is None:
         detail = "; ".join(failures) if failures else "no failed bridges reported"
+        _log_walk_chain_gaps(walk_segments, work, bridge_after)
         raise ValueError(
             "weld_perimeter_walk: failed to build a closed profile perimeter "
             "({0} segment piece(s) + {1} bridge(s) joined into {2} curve(s), none closed). "
