@@ -941,18 +941,39 @@ def create_anchor_to_anchor_bridge(curve_a, curve_b, radius_mm):
     return create_rounded_corner_bridge(curve_a, curve_b, radius_mm)
 
 
+# Minimal-non-biting-attach search bounds (normalized hemisphere arc length from the near end).
+# Attaching low (near the dropped stub) makes the blend curve sharply and dip into the ring;
+# raising the attach toward the apex clears it. We scan upward and take the first grazing attach.
+_ATTACH_SEARCH_LO = 0.15
+_ATTACH_SEARCH_HI = 0.9
+_ATTACH_SEARCH_STEP = 0.05
+# A blend that only grazes touches the kept ring solely at its touchdown; a bite crosses the ring
+# elsewhere. Ignore intersections within this distance (mm) of the touchdown as the tangent kiss.
+_ATTACH_GRAZE_TOL = 0.5
+
+
+def _blend_bites_ring(blend, kept_anchor, p_attach):
+    """True if blend crosses the kept anchor arc anywhere other than at its touchdown point."""
+    events = Intersection.CurveCurve(blend, kept_anchor, _INTERSECT_TOL, _INTERSECT_TOL)
+    if events is None:
+        return False
+    for ev in events:
+        if ev.PointA.DistanceTo(p_attach) > _ATTACH_GRAZE_TOL:
+            return True
+    return False
+
+
 def create_supportpath_bridge_anchor_to_support(anchor_curve, support_curve, support_center,
-                                                support_param=None, anchor_attach_fraction=0.4):
+                                                support_param=None):
     """Smooth (G1) bridge from an anchor ring hemisphere to a supported finger's support band.
 
     A tangent blend leaves the support band's near end as a smooth continuation of the arc and
-    meets the anchor hemisphere tangentially a short way up from the end nearest the support -
-    anchor_attach_fraction of the hemisphere's remaining arc length from that near end (0.4
-    lands roughly 20% down from the apex, i.e. high on the ring). The anchor is trimmed back to
-    that attach point, dropping the stub that faced the support; the support band is left whole.
-    Tangent continuity at both ends replaces the earlier straight-tangent strike, which met the
-    anchor at a sharp angle. Used for every anchor-to-support joint: mid-support arcs and both
-    prongs of an end-support cradle (support side and return side).
+    meets the anchor hemisphere tangentially a short way up from the end nearest the support. The
+    attach point is found by search: starting low and raising it up the support-facing side of the
+    hemisphere until the blend grazes the ring instead of biting into it, taking the tightest such
+    join. The anchor is trimmed back to that attach point, dropping the stub that faced the
+    support; the support band is left whole. Used for every anchor-to-support joint: mid-support
+    arcs and both prongs of an end-support cradle (support side and return side).
 
     support_param pins which end of support_curve to bridge from (used for end-support cradles,
     whose two prongs sit only a band thickness apart); when None the facing endpoint is picked
@@ -967,83 +988,48 @@ def create_supportpath_bridge_anchor_to_support(anchor_curve, support_curve, sup
         ta = support_param
     p_support = support_curve.PointAt(ta)
 
-    # Anchor end nearest the support prong is the stub we drop; attach a fraction of the
-    # hemisphere's arc up from it (toward the apex) so the blend meets the ring high and round.
+    # Anchor end nearest the support prong is the stub we drop; attach some way up the hemisphere
+    # from it (toward the apex) so the blend meets the ring on the support-facing side. A fraction
+    # measured from the near end, mapped to a normalized-length param.
     if (anchor_curve.PointAtStart.DistanceTo(p_support)
             <= anchor_curve.PointAtEnd.DistanceTo(p_support)):
         near_anchor_t = anchor_curve.Domain.T0
-        attach_nl = anchor_attach_fraction
+        to_nl = lambda frac: frac
     else:
         near_anchor_t = anchor_curve.Domain.T1
-        attach_nl = 1.0 - anchor_attach_fraction
-    ok, t_attach = anchor_curve.NormalizedLengthParameter(attach_nl)
-    if not ok:
-        t_attach = near_anchor_t
+        to_nl = lambda frac: 1.0 - frac
 
-    # Blend heads into the gap at both ends: off the support body at its prong, and back toward
-    # the dropped near stub at the anchor so the kept far portion continues smoothly.
+    # Blend direction is fixed by which ends we leave from: off the support body at its prong, and
+    # back toward the dropped near stub at the anchor so the kept far portion continues smoothly.
     rev_support = _blend_reverse(support_curve, ta)
     rev_anchor = near_anchor_t == anchor_curve.Domain.T0
-    blend = Curve.CreateBlendCurve(support_curve, ta, rev_support, BlendContinuity.Tangency,
-                                   anchor_curve, t_attach, rev_anchor, BlendContinuity.Tangency)
-    if blend is None:
-        log("create_supportpath_bridge_anchor_to_support: tangent blend failed; leaving gap")
-        return None, anchor_curve, support_curve
 
-    rev_anchor_curve = _trim_keep_far(anchor_curve, t_attach, support_center)
-    return blend, rev_anchor_curve, support_curve
+    # Scan the attach upward and keep the first (tightest) that grazes rather than bites; remember
+    # the last valid blend as a fallback if none fully clear.
+    fallback = None
+    frac = _ATTACH_SEARCH_LO
+    while frac <= _ATTACH_SEARCH_HI + 1e-9:
+        ok, t_attach = anchor_curve.NormalizedLengthParameter(to_nl(frac))
+        if not ok:
+            frac += _ATTACH_SEARCH_STEP
+            continue
+        blend = Curve.CreateBlendCurve(support_curve, ta, rev_support, BlendContinuity.Tangency,
+                                       anchor_curve, t_attach, rev_anchor, BlendContinuity.Tangency)
+        if blend is not None:
+            kept = _trim_keep_far(anchor_curve, t_attach, support_center)
+            p_attach = anchor_curve.PointAt(t_attach)
+            if not _blend_bites_ring(blend, kept, p_attach):
+                return blend, kept, support_curve
+            fallback = (blend, kept)
+        frac += _ATTACH_SEARCH_STEP
 
+    if fallback is not None:
+        log("create_supportpath_bridge_anchor_to_support: no non-biting attach found; using "
+            "highest attach (subtle bite may remain)")
+        return fallback[0], fallback[1], support_curve
 
-def create_returnpath_bridge_anchor_to_support(anchor_curve, support_curve, support_param,
-                                               radius_mm):
-    """Round the corner where an end-support cradle's return prong meets the adjacent anchor's
-    return hemisphere.
-
-    Unlike two overlapping anchor rings, the cradle does not cross the ring - its return prong
-    sits in a small gap off the hemisphere's near end. So this is a facing-end rounded corner:
-    a constant-radius fillet placed at the two facing endpoints (arc-extended across the gap),
-    trimming each curve back only to its tangency point. That keeps the hemisphere's outer wall
-    round while robustly closing the gap for either elevation sign. support_param pins the
-    cradle's return prong (its two prongs sit only a band thickness apart, so auto
-    facing-endpoint detection is unreliable); the anchor's facing end is the endpoint nearest
-    that prong. Falls back to a plain G1 tangent blend (no trim) if the fillet will not fit.
-
-    Returns (bridge, anchor_curve_revised, support_curve_revised); bridge is a fillet arc, a
-    tangent blend curve, or None on failure.
-    """
-    ta = support_param
-    p_prong = support_curve.PointAt(ta)
-    # Anchor's facing (near) endpoint faces the prong; the opposite end is the apex / turn-around.
-    if (anchor_curve.PointAtStart.DistanceTo(p_prong)
-            <= anchor_curve.PointAtEnd.DistanceTo(p_prong)):
-        tb_face = anchor_curve.Domain.T0
-    else:
-        tb_face = anchor_curve.Domain.T1
-    p_anchor = anchor_curve.PointAt(tb_face)
-
-    if radius_mm > 0.0:
-        # Pick points AT the two facing ends steer CreateFilletCurves to round the near corner
-        # (the gap between prong and hemisphere) and keep each curve's far body; arcExtension
-        # lets the fillet bridge the gap even though the curves do not actually cross.
-        pieces = Curve.CreateFilletCurves(support_curve, p_prong, anchor_curve, p_anchor,
-                                          radius_mm, False, True, True,
-                                          _INTERSECT_TOL, _INTERSECT_TOL)
-        arc, rev_support, rev_anchor = _split_fillet_pieces(
-            pieces, support_curve, anchor_curve, ta, tb_face)
-        if arc is not None:
-            return arc, rev_anchor, rev_support
-        log("create_returnpath_bridge_anchor_to_support: fillet at {0:.2f} mm did not fit; "
-            "falling back to tangent blend".format(radius_mm))
-
-    # Fallback: plain G1 tangent blend across the facing-end gap, no trimming.
-    blend = Curve.CreateBlendCurve(support_curve, ta, _blend_reverse(support_curve, ta),
-                                   BlendContinuity.Tangency,
-                                   anchor_curve, tb_face, _blend_reverse(anchor_curve, tb_face),
-                                   BlendContinuity.Tangency)
-    if blend is None:
-        log("create_returnpath_bridge_anchor_to_support: tangent blend failed; leaving gap")
-        return None, anchor_curve, support_curve
-    return blend, anchor_curve, support_curve
+    log("create_supportpath_bridge_anchor_to_support: tangent blend failed; leaving gap")
+    return None, anchor_curve, support_curve
 
 
 def create_return_leap_bridge(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0):
@@ -1198,16 +1184,17 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
             work[ai] = rev_anchor
             work[si] = rev_support
         elif set([ka, kb]) == set(["anchor_return_side", "end_support_cradle"]):
-            # End-support cradle: round the crotch where its return prong (the cradle's end
-            # endpoint) meets the adjacent anchor's return hemisphere. Uses a fillet at the
-            # anchor radius (like the A-A joints) so the hemisphere wall stays round rather than
-            # being carved into by a deep tangent blend.
+            # End-support cradle return prong -> adjacent anchor's return hemisphere. Uses the
+            # same grazing-attach tangent blend as the support prong: the attach search lands the
+            # touchdown on the ring edge without denting the round outer wall - the concern that
+            # once justified a separate crotch-fillet here.
             if ka == "anchor_return_side":
                 ai, si = k, j
             else:
                 ai, si = j, k
-            bridge, rev_anchor, rev_support = create_returnpath_bridge_anchor_to_support(
-                work[ai], work[si], work[si].Domain.T1, anchor_bridge_radius_mm)
+            support_center = work[si].GetBoundingBox(True).Center
+            bridge, rev_anchor, rev_support = create_supportpath_bridge_anchor_to_support(
+                work[ai], work[si], support_center, support_param=work[si].Domain.T1)
             work[ai] = rev_anchor
             work[si] = rev_support
         elif ka == "anchor_support_side" and kb == "anchor_support_side":
