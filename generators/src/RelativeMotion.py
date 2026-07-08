@@ -243,6 +243,40 @@ def build_profile_plane(raw_data, p1_circles):
     return profile_plane
 
 
+def build_profile_planes(raw_data, p1_circles, longitudinal_band_thickness_mm):
+    """Build the two parallel profile planes: the splint band's proximal and distal faces.
+
+    build_profile_plane defines the centre plane on the anchor P1 midpoints; the printed band has
+    real thickness along the finger long axis, so its two outline profiles live on planes offset
+    from that centre by +/- longitudinal_band_thickness_mm / 2 along the plane normal (the
+    proximal-distal / longitudinal axis). Generating a profile on each face and lofting between
+    them gives the band its front and back surfaces.
+
+    Returns (proximal_plane, distal_plane) - proximal is the -X (toward the hand) face, distal the
+    +X (toward the fingertip) face - or (None, None) if the centre plane could not be built.
+    """
+    center_plane = build_profile_plane(raw_data, p1_circles)
+    if center_plane is None:
+        return None, None
+
+    # Orient the offset toward +X (distal) so the proximal/distal naming is honest; the centre
+    # plane's normal sign is otherwise set by the arbitrary fit-line direction.
+    normal = Vector3d(center_plane.Normal)
+    if normal.X < 0.0:
+        normal.Reverse()
+    normal.Unitize()
+
+    half = longitudinal_band_thickness_mm / 2.0
+    proximal = Plane(center_plane)
+    proximal.Translate(normal * (-half))
+    distal = Plane(center_plane)
+    distal.Translate(normal * half)
+
+    log("build_profile_planes: split centre plane into proximal/distal faces {0:.2f} mm "
+        "apart".format(longitudinal_band_thickness_mm))
+    return proximal, distal
+
+
 def _plane_horizontal_axis(profile_plane):
     """Return the in-plane horizontal unit vector (perpendicular to world Z, lying in the
     vertical profile plane), forced to point toward world +Y. Used as the 'u' axis for
@@ -310,7 +344,8 @@ def _orient_start_plus_y(curve, center, h):
 
 
 def extract_finger_cross_sections(raw_data, profile_plane, p1_cylinders_oriented,
-                                  p1_lines_oriented, support_arc_deg=DEFAULT_SUPPORT_ARC_DEG):
+                                  p1_lines_oriented, support_prong_arc_deg,
+                                  support_arc_deg=DEFAULT_SUPPORT_ARC_DEG):
     """Intersect the profile plane with each oriented finger cylinder and keep the full
     section for anchors or a support arc for supported fingers.
 
@@ -324,7 +359,10 @@ def extract_finger_cross_sections(raw_data, profile_plane, p1_cylinders_oriented
       - p1_cylinders_oriented:  elevated cylinders from elevate_supported_fingers.
       - p1_lines_oriented:      elevated P1 lines; their crossing with the plane gives each
                                 section center for the angular-sweep measurement.
-      - support_arc_deg:        total angular width of the preserved arc (supported fingers).
+      - support_prong_arc_deg:  total angular width of the preserved arc for END-support fingers
+                                (their cradle prongs; usually wider than mid-supports).
+      - support_arc_deg:        total angular width of the preserved arc for MID-support fingers
+                                (those flanked by an anchor on each side).
 
     Returns two index-aligned lists (one entry per included finger; None where a section
     could not be built):
@@ -338,7 +376,6 @@ def extract_finger_cross_sections(raw_data, profile_plane, p1_cylinders_oriented
     # Measured in the (h, world-Z) basis: -Z is angle -pi/2, +Z is +pi/2.
     elevation = raw_data["relative_elevation_angle"]
     support_center_angle = -math.pi / 2.0 if elevation >= 0 else math.pi / 2.0
-    half = math.radians(support_arc_deg) / 2.0
 
     full_curves = []
     preserved_curves = []
@@ -367,7 +404,10 @@ def extract_finger_cross_sections(raw_data, profile_plane, p1_cylinders_oriented
             preserved_curves.append(section.DuplicateCurve())
             continue
 
-        # Supported finger: trim to the support arc centered on -Z (or +Z) about the center.
+        # Supported finger: trim to the support arc centered on -Z (or +Z) about the center. End
+        # supports use the wider prong arc so their end cradles get more finger contact.
+        arc_deg = support_prong_arc_deg if _is_end_support(included, i) else support_arc_deg
+        half = math.radians(arc_deg) / 2.0
         t_mid = _curve_param_at_angle(section, center, h, support_center_angle)
         t_a = _curve_param_at_angle(section, center, h, support_center_angle + half)
         t_b = _curve_param_at_angle(section, center, h, support_center_angle - half)
@@ -902,11 +942,14 @@ def create_anchor_to_anchor_bridge(curve_a, curve_b, radius_mm):
     concave crotch at the outer crossing. We round that crotch with a small fillet (radius_mm):
     pick points on each ring's far (outer) side select the exterior corner and keep each ring's
     outer arc, and the fillet arc bridges them. If the fillet will not fit, the rings fall back
-    to meeting directly at the crossing (the earlier sharp behaviour), and genuinely separated
-    rings fall back to a rounded corner between their facing ends.
+    to meeting directly at the crossing (the earlier sharp behaviour). Genuinely separated rings
+    mean the finger spacing is too large for this bridging approach, so we raise a ValueError
+    (rather than fabricate a weak connector across the gap) - reduce all_splint_finger_circ or add
+    a minimum-width bar (see TwoDFormHelper.create_two_circle_hourglass_bridge_perimeter).
 
     Returns (bridge, curve_a_revised, curve_b_revised) where bridge is a fillet arc, _DIRECT_JOIN
-    for the sharp-crossing fallback (curves meet directly), or None on failure.
+    for the sharp-crossing fallback (curves meet directly), or None on failure. Raises ValueError
+    when the two anchor rings do not overlap.
     """
     events = Intersection.CurveCurve(curve_a, curve_b, _INTERSECT_TOL, _INTERSECT_TOL)
     if events is not None and events.Count > 0:
@@ -938,7 +981,18 @@ def create_anchor_to_anchor_bridge(curve_a, curve_b, radius_mm):
         rev_b = _trim_keep_near(curve_b, best.ParameterB, far_b)
         return _DIRECT_JOIN, rev_a, rev_b
 
-    return create_rounded_corner_bridge(curve_a, curve_b, radius_mm)
+    # No crossing: adjacent anchor rings are designed to overlap (they share a wall), so a gap
+    # here means the finger spacing is too large for this bridging approach. Fail loudly rather
+    # than fabricate a weak, degenerate connector across the gap.
+    ta_face, tb_face = _facing_endpoints(curve_a, curve_b)
+    gap = curve_a.PointAt(ta_face).DistanceTo(curve_b.PointAt(tb_face))
+    log("create_anchor_to_anchor_bridge: adjacent anchor rings do not overlap (facing gap "
+        "{0:.1f} mm); finger spacing too large. Reduce all_splint_finger_circ, or add a "
+        "minimum-width connecting bar (TwoDFormHelper.create_two_circle_hourglass_bridge_"
+        "perimeter).".format(gap))
+    raise ValueError(
+        "create_anchor_to_anchor_bridge: anchor rings too far apart to bridge (facing gap "
+        "{0:.1f} mm); finger spacing (all_splint_finger_circ) too large.".format(gap))
 
 
 # Minimal-non-biting-attach search bounds (normalized hemisphere arc length from the near end).
@@ -964,7 +1018,7 @@ def _blend_bites_ring(blend, kept_anchor, p_attach):
 
 
 def create_supportpath_bridge_anchor_to_support(anchor_curve, support_curve, support_center,
-                                                support_param=None):
+                                                support_param=None, min_attach_fraction=None):
     """Smooth (G1) bridge from an anchor ring hemisphere to a supported finger's support band.
 
     A tangent blend leaves the support band's near end as a smooth continuation of the arc and
@@ -978,6 +1032,10 @@ def create_supportpath_bridge_anchor_to_support(anchor_curve, support_curve, sup
     support_param pins which end of support_curve to bridge from (used for end-support cradles,
     whose two prongs sit only a band thickness apart); when None the facing endpoint is picked
     automatically.
+
+    min_attach_fraction, when given, raises the floor of the attach search so the touchdown sits
+    higher up the hemisphere (a fuller, stronger neck); when None the search starts at its default
+    low bound.
 
     Returns (blend_curve, anchor_curve_revised, support_curve_revised); on failure the bridge is
     None and the curves are returned untrimmed.
@@ -1005,9 +1063,13 @@ def create_supportpath_bridge_anchor_to_support(anchor_curve, support_curve, sup
     rev_anchor = near_anchor_t == anchor_curve.Domain.T0
 
     # Scan the attach upward and keep the first (tightest) that grazes rather than bites; remember
-    # the last valid blend as a fallback if none fully clear.
+    # the last valid blend as a fallback if none fully clear. A caller can raise the starting floor
+    # (min_attach_fraction) to force the touchdown higher up the ring for a fuller neck.
+    start = _ATTACH_SEARCH_LO
+    if min_attach_fraction is not None:
+        start = max(_ATTACH_SEARCH_LO, min(min_attach_fraction, _ATTACH_SEARCH_HI))
     fallback = None
-    frac = _ATTACH_SEARCH_LO
+    frac = start
     while frac <= _ATTACH_SEARCH_HI + 1e-9:
         ok, t_attach = anchor_curve.NormalizedLengthParameter(to_nl(frac))
         if not ok:
@@ -1032,14 +1094,14 @@ def create_supportpath_bridge_anchor_to_support(anchor_curve, support_curve, sup
     return None, anchor_curve, support_curve
 
 
-def create_return_leap_bridge(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0):
-    """Return-side leap: a straight common-tangent line across the return-side of the two
-    anchor rings that bracket a support run, trimming each anchor's return hemisphere at its
-    tangent point.
+def _common_tangent_leap(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0):
+    """Plain return leap: a straight common-tangent line across the return side of the two anchor
+    rings, trimming each return hemisphere at its tangent point.
 
-    Tangency is computed against the true ring curves (not best-fit circles) so a skewed
-    profile_plane is handled. Returns (bridge_line, hemi_a_revised, hemi_b_revised); the
-    revised hemispheres drop the stub facing the leapt-over supports.
+    Depends only on the anchor rings (not the support height), so the profile thickness over the
+    gap is whatever the elevation leaves. Used as the fallback for create_return_leap_bridge when
+    no leapt-over support geometry is available. Tangency is computed against the true ring curves
+    (not best-fit circles) so a skewed profile_plane is handled.
     """
     # Return side is the volar (-Z) side when the finger is raised, dorsal (+Z) otherwise.
     outward = Vector3d(0.0, 0.0, -1.0) if elevation_ge0 else Vector3d(0.0, 0.0, 1.0)
@@ -1057,6 +1119,120 @@ def create_return_leap_bridge(hemi_a, ring_a, hemi_b, ring_b, profile_plane, ele
     rev_a = _trim_keep_far(hemi_a, th_a, center_b) if ok_a else hemi_a
     rev_b = _trim_keep_far(hemi_b, th_b, center_a) if ok_b else hemi_b
     return bridge, rev_a, rev_b
+
+
+def create_return_leap_bridge(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0,
+                              support_pieces, return_spine_thickness_mm,
+                              return_spine_end_reach, return_spine_touchdown_fraction):
+    """Return-side spine across a support run: a short level bar spanning the leapt-over support,
+    held return_spine_thickness_mm outward from the support's return-facing extreme and NOT
+    touching either anchor ring. Each bar end bridges into the adjacent anchor's return
+    hemisphere with the same grazing tangent blend used for support prongs.
+
+    A plain common tangent to the two anchor rings ignores the support height, so it pinches thin
+    at low elevation and bloats into a solid wedge at high elevation. Instead the spine tracks the
+    support: its height (measured along the outward return direction) is one thickness beyond the
+    tallest leapt-over support, so the profile keeps that thickness at its thinnest spot, and its
+    lateral span matches the support's own width so it floats clear of the rings between them.
+
+    Reusing create_supportpath_bridge_anchor_to_support for both ends means the spine attaches to
+    each ring exactly like a support band does - the attach search lands the touchdown on the ring
+    edge and keeps the ring's outer arc, so the ring is never clipped.
+
+    return_spine_end_reach (0..1) sets the straight-span width: each spine end reaches that far
+    from the support edge toward the adjacent ring apex (0 = support width only, 1 = under the
+    apex, which risks touching the ring). return_spine_touchdown_fraction is the minimum attach
+    fraction up each anchor return hemisphere for the end blends; raising it moves the touchdown
+    higher up the ring for a fuller, stronger neck (independent of the end reach).
+
+    support_pieces are the leapt-over support-side curves (support arcs / cradles) between the two
+    anchors. Falls back to a plain common-tangent leap when none are supplied or an end bridge
+    cannot be built. Returns (bridge_curve, hemi_a_revised, hemi_b_revised).
+    """
+    supports = [c for c in (support_pieces or []) if c is not None]
+    if not supports or return_spine_thickness_mm <= 0.0:
+        return _common_tangent_leap(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0)
+
+    # Return side is the volar (-Z) side when the finger is raised, dorsal (+Z) otherwise; the
+    # spine is a level bar perpendicular to 'outward', running along the finger-row axis h.
+    outward = Vector3d(0.0, 0.0, -1.0) if elevation_ge0 else Vector3d(0.0, 0.0, 1.0)
+    h = _plane_horizontal_axis(profile_plane)
+
+    def u(p):
+        # Outward coordinate: how far a point reaches toward the return side.
+        return p.X * outward.X + p.Y * outward.Y + p.Z * outward.Z
+
+    # Gap centre from the two ring apexes (their most-outward points), used only as the lateral
+    # origin and as the trim reference that keeps each ring's outer arc.
+    apex_a = ring_a.PointAt(_extreme_point_param(ring_a, outward))
+    apex_b = ring_b.PointAt(_extreme_point_param(ring_b, outward))
+    gap_mid = Point3d((apex_a.X + apex_b.X) / 2.0, (apex_a.Y + apex_b.Y) / 2.0,
+                      (apex_a.Z + apex_b.Z) / 2.0)
+
+    def lat(p):
+        # Lateral (finger-row) coordinate relative to the gap centre.
+        return (p.X - gap_mid.X) * h.X + (p.Y - gap_mid.Y) * h.Y + (p.Z - gap_mid.Z) * h.Z
+
+    # Spine height: one thickness beyond the tallest leapt-over support (its return-facing
+    # extreme), so the profile keeps that thickness at its thinnest spot.
+    u_support = max(u(c.PointAt(_extreme_point_param(c, outward))) for c in supports)
+    u_spine = u_support + return_spine_thickness_mm
+
+    # Spine lateral span = the support run's own width (its extremes along +/-h), so the bar
+    # floats between the rings without reaching into them.
+    lat_hi = max(lat(c.PointAt(_extreme_point_param(c, h))) for c in supports)
+    lat_lo = min(lat(c.PointAt(_extreme_point_param(c, Vector3d(-h.X, -h.Y, -h.Z))))
+                 for c in supports)
+    if lat_hi <= lat_lo:
+        return _common_tangent_leap(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0)
+
+    # Reach each end partway from the support edge toward the adjacent ring apex so the end blend
+    # meets the anchor with a fuller neck instead of a pinch (the grazing attach still keeps the
+    # ring's outer arc, so a modest reach fattens the joint without clipping the ring).
+    lat_apex_hi = max(lat(apex_a), lat(apex_b))
+    lat_apex_lo = min(lat(apex_a), lat(apex_b))
+    lat_hi = lat_hi + return_spine_end_reach * max(0.0, lat_apex_hi - lat_hi)
+    lat_lo = lat_lo - return_spine_end_reach * max(0.0, lat_lo - lat_apex_lo)
+
+    du = u_spine - u(gap_mid)
+
+    def spine_point(lateral):
+        return Point3d(gap_mid.X + h.X * lateral + outward.X * du,
+                       gap_mid.Y + h.Y * lateral + outward.Y * du,
+                       gap_mid.Z + h.Z * lateral + outward.Z * du)
+
+    # Oriented -h end (T0) to +h end (T1).
+    spine = LineCurve(spine_point(lat_lo), spine_point(lat_hi))
+
+    # Match each bar end to the ring on its lateral side, then bridge with the support-prong blend
+    # (support_center=gap_mid keeps each ring's outer arc). The spine stays whole across both.
+    hemi_hi, hemi_lo = (hemi_a, hemi_b) if lat(apex_a) >= lat(apex_b) else (hemi_b, hemi_a)
+
+    blend_hi, hemi_hi_trim, spine = create_supportpath_bridge_anchor_to_support(
+        hemi_hi, spine, gap_mid, support_param=spine.Domain.T1,
+        min_attach_fraction=return_spine_touchdown_fraction)
+    if blend_hi is None:
+        log("create_return_leap_bridge: spine could not bridge to the +h anchor; using "
+            "common-tangent leap")
+        return _common_tangent_leap(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0)
+
+    blend_lo, hemi_lo_trim, spine = create_supportpath_bridge_anchor_to_support(
+        hemi_lo, spine, gap_mid, support_param=spine.Domain.T0,
+        min_attach_fraction=return_spine_touchdown_fraction)
+    if blend_lo is None:
+        log("create_return_leap_bridge: spine could not bridge to the -h anchor; using "
+            "common-tangent leap")
+        return _common_tangent_leap(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0)
+
+    hemi_a_trim, hemi_b_trim = ((hemi_hi_trim, hemi_lo_trim) if lat(apex_a) >= lat(apex_b)
+                                else (hemi_lo_trim, hemi_hi_trim))
+
+    joined = Curve.JoinCurves([blend_hi, spine, blend_lo], _JOIN_TOL)
+    if joined is None or len(joined) != 1:
+        log("create_return_leap_bridge: spine + end blends did not join cleanly; using "
+            "common-tangent leap")
+        return _common_tangent_leap(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0)
+    return joined[0], hemi_a_trim, hemi_b_trim
 
 
 def _support_between(included, i, j):
@@ -1112,7 +1288,9 @@ def _log_walk_chain_gaps(walk_segments, work, bridge_after):
 
 
 def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_rings,
-                        anchor_bridge_radius_mm, support_bridge_radius_mm):
+                        anchor_bridge_radius_mm, support_bridge_radius_mm,
+                        return_spine_thickness_mm, return_spine_end_reach,
+                        return_spine_touchdown_fraction):
     """Bridge the ordered walk slots and join them into one closed profile perimeter (Pass 2).
 
     For each adjacent slot pair (including the loop-closing pair) the matching bridge is built
@@ -1130,6 +1308,15 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
                                   (tight - mechanical strength only).
       - support_bridge_radius_mm: rounded-corner radius for support-to-support joints (larger -
                                   the finger contacts these, so they need a smoother blend).
+      - return_spine_thickness_mm: profile thickness the return-side spine holds over a support
+                                  run (the strut is offset this far beyond the support's
+                                  return-facing extreme).
+      - return_spine_end_reach:   fraction (0..1) of the gap from the support edge to the adjacent
+                                  ring apex each spine end reaches; sets the straight-span width
+                                  (0 = support width only, 1 = under the apex).
+      - return_spine_touchdown_fraction: minimum attach fraction up each anchor return hemisphere
+                                  for the spine's end blends; higher pushes the touchdown up the
+                                  ring for a fuller, stronger neck.
 
     The mechanism (create_rounded_corner_bridge) is radius-agnostic; this dispatcher owns the
     policy of which radius applies to which joint type.
@@ -1204,9 +1391,17 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
             work[j] = rev_b
         elif ka == "anchor_return_side" and kb == "anchor_return_side":
             if _support_between(included, fa, fb):
+                # Leapt-over support-side pieces between the two anchors set the spine height.
+                lo, hi = (fa, fb) if fa < fb else (fb, fa)
+                support_pieces = [
+                    work[m] for m in range(count)
+                    if walk_segments[m]["kind"] in ("support_arc", "end_support_cradle")
+                    and lo < walk_segments[m]["finger_index"] < hi]
                 bridge, rev_a, rev_b = create_return_leap_bridge(
                     ca, exterior_anchor_rings[fa], cb, exterior_anchor_rings[fb],
-                    profile_plane, elevation_ge0)
+                    profile_plane, elevation_ge0, support_pieces,
+                    return_spine_thickness_mm, return_spine_end_reach,
+                    return_spine_touchdown_fraction)
                 work[k] = rev_a
                 work[j] = rev_b
             else:

@@ -419,8 +419,15 @@ it (which trims a chunk out of the hemisphere) is wrong. create_returnpath_bridg
 rounds that crotch like the A-A joints instead - a fillet at anchor_bridge_radius_mm with far-side
 pick points, keeping each curve's far portion and trimming only to the tangency points, so the
 hemisphere is left un-dented (falling back to a direct crossing join, then a gap, if the fillet
-will not fit). The leap (create_return_leap_bridge) finds a true common tangent line to the two
-rings via an iterative supporting-line fixpoint and trims both return hemispheres.
+will not fit). The leap (create_return_leap_bridge) lays a straight horizontal strut held
+return_spine_thickness_mm outward from the leapt-over support run's return-facing extreme (so the
+profile keeps that thickness at its thinnest spot and rides up under a raised finger instead of
+filling a solid wedge beneath it), then fillets each end tangentially into the anchor's return
+hemisphere (Curve.CreateFilletCurves against the ring body, largest ramp that fits first) - a G1
+transition that rounds a concave indent where the strut cuts the ring (higher elevation) or a
+convex ramp where it sits proud of the ring (near-zero elevation). It falls back to a plain
+common-tangent line to the two rings (via an iterative supporting-line fixpoint) when no
+leapt-over support geometry is available.
 weld_perimeter_walk dispatches these, logs the outcome of every adjacent pair (bridged + length,
 direct join, turn-around, skip, or failure), and JoinCurves the result. End-support caps are
 handled up front (see below) so they arrive at the walk as a single pre-capped cradle.
@@ -498,7 +505,7 @@ walk_segments = plan_perimeter_walk(raw_data, pos_hemis, neg_hemis, preserved, c
 
 closed_profile, bridge_curves = weld_perimeter_walk(
     raw_data, walk_segments, profile_plane, rings,
-    anchor_bridge_radius_mm, support_bridge_radius_mm)
+    anchor_bridge_radius_mm, support_bridge_radius_mm, return_spine_thickness_mm)
 ```
 
 Recommended incremental bring-up (bake / preview each stage before wiring the next, since the
