@@ -12,7 +12,7 @@ import math
 from importlib import reload
 from Rhino.Geometry import (Point3d, Vector3d, Line, Plane, Circle, Cylinder, Transform,
                             LineCurve, Curve, CurveOffsetCornerStyle, BlendContinuity, Arc,
-                            Brep, LoftType, BrepSolidOrientation)
+                            Brep, LoftType, BrepSolidOrientation, AreaMassProperties)
 from Rhino.Geometry.Intersect import Intersection
 from splintcommon import log
 
@@ -23,6 +23,14 @@ from TwoDCirclePositioning import multiple_circle_positioning
 import BrepDifference
 reload(BrepDifference)
 from BrepDifference import robust_brep_difference
+
+import TextGun
+reload(TextGun)
+from TextGun import emboss_text
+
+import splintmeshes
+reload(splintmeshes)
+from splintmeshes import convert_to_export_meshes
 
 
 # Elevation angle clamp (degrees). Provisional range pending review with hand therapist Liz.
@@ -1598,6 +1606,62 @@ def subtract_finger_bores(splint_solid, finger_bores, tolerance=None):
     return result
 
 
+def _closed_curve_centroid(curve):
+    """Area centroid of a closed planar curve (falls back to the bounding-box center)."""
+    amp = AreaMassProperties.Compute(curve)
+    if amp is None:
+        return curve.GetBoundingBox(True).Center
+    return amp.Centroid
+
+
+def emboss_object_id(splint_solid, raw_data, object_id, p_full_curves, d_full_curves,
+                     text_up_vector, wall_thickness_mm, text_size,
+                     extrusion_depth_factor=0.5):
+    """Emboss the objectID into the bottom (-Z) inner wall of the if-side anchor bore (Phase 7).
+
+    Tags the finished (bored) splint so a printed part is traceable to its job. The text is
+    recessed into the inside bottom of the anchor ring nearest the index finger:
+      - target ring:       the lowest-index anchor in the included if->sf run (nearest 'if').
+      - projection origin:  the mean of that anchor's proximal and distal full-section centroids
+                            (p_full_curves / d_full_curves) - the bore center, mid-band.
+      - projection vector:  world -Z, so the ray from the bore center lands on the bottom wall.
+      - up vector:          the profile-plane normal (points along the finger), passed in.
+      - emboss_inside + align_to_surface_normal: recess into the curved bore with even depth.
+
+    Runs after subtract_finger_bores (the bore's inner wall is the emboss surface). Returns
+    (embossed_solid, letter_breps, projected_letter_breps, text_plane); the embossed solid becomes
+    the final splint. Raises ValueError if there is no anchor / section available to tag.
+    """
+    included = [f for f in raw_data["finger_data"] if f.get("is_included")]
+    anchor_idx = next((i for i, f in enumerate(included) if f.get("is_anchor_finger")), None)
+    if anchor_idx is None:
+        raise ValueError("emboss_object_id: no anchor finger to tag.")
+
+    p_curve = p_full_curves[anchor_idx]
+    d_curve = d_full_curves[anchor_idx]
+    if p_curve is None or d_curve is None:
+        raise ValueError(
+            "emboss_object_id: anchor {0} is missing a full section curve (proximal={1}, "
+            "distal={2}).".format(anchor_idx, p_curve is not None, d_curve is not None))
+
+    pc = _closed_curve_centroid(p_curve)
+    dc = _closed_curve_centroid(d_curve)
+    projection_origin = Point3d((pc.X + dc.X) / 2.0, (pc.Y + dc.Y) / 2.0, (pc.Z + dc.Z) / 2.0)
+
+    embossed, letter_breps, projected_letters, text_plane = emboss_text(
+        splint_solid, object_id, wall_thickness_mm,
+        text_size=text_size,
+        text_projection_vector=Vector3d(0.0, 0.0, -1.0),
+        text_up_vector=text_up_vector,
+        projection_origin=projection_origin,
+        extrusion_depth_factor=extrusion_depth_factor,
+        emboss_inside=True,
+        align_to_surface_normal=True)
+
+    log("emboss_object_id: tagged anchor {0} with '{1}'".format(anchor_idx, object_id))
+    return embossed, letter_breps, projected_letters, text_plane
+
+
 def generate_relative_motion_splint(raw_data, object_id="TEST"):
     """Full RelativeMotion pipeline: raw_data -> bored splint solid, with every intermediate.
 
@@ -1626,6 +1690,8 @@ def generate_relative_motion_splint(raw_data, object_id="TEST"):
     return_spine_thickness_mm = 8.0
     return_spine_end_reach = 0.2
     return_spine_touchdown_fraction = 0.35
+    objectid_text_size_factor = 0.4         # objectID text height as a fraction of the band length
+    objectid_extrusion_depth_factor = 0.5   # emboss depth as a fraction of the ring wall thickness
 
     # --- Phase 1: finger positions --------------------------------------------------------
     mcp_points, p1_lines, p1_circles, p1_cylinders = setup_finger_positions(
@@ -1682,6 +1748,25 @@ def generate_relative_motion_splint(raw_data, object_id="TEST"):
     finger_bores = build_finger_bores(p1_lines_oriented, p1_circles_oriented)
     splint_solid = subtract_finger_bores(splint_solid_blank, finger_bores)
 
+    # --- Phase 7: emboss the objectID into the if-side anchor bore ------------------------
+    if proximal_profile_plane is None or distal_profile_plane is None:
+        raise ValueError("generate_relative_motion_splint: profile plane missing before Phase 7.")
+    objectid_text_size = objectid_text_size_factor * longitudinal_band_thickness_mm
+    splint_solid, id_letter_breps, id_projected_letters, id_text_plane = emboss_object_id(
+        splint_solid, raw_data, object_id, p_full_curves, d_full_curves,
+        proximal_profile_plane.Normal, radial_band_thickness_mm, objectid_text_size,
+        extrusion_depth_factor=objectid_extrusion_depth_factor)
+
+    # Mesh the finished solid, then lay it distal-face-down on the build plate. The distal cap
+    # (a planar loft end whose outward normal is the distal-plane normal, ~+X) becomes the first
+    # print layer: rotate that normal to world -Z, then drop the part so it rests on Z=0. The
+    # GH save component exports splint_oriented (see RelativeMotion_prod_mesh_saver.py).
+    splint_mesh = convert_to_export_meshes(splint_solid)[0]
+    splint_oriented = splint_mesh.DuplicateMesh()
+    splint_oriented.Transform(Transform.Rotation(
+        distal_profile_plane.Normal, Vector3d(0.0, 0.0, -1.0), distal_profile_plane.Origin))
+    splint_oriented.Translate(Vector3d(0.0, 0.0, -splint_oriented.GetBoundingBox(True).Min.Z))
+
     log("generate_relative_motion_splint: pipeline complete (objectID {0})".format(object_id))
 
     # Every intermediate is returned so the GH component can still preview each phase.
@@ -1712,5 +1797,10 @@ def generate_relative_motion_splint(raw_data, object_id="TEST"):
         "d_bridge_curves": d_bridge_curves,
         # Phase 6
         "splint_solid_blank": splint_solid_blank, "finger_bores": finger_bores,
+        # Phase 7
+        "id_letter_breps": id_letter_breps, "id_projected_letters": id_projected_letters,
+        "id_text_plane": id_text_plane,
         "splint_solid": splint_solid,
+        "splint_mesh": splint_mesh,
+        "splint_oriented": splint_oriented,
     }

@@ -574,10 +574,67 @@ Usage (per profile plane, then loft):
 splint_solid = build_splint_solid(proximal_profile, distal_profile)
 ```
 
+After the loft, Phase 6 also bores the fingers: build_finger_bores makes one capped solid
+cylinder per included finger (the P1 circle swept along the P1 line, doubled in length about its
+midpoint so it overshoots both band faces for a clean through-cut), and subtract_finger_bores
+boolean-subtracts them from the slab one at a time via BrepDifference.robust_brep_difference (its
+seven fallback strategies are welcome here - booleans are historically unreliable - in contrast to
+the no-fallback loft). The result is the bored splint_solid that Phase 7 tags and exports.
+
+### Phase 7: finishing (objectID tag, mesh, build-plate orientation)
+
+The finishing phase turns the bored solid into a traceable, print-ready mesh.
+
+#### objectID embossing (emboss_object_id, via TextGun.py)
+
+Recess the 4-character objectID into the inside bottom of the anchor ring nearest the index
+finger so every printed part is traceable back to its job. TextGun.emboss_text does the work:
+it builds extruded letter breps on a text plane, ray-casts each letter onto the target surface
+along a projection vector, and boolean-subtracts them (with robust_brep_difference as a fallback).
+emboss_object_id wires it up for this splint:
+- Target ring: the lowest-index anchor in the included if->sf run (nearest "if").
+- Target surface: the bored anchor's inner wall - so this runs AFTER the Phase 6 subtraction,
+  which is what creates that wall.
+- projection_origin: the mean of the anchor's proximal and distal full-section area centroids
+  (p_full_curves / d_full_curves) - the bore center, mid-band.
+- text_projection_vector: world -Z, so the ray from the bore center lands on the bottom inner wall.
+- text_up_vector: the profile-plane normal (points along the finger, proximal->distal).
+- emboss_inside=True and align_to_surface_normal=True: recess into the curved bore with even depth.
+
+The embossed solid replaces splint_solid. Two design coefficients live in the orchestrator:
+objectid_text_size_factor (text height = factor * longitudinal_band_thickness_mm) and
+objectid_extrusion_depth_factor (emboss depth = factor * radial_band_thickness_mm). If the text
+reads upside down along the finger, flip the up-vector sign.
+
+#### Mesh conversion (convert_to_export_meshes, splintmeshes.py)
+
+Convert the embossed solid to an export-ready mesh with splintmeshes.convert_to_export_meshes,
+the intended final conversion step before saving. It meshes the brep, cleans/welds it, and gates
+on a quality check (valid / closed / manifold, repairing once if needed), returning a list of
+meshes - one for our single solid, kept as splint_mesh.
+
+#### Build-plate orientation (splint_oriented)
+
+Lay the part distal-face-down for FDM printing. The distal loft cap is a planar face whose
+outward normal is the distal-plane normal (~+X), which makes a good flat first layer. Rotate that
+normal to world -Z (Transform.Rotation(distal_plane.Normal, -Z, distal_plane.Origin)), then drop
+the mesh so its lowest point rests on Z=0. The result is splint_oriented, the geometry handed to
+the printer.
+
+#### Saving (GH save component, see RelativeMotion_prod_mesh_saver.py)
+
+Saving is I/O tied to the job, so it stays in a dedicated GH component (not the geometry
+pipeline): that node takes splint_oriented plus the host-provided output_dir / root_filename and
+calls splintmeshes.save_job_output(splint_oriented, output_dir, root_filename, "3mf",
+custom_metadata={...}), which writes the mesh file plus a sibling .meta.json (with any extra
+per-job data under a "custom" key) that the splint_geo_processor polling loop picks up.
+
 ### Later phases (future work)
 
-With the closed solid slab in hand, remaining work (to be specified as we get there):
-- Build finger solids and boolean-subtract them (this is where capped / solid cylinders return).
+Remaining work (to be specified as we get there):
 - Apply is_slitted to the anchor rings.
-- Orient for printing (build plate roughly parallel to the profile plane) and mesh to STL / 3mf.
 - Use the pipe subtraction method for creating fillets on sharp edges.
+- A direction indicator (embedded sphere) marking up / forward for assembly.
+- Wire the production data loader (see RelativeMotion_prod_inbox_data_loader.py) so raw_data
+  comes from real jobs, and build the splint_factory web form + measurement guide.
+
