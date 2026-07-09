@@ -519,10 +519,64 @@ bridges are a first attempt):
 3. weld_perimeter_walk - first preview `bridge_curves` alone to check each bridge shape, then
    `closed_profile`; confirm it reports as closed (IsClosed) with no gaps or self-crossings.
 
+### Phase 6: build_splint_solid (two-face loft)
+
+Goal: turn the two closed profile perimeters into one watertight closed solid slab.
+
+Where the two perimeters come from: Phase 3-5 run TWICE, once per profile plane. build_profile_planes
+(Phase 3) returns a proximal plane (-X, toward the hand) and a distal plane (+X, toward the
+fingertip), offset +/- longitudinal_band_thickness_mm / 2 along World X from the centre plane.
+Everything upstream of the plane is shared (the same elevated cylinders and P1 lines), so only the
+plane changes between the two runs. Each run produces one closed_profile_curve; the proximal and
+distal curves are the band's two faces.
+
+Why the two faces differ (and why we must keep both): an anchor cylinder is uniform along X, so any
+X cuts the same ring - the two perimeters are congruent over every anchor region. They differ only
+across the elevated-support regions, where a tilted support cylinder cut at two different X values
+gives arcs at slightly different Z. That difference is the band's longitudinal taper over the
+supports and is structurally important, so we NEVER extrude a single face - we always loft both.
+(A useful side effect: at least one anchor region is an exact point correspondence between the two
+curves, which we use to align the loft seam.)
+
+Construction (build_splint_solid(proximal_profile, distal_profile) -> closed Brep):
+1. Require both perimeters closed (else raise).
+2. Precondition for a clean loft:
+   - Re-seam both curves to their world +Y extreme (Curve.ChangeClosedCurveSeam). On the congruent
+     anchor regions this is an exact correspondence, so the ruled sections line up instead of
+     shearing.
+   - Match directions (Curve.DoDirectionsMatch; reverse the distal curve if opposed) so the wall
+     does not twist into a self-intersection.
+3. Straight (ruled) loft between the two curves: Brep.CreateFromLoft([prox, dist], Straight,
+   closed=false) -> one open tube wall. Require exactly one surface back.
+4. CapPlanarHoles(_CAP_TOL) - both loft ends are planar closed loops, so one call caps both into a
+   closed solid.
+5. Validate IsSolid (else raise with IsValid / IsManifold / face count); flip if SolidOrientation
+   is Inward so the normals face out.
+
+The perimeter is a single outer silhouette with no inner holes; the finger bores are cut in a later
+phase by boolean-subtracting the (capped) finger cylinders, which is why the Phase 1 cylinders were
+left uncapped until then.
+
+No fallbacks (intentional): straight loft of preconditioned, structurally-similar curves is
+reliable, and we want the failure envelope to be visible while sweeping permutations. Every step
+raises ValueError on failure rather than degrading (no single-face extrude, no alternate capping).
+Known ways it can fail, to watch for while testing:
+- Loft returns 0 or >1 surfaces when the two perimeters are too dissimilar (a support region whose
+  proximal/distal arcs diverge a lot at extreme elevation, or a seam/direction mismatch that slips
+  through preconditioning) -> "did not produce exactly one wall surface".
+- CapPlanarHoles returns None if a loft end is not a clean planar closed loop (a self-crossing or
+  non-planar perimeter from Phase 5) -> "CapPlanarHoles failed".
+- Capped brep not solid (naked edges, non-manifold) -> "not a closed solid".
+
+Usage (per profile plane, then loft):
+
+```python
+splint_solid = build_splint_solid(proximal_profile, distal_profile)
+```
+
 ### Later phases (future work)
 
-With the closed profile perimeter in hand, remaining work (to be specified as we get there):
-- Extrude the profile by band_width_mm along the profile-plane normal.
+With the closed solid slab in hand, remaining work (to be specified as we get there):
 - Build finger solids and boolean-subtract them (this is where capped / solid cylinders return).
 - Apply is_slitted to the anchor rings.
 - Orient for printing (build plate roughly parallel to the profile plane) and mesh to STL / 3mf.

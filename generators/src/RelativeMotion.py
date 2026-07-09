@@ -11,13 +11,18 @@ See dev-notes/260702_Dev_Process_RelativeMotion_splint.md for the construction r
 import math
 from importlib import reload
 from Rhino.Geometry import (Point3d, Vector3d, Line, Plane, Circle, Cylinder, Transform,
-                            LineCurve, Curve, CurveOffsetCornerStyle, BlendContinuity, Arc)
+                            LineCurve, Curve, CurveOffsetCornerStyle, BlendContinuity, Arc,
+                            Brep, LoftType, BrepSolidOrientation)
 from Rhino.Geometry.Intersect import Intersection
 from splintcommon import log
 
 import TwoDCirclePositioning
 reload(TwoDCirclePositioning)
 from TwoDCirclePositioning import multiple_circle_positioning
+
+import BrepDifference
+reload(BrepDifference)
+from BrepDifference import robust_brep_difference
 
 
 # Elevation angle clamp (degrees). Provisional range pending review with hand therapist Liz.
@@ -32,6 +37,9 @@ _INTERSECT_TOL = 1e-6
 
 # Looser tolerance (mm) for stitching the finished perimeter pieces with Curve.JoinCurves.
 _JOIN_TOL = 1e-2
+
+# Tolerance (mm) for capping the planar loft ends (Phase 6) into a closed solid.
+_CAP_TOL = 1e-2
 
 # Sentinel a bridge builder returns when the two segments meet directly (their trimmed ends are
 # coincident), so no bridge curve is needed. Distinct from None, which signals a real failure.
@@ -56,7 +64,7 @@ def setup_finger_positions(raw_data, min_center_gap):
     included = [f for f in raw_data["finger_data"] if f.get("is_included")]
     if not included:
         log("setup_finger_positions: no included fingers in raw_data")
-        return [], [], []
+        return [], [], [], []
 
     # Step 1: lateral packing. multiple_circle_positioning converts each p1_mid_circ to a
     # radius internally and returns the per-finger radii plus baseline tangent offsets
@@ -177,103 +185,92 @@ def elevate_supported_fingers(raw_data, mcp_points, p1_lines, p1_circles, p1_cyl
     return out_mcp, out_lines, out_circles, out_cylinders, transforms
 
 
-def _lowest_circle_point(circle):
-    """Return the Point3d on a Circle with the smallest world Z.
-
-    Projects world -Z into the circle's plane to get the in-plane direction of steepest
-    descent, then steps one radius that way from the center. Falls back to the center for
-    a (near-)horizontal circle where every point shares the same Z.
-    """
-    center = circle.Center
-    normal = circle.Plane.Normal
-    world_down = Vector3d(0.0, 0.0, -1.0)
-    # Remove the out-of-plane component so the direction lies in the circle's plane.
-    in_plane = world_down - Vector3d.Multiply(world_down, normal) * normal
-    if in_plane.Length < 1e-9:
-        return Point3d(center)
-    in_plane.Unitize()
-    return center + in_plane * circle.Radius
-
-
-def build_profile_plane(raw_data, p1_circles):
+# NOTE (future): if fitted splints don't match the expected hand fit, revisit this profile-plane
+# calculation first. A single flat plane across non-collinear MCP joints is inherently a
+# compromise; today it is an equal-weighted least-squares line through every posed (elevated) P1
+# midpoint. Options to revisit: weight anchors more heavily, or set the plane orientation from the
+# anchors alone while still positioning it through all fingers.
+def build_profile_plane(raw_data, p1_lines_oriented):
     """Build the plane that the extruded splint profile outline will live in.
 
-    The splint body is carried by the anchor fingers, so the profile plane is defined by
-    where those anchors contact the volar baseline. p1_circles is the full per-included-finger
-    list from the previous phase (index-aligned to the included fingers); anchors are not
-    rotated, so their circles are the same before and after elevation.
+    A flat splint spans fingers whose MCP joints are not collinear, so the plane is a
+    least-squares compromise across every present finger in its posed (elevated) state - not just
+    the anchors. p1_lines_oriented is the elevated per-included-finger P1 line list (index-aligned
+    to the included fingers), so the plane adapts to the prescribed posture.
 
     Construction:
-      1. For each anchor finger, take the lowest point of its p1_circle.
-      2. Project that point onto the world XY plane (drop Z). Kept for future-proofing even
-         though anchor circles currently rest on the Z=0 baseline (projection is a no-op today).
-      3. Best-fit a line through the projected points (exact for two anchors, least-squares
+      1. For each included finger, take the midpoint of its elevated P1 line.
+      2. Project that midpoint onto world XY (drop Z); the plane is vertical, so only the XY
+         footprint sets it.
+      3. Best-fit a line through the projected midpoints (exact for two fingers, least-squares
          for three or more) via Line.TryFitLineToPoints.
-      4. Return the vertical plane that contains that line and is perpendicular to world XY.
+      4. Return the vertical plane through the points' centroid, X axis along the (sign-stable)
+         fit line, Y axis straight up world Z.
 
-    Returns a single RhinoCommon Plane, or None if there are fewer than two anchor fingers.
+    Returns a single RhinoCommon Plane, or None if there are fewer than two included fingers.
     """
     included = [f for f in raw_data["finger_data"] if f.get("is_included")]
 
-    anchor_points = []
-    for i, finger in enumerate(included):
-        if not finger.get("is_anchor_finger"):
-            continue
-        lowest = _lowest_circle_point(p1_circles[i])
-        # Project onto world XY (future-proofing; anchors sit on Z=0 today).
-        anchor_points.append(Point3d(lowest.X, lowest.Y, 0.0))
+    midpoints = []
+    for i in range(len(included)):
+        mid = p1_lines_oriented[i].PointAt(0.5)
+        # Project onto world XY; the vertical plane is defined purely by this footprint.
+        midpoints.append(Point3d(mid.X, mid.Y, 0.0))
 
-    if len(anchor_points) < 2:
-        log("build_profile_plane: need at least 2 anchor fingers, got {0}".format(
-            len(anchor_points)))
+    if len(midpoints) < 2:
+        log("build_profile_plane: need at least 2 included fingers, got {0}".format(
+            len(midpoints)))
         return None
 
-    ok, fit_line = Line.TryFitLineToPoints(anchor_points)
+    ok, fit_line = Line.TryFitLineToPoints(midpoints)
     if not ok:
-        log("build_profile_plane: line fit failed for {0} anchor point(s)".format(
-            len(anchor_points)))
+        log("build_profile_plane: line fit failed for {0} midpoint(s)".format(len(midpoints)))
         return None
 
-    # Vertical plane: X axis along the (horizontal) fit line, Y axis straight up world Z.
+    # Sign-stabilize the in-plane X direction (toward +Y) so the previewed plane frame is
+    # deterministic across permutations; the infinite plane is unaffected either way.
     direction = fit_line.Direction
     direction.Unitize()
-    profile_plane = Plane(fit_line.From, direction, Vector3d.ZAxis)
+    if direction.Y < 0.0:
+        direction.Reverse()
 
-    log("build_profile_plane: fit plane through {0} anchor point(s)".format(len(anchor_points)))
+    # Centroid origin (not the arbitrary fit-line endpoint) keeps the frame centered and stable.
+    cx = sum(p.X for p in midpoints) / len(midpoints)
+    cy = sum(p.Y for p in midpoints) / len(midpoints)
+    origin = Point3d(cx, cy, 0.0)
+
+    profile_plane = Plane(origin, direction, Vector3d.ZAxis)
+
+    log("build_profile_plane: fit plane through {0} finger midpoint(s)".format(len(midpoints)))
     return profile_plane
 
 
-def build_profile_planes(raw_data, p1_circles, longitudinal_band_thickness_mm):
+def build_profile_planes(raw_data, p1_lines_oriented, longitudinal_band_thickness_mm):
     """Build the two parallel profile planes: the splint band's proximal and distal faces.
 
-    build_profile_plane defines the centre plane on the anchor P1 midpoints; the printed band has
-    real thickness along the finger long axis, so its two outline profiles live on planes offset
-    from that centre by +/- longitudinal_band_thickness_mm / 2 along the plane normal (the
-    proximal-distal / longitudinal axis). Generating a profile on each face and lofting between
-    them gives the band its front and back surfaces.
+    build_profile_plane defines the centre plane; the printed band has real thickness along the
+    hand's proximal-distal axis (World +X here), so its two outline profiles live on planes offset
+    from that centre by +/- longitudinal_band_thickness_mm / 2 along World X. Generating a profile
+    on each face and lofting between them gives the band its front and back surfaces.
 
     Returns (proximal_plane, distal_plane) - proximal is the -X (toward the hand) face, distal the
     +X (toward the fingertip) face - or (None, None) if the centre plane could not be built.
     """
-    center_plane = build_profile_plane(raw_data, p1_circles)
+    center_plane = build_profile_plane(raw_data, p1_lines_oriented)
     if center_plane is None:
         return None, None
 
-    # Orient the offset toward +X (distal) so the proximal/distal naming is honest; the centre
-    # plane's normal sign is otherwise set by the arbitrary fit-line direction.
-    normal = Vector3d(center_plane.Normal)
-    if normal.X < 0.0:
-        normal.Reverse()
-    normal.Unitize()
-
+    # Offset along the hand's proximal-distal axis (World +X), NOT the plane normal: the band's
+    # thickness is measured along the finger length, and the fit-line tilt would otherwise skew
+    # the two faces off that axis.
     half = longitudinal_band_thickness_mm / 2.0
     proximal = Plane(center_plane)
-    proximal.Translate(normal * (-half))
+    proximal.Translate(Vector3d.XAxis * (-half))
     distal = Plane(center_plane)
-    distal.Translate(normal * half)
+    distal.Translate(Vector3d.XAxis * half)
 
     log("build_profile_planes: split centre plane into proximal/distal faces {0:.2f} mm "
-        "apart".format(longitudinal_band_thickness_mm))
+        "apart along World X".format(longitudinal_band_thickness_mm))
     return proximal, distal
 
 
@@ -1450,3 +1447,270 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
             "({0} segment piece(s) + {1} bridge(s) joined into {2} curve(s), none closed). "
             "Failures: {3}".format(piece_count, len(bridges), joined_count, detail))
     return closed, bridges
+
+
+def build_splint_solid(proximal_profile, distal_profile):
+    """Loft the two profile perimeters into one closed, watertight solid slab (Phase 6).
+
+    The proximal (-X, toward the hand) and distal (+X, toward the fingertip) perimeters from
+    Phase 5 are the band's two faces. They are congruent wherever the section is an anchor (an
+    anchor cylinder is uniform along X, so any X cuts the same ring) and differ only across the
+    elevated-support regions, so a straight (ruled) loft between them, capped at both planar ends,
+    yields the tapered band. Both faces are always lofted - never extrude one - so the
+    proximal/distal difference (the support taper) is preserved.
+
+    No fallbacks: any failure raises ValueError so the process limits stay visible. The loft is
+    preconditioned to make it reliable:
+      1. Require both perimeters closed.
+      2. Re-seam both to their world +Y extreme so the loft's section correspondence starts at the
+         same feature on each curve (an exact match on the congruent anchors), avoiding the
+         twisted wall a mismatched seam produces.
+      3. Match curve directions (reverse the distal curve if opposed) so the ruled wall does not
+         self-cross.
+      4. Straight loft -> one open tube wall.
+      5. CapPlanarHoles -> fill both planar ends into a closed solid.
+      6. Validate IsSolid; flip an inward-oriented solid so its normals face out.
+
+    The finger bores are cut later by boolean-subtracting the uncapped cylinders, so this
+    perimeter carries no inner holes - it is a single outer silhouette.
+
+    Returns a single closed, outward-oriented Brep.
+    """
+    if proximal_profile is None or distal_profile is None:
+        raise ValueError("build_splint_solid: a profile perimeter is missing (None).")
+
+    prox = proximal_profile.DuplicateCurve()
+    dist = distal_profile.DuplicateCurve()
+    if not prox.IsClosed or not dist.IsClosed:
+        raise ValueError(
+            "build_splint_solid: both profile perimeters must be closed (proximal closed={0}, "
+            "distal closed={1}).".format(prox.IsClosed, dist.IsClosed))
+
+    # Re-seam both to the same feature (world +Y extreme). On the congruent anchor regions this is
+    # an exact point correspondence, so the lofted sections align instead of shearing.
+    if not prox.ChangeClosedCurveSeam(_extreme_point_param(prox, Vector3d.YAxis)):
+        log("build_splint_solid: proximal re-seam had no effect (already at +Y extreme)")
+    if not dist.ChangeClosedCurveSeam(_extreme_point_param(dist, Vector3d.YAxis)):
+        log("build_splint_solid: distal re-seam had no effect (already at +Y extreme)")
+
+    # Align directions so the ruled surface does not twist into a self-intersection.
+    if not Curve.DoDirectionsMatch(prox, dist):
+        dist.Reverse()
+
+    lofts = Brep.CreateFromLoft([prox, dist], Point3d.Unset, Point3d.Unset,
+                                LoftType.Straight, False)
+    if lofts is None or len(lofts) != 1:
+        raise ValueError(
+            "build_splint_solid: loft did not produce exactly one wall surface (got {0}); the "
+            "two perimeters are too dissimilar to ruled-loft.".format(
+                0 if lofts is None else len(lofts)))
+    wall = lofts[0]
+
+    solid = wall.CapPlanarHoles(_CAP_TOL)
+    if solid is None:
+        raise ValueError(
+            "build_splint_solid: CapPlanarHoles failed; the loft ends are not both planar closed "
+            "loops.")
+
+    if not solid.IsSolid:
+        raise ValueError(
+            "build_splint_solid: capped brep is not a closed solid (IsValid={0}, IsManifold={1}, "
+            "face count={2}).".format(solid.IsValid, solid.IsManifold, solid.Faces.Count))
+
+    # A capped loft can come back inward-facing; flip so the solid's normals point outward.
+    if solid.SolidOrientation == BrepSolidOrientation.Inward:
+        solid.Flip()
+
+    log("build_splint_solid: built closed solid ({0} face(s), volume {1:.1f} mm^3)".format(
+        solid.Faces.Count, solid.GetVolume()))
+    return solid
+
+
+def build_finger_bores(p1_lines_oriented, p1_circles_oriented, finger_clearance_mm=0.0):
+    """Build one capped solid cylinder per included finger, for boolean-subtracting the finger
+    channels from the splint solid (a later phase).
+
+    Uses the elevated (oriented) outputs so each bore follows its finger's real axis and tilt:
+      - axis / length from p1_lines_oriented,
+      - radius from p1_circles_oriented (plus finger_clearance_mm for fit tolerance).
+
+    The cylinder is doubled in length about the P1 line's own midpoint (each end extended by half
+    the P1 length) so it overshoots both splint faces and always makes a clean through-cut - the
+    coincident-face case that makes booleans fail. Capped into a closed solid (unlike the thin
+    open p1_cylinders used earlier for visible plane cuts). A full cylinder is correct for
+    supported fingers too: subtracting it carves the finger-shaped void, and whatever splint
+    material exists on one side becomes the contact surface.
+
+    Returns a list of closed Breps, index-aligned to the included fingers.
+    """
+    bores = []
+    for i, line in enumerate(p1_lines_oriented):
+        # Copy the line (value type) and double its length about its midpoint.
+        axis_line = Line(line.From, line.To)
+        half = axis_line.Length / 2.0
+        axis_line.Extend(half, half)
+
+        axis = axis_line.To - axis_line.From
+        axis.Unitize()
+        radius = p1_circles_oriented[i].Radius + finger_clearance_mm
+        base_circle = Circle(Plane(axis_line.From, axis), radius)
+        bore = Cylinder(base_circle, axis_line.Length).ToBrep(True, True)
+        bores.append(bore)
+
+    log("build_finger_bores: built {0} capped bore cylinder(s) (clearance {1} mm)".format(
+        len(bores), finger_clearance_mm))
+    return bores
+
+
+def subtract_finger_bores(splint_solid, finger_bores, tolerance=None):
+    """Boolean-subtract each finger bore from the splint solid, in sequence (Phase 7).
+
+    Booleans are historically the least reliable step, so each cut goes through
+    BrepDifference.robust_brep_difference, which escalates through direct / list / tolerance /
+    jiggle / repair / mesh-boolean strategies and validates the result before accepting it. The
+    bores are subtracted one at a time (the running result becomes the next minuend) rather than
+    in a single multi-subtrahend call: it is more robust and pinpoints which finger, if any, fails.
+
+    Inputs:
+      - splint_solid:  the closed Brep from build_splint_solid.
+      - finger_bores:  capped solid Breps from build_finger_bores (each overshoots both faces, so
+                       every cut is a clean through-bore).
+      - tolerance:     base tolerance for the booleans; None uses the document tolerance.
+
+    Returns the bored splint Brep. Raises ValueError if the input solid is missing, and propagates
+    BrepDifference's errors (BrepDifferenceError / NoIntersectionError / InvalidBrepError) if a cut
+    cannot be made even after all fallback strategies - so a failure names the offending finger.
+    """
+    if splint_solid is None:
+        raise ValueError("subtract_finger_bores: splint_solid is missing (None).")
+    if not finger_bores:
+        log("subtract_finger_bores: no bores supplied; returning the solid unchanged")
+        return splint_solid
+
+    result = splint_solid
+    for i, bore in enumerate(finger_bores):
+        bored, success, method = robust_brep_difference(result, bore, tolerance)
+        log("subtract_finger_bores: finger {0} cut via {1}".format(i, method))
+        result = bored
+
+    log("subtract_finger_bores: subtracted {0} bore(s); final volume {1:.1f} mm^3".format(
+        len(finger_bores), result.GetVolume()))
+    return result
+
+
+def generate_relative_motion_splint(raw_data, object_id="TEST"):
+    """Full RelativeMotion pipeline: raw_data -> bored splint solid, with every intermediate.
+
+    This is the single orchestration entry point (moved out of the GhPython component so the
+    algorithm lives in git, is diffable/testable, and can run headless in the geo processor).
+    The GH component becomes a thin shim: decode its input, call this, and fan the returned dict
+    out to output wires. All GH-host plumbing (ghenv, sys.path, splintcommon init, timing,
+    gh_decode_one, the try/except) stays in that shim, not here.
+
+    The tuning coefficients (design constants, not per-patient measurements) live here as locals.
+    raw_data carries only patient measurements + config that the future web form collects.
+
+    Returns a dict of every phase's geometry so the component can still preview each stage; the
+    final bored solid is result["splint_solid"].
+    """
+    # --- Tuning coefficients (design constants) -------------------------------------------
+    support_prong_arc_deg = 55.0            # END-support cradle prong arc width (wider contact)
+    support_arc_deg = 45.0                  # MID-support arc width
+
+    radial_band_thickness_mm = 1.65
+    single_sided_support_thickness_mm = radial_band_thickness_mm * 1.5
+    longitudinal_band_thickness_mm = 10.0
+    min_center_gap = radial_band_thickness_mm
+    anchor_bridge_radius_mm = 3.0
+    support_bridge_radius_mm = 10.0
+    return_spine_thickness_mm = 8.0
+    return_spine_end_reach = 0.2
+    return_spine_touchdown_fraction = 0.35
+
+    # --- Phase 1: finger positions --------------------------------------------------------
+    mcp_points, p1_lines, p1_circles, p1_cylinders = setup_finger_positions(
+        raw_data, min_center_gap=min_center_gap)
+
+    # --- Phase 2: elevate supported fingers -----------------------------------------------
+    (mcp_points_oriented, p1_lines_oriented, p1_circles_oriented,
+     p1_cylinders_oriented, transforms) = elevate_supported_fingers(
+        raw_data, mcp_points, p1_lines, p1_circles, p1_cylinders)
+
+    # --- Phase 3: proximal + distal profile planes ----------------------------------------
+    proximal_profile_plane, distal_profile_plane = build_profile_planes(
+        raw_data, p1_lines_oriented, longitudinal_band_thickness_mm)
+
+    # --- Phase 4: finger cross-sections on each plane -------------------------------------
+    p_full_curves, p_preserved = extract_finger_cross_sections(
+        raw_data, proximal_profile_plane, p1_cylinders_oriented, p1_lines_oriented,
+        support_prong_arc_deg=support_prong_arc_deg, support_arc_deg=support_arc_deg)
+    d_full_curves, d_preserved = extract_finger_cross_sections(
+        raw_data, distal_profile_plane, p1_cylinders_oriented, p1_lines_oriented,
+        support_prong_arc_deg=support_prong_arc_deg, support_arc_deg=support_arc_deg)
+
+    # --- Phase 5: walk each profile perimeter ---------------------------------------------
+    # Proximal face.
+    p_rings, p_pos_hemis, p_neg_hemis = build_exterior_anchor_rings(
+        raw_data, proximal_profile_plane, p_preserved, radial_band_thickness_mm)
+    p_cradles = build_end_support_cradles(
+        raw_data, proximal_profile_plane, p_preserved, p_rings,
+        single_sided_support_thickness_mm)
+    p_walk_segments = plan_perimeter_walk(
+        raw_data, p_pos_hemis, p_neg_hemis, p_preserved, p_cradles)
+    p_walk_preview = [s["curve"] for s in p_walk_segments]
+    p_closed_profile, p_bridge_curves = weld_perimeter_walk(
+        raw_data, p_walk_segments, proximal_profile_plane, p_rings,
+        anchor_bridge_radius_mm, support_bridge_radius_mm, return_spine_thickness_mm,
+        return_spine_end_reach, return_spine_touchdown_fraction)
+
+    # Distal face.
+    d_rings, d_pos_hemis, d_neg_hemis = build_exterior_anchor_rings(
+        raw_data, distal_profile_plane, d_preserved, radial_band_thickness_mm)
+    d_cradles = build_end_support_cradles(
+        raw_data, distal_profile_plane, d_preserved, d_rings,
+        single_sided_support_thickness_mm)
+    d_walk_segments = plan_perimeter_walk(
+        raw_data, d_pos_hemis, d_neg_hemis, d_preserved, d_cradles)
+    d_walk_preview = [s["curve"] for s in d_walk_segments]
+    d_closed_profile, d_bridge_curves = weld_perimeter_walk(
+        raw_data, d_walk_segments, distal_profile_plane, d_rings,
+        anchor_bridge_radius_mm, support_bridge_radius_mm, return_spine_thickness_mm,
+        return_spine_end_reach, return_spine_touchdown_fraction)
+
+    # --- Phase 6: loft the two faces, then bore the fingers -------------------------------
+    splint_solid_blank = build_splint_solid(p_closed_profile, d_closed_profile)
+    finger_bores = build_finger_bores(p1_lines_oriented, p1_circles_oriented)
+    splint_solid = subtract_finger_bores(splint_solid_blank, finger_bores)
+
+    log("generate_relative_motion_splint: pipeline complete (objectID {0})".format(object_id))
+
+    # Every intermediate is returned so the GH component can still preview each phase.
+    return {
+        "object_id": object_id,
+        # Phase 1
+        "mcp_points": mcp_points, "p1_lines": p1_lines,
+        "p1_circles": p1_circles, "p1_cylinders": p1_cylinders,
+        # Phase 2
+        "mcp_points_oriented": mcp_points_oriented, "p1_lines_oriented": p1_lines_oriented,
+        "p1_circles_oriented": p1_circles_oriented,
+        "p1_cylinders_oriented": p1_cylinders_oriented, "transforms": transforms,
+        # Phase 3
+        "proximal_profile_plane": proximal_profile_plane,
+        "distal_profile_plane": distal_profile_plane,
+        # Phase 4
+        "p_full_curves": p_full_curves, "p_preserved": p_preserved,
+        "d_full_curves": d_full_curves, "d_preserved": d_preserved,
+        # Phase 5 proximal
+        "p_rings": p_rings, "p_pos_hemis": p_pos_hemis, "p_neg_hemis": p_neg_hemis,
+        "p_cradles": p_cradles, "p_walk_segments": p_walk_segments,
+        "p_walk_preview": p_walk_preview, "p_closed_profile": p_closed_profile,
+        "p_bridge_curves": p_bridge_curves,
+        # Phase 5 distal
+        "d_rings": d_rings, "d_pos_hemis": d_pos_hemis, "d_neg_hemis": d_neg_hemis,
+        "d_cradles": d_cradles, "d_walk_segments": d_walk_segments,
+        "d_walk_preview": d_walk_preview, "d_closed_profile": d_closed_profile,
+        "d_bridge_curves": d_bridge_curves,
+        # Phase 6
+        "splint_solid_blank": splint_solid_blank, "finger_bores": finger_bores,
+        "splint_solid": splint_solid,
+    }
