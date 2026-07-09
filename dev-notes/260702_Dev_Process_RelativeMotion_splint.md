@@ -602,7 +602,7 @@ emboss_object_id wires it up for this splint:
 - emboss_inside=True and align_to_surface_normal=True: recess into the curved bore with even depth.
 
 The embossed solid replaces splint_solid. Two design coefficients live in the orchestrator:
-objectid_text_size_factor (text height = factor * longitudinal_band_thickness_mm) and
+objectid_text_size_factor (text height = factor * longitudinal_band_width_mm) and
 objectid_extrusion_depth_factor (emboss depth = factor * radial_band_thickness_mm). If the text
 reads upside down along the finger, flip the up-vector sign.
 
@@ -621,20 +621,75 @@ normal to world -Z (Transform.Rotation(distal_plane.Normal, -Z, distal_plane.Ori
 the mesh so its lowest point rests on Z=0. The result is splint_oriented, the geometry handed to
 the printer.
 
-#### Saving (GH save component, see RelativeMotion_prod_mesh_saver.py)
+#### Data source + saving (integrated into the orchestrator)
 
-Saving is I/O tied to the job, so it stays in a dedicated GH component (not the geometry
-pipeline): that node takes splint_oriented plus the host-provided output_dir / root_filename and
-calls splintmeshes.save_job_output(splint_oriented, output_dir, root_filename, "3mf",
-custom_metadata={...}), which writes the mesh file plus a sibling .meta.json (with any extra
-per-job data under a "custom" key) that the splint_geo_processor polling loop picks up.
+generate_relative_motion_splint(raw_data_dev, object_id, is_production, should_save_mesh) owns
+both the job I/O and the geometry. is_production selects the data source: dev uses the caller's
+raw_data_dev (fast design sweeps); production ignores it and pulls the next inbox job via
+splintcommon.load_job_data("RelativeMotion"), reading raw_data = job_data["relative_motion_data"]
+and taking objectID + outbox path/name from the job (see RelativeMotion_prod_inbox_data_loader.py).
+should_save_mesh gates writing: when set it calls splintmeshes.save_job_output(splint_oriented,
+output_dir, root_filename, "3mf", custom_metadata={...}), which writes the mesh plus a sibling
+.meta.json (extra per-job data under a "custom" key) for the polling loop; sweeps leave it False.
+
+### Phase 8: splint_factory web form (Design Definition)
+
+This is the most complex input schema we have built, so it does not fit splint_factory's flat
+scalar Design Definition (Float/Integer/Text/Boolean, one field per parameter). RelativeMotion
+needs a nested, per-finger structure, so it ships a bespoke React form instead of the generic loop.
+
+#### How the data bridges to the geo processor
+
+The generic pipeline is: the new-job form builds parameterValues (Record<string,any>) ->
+JSON.stringify -> POST /api/design-jobs -> stored -> written to the inbox job's "params" field ->
+splintcommon.extract_server_params_data does job_data = json.loads(params). So job_data is exactly
+whatever object the form put in parameterValues. The RelativeMotion loader then reads
+raw_data = job_data["relative_motion_data"]. Therefore the form must emit:
+
+    parameterValues = { "relative_motion_data": { is_right_hand, finger_data:[...4],
+                        all_splint_finger_circ, relative_elevation_angle, longitudinal_band_width_mm } }
+
+finger_data has one entry per finger in if->mf->rf->sf order; excluded fingers carry null
+measurements. This matches the raw_data the geometry consumes (Phases 1-3).
+
+#### Files (all in splint_factory)
+
+- src/designs/relative-motion/definition.json - id/name/algorithmName="RelativeMotion"/isActive;
+  inputParameters is [] because the custom form owns the schema (the POST validator loops the flat
+  schema, so an empty array accepts the nested payload).
+- src/designs/relative-motion/CustomForm.tsx - the bespoke form: hand selector, a per-finger row
+  (include -> anchor/supported -> P1 circumference, P1 length, forward offset, slit), and the three
+  globals. It assembles the nested payload and reports validity up via onChange / onValidChange.
+- src/designs/custom-form-registry.ts - client-safe map of designId -> form component (mirrors
+  hints-registry).
+- src/designs/registry.ts - added the relative-motion entry.
+- src/app/design-jobs/new/page.tsx - if a design has a custom form it renders that instead of the
+  generic field loop and disables submit until the form reports valid; nothing downstream changes.
+
+#### Validation enforced in the form (minimal first pass)
+
+At least two anchors and one supported finger; included fingers contiguous (no gaps); the first
+included finger is the reference (forward offset forced to 0); only anchor fingers may be slitted;
+positive P1 circumference / length / band width / all-fingers circumference; relative elevation
+angle within [-120, +45]. Deeper UX/validation is a follow-up.
+
+#### Deployment
+
+The code registry drives /api/designs, but visibility is org-scoped. To make the design usable:
+1. Seed the DB row: `cd splint_factory && npx tsx prisma/seed.ts`.
+2. Add OrganizationDesign visibility rows for the orgs that should see it.
+3. Add public/designs/relative-motion/measurement.png (and preview.png) - placeholders render until then.
+
+#### Follow-ups
+
+- Measurement guide image + richer per-field hints and validation UX.
+- Consume is_slitted in the geometry (the form collects it; the pipeline does not use it yet).
+- Revisit whether band width and elevation defaults/ranges match Liz's clinical guidance.
 
 ### Later phases (future work)
 
 Remaining work (to be specified as we get there):
-- Apply is_slitted to the anchor rings.
+- Apply is_slitted to the anchor rings (the form collects it; geometry does not consume it yet).
 - Use the pipe subtraction method for creating fillets on sharp edges.
 - A direction indicator (embedded sphere) marking up / forward for assembly.
-- Wire the production data loader (see RelativeMotion_prod_inbox_data_loader.py) so raw_data
-  comes from real jobs, and build the splint_factory web form + measurement guide.
 

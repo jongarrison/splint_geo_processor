@@ -14,7 +14,7 @@ from Rhino.Geometry import (Point3d, Vector3d, Line, Plane, Circle, Cylinder, Tr
                             LineCurve, Curve, CurveOffsetCornerStyle, BlendContinuity, Arc,
                             Brep, LoftType, BrepSolidOrientation, AreaMassProperties)
 from Rhino.Geometry.Intersect import Intersection
-from splintcommon import log
+from splintcommon import log, mark_generation_start, load_job_data, splint_outbox_dir
 
 import TwoDCirclePositioning
 reload(TwoDCirclePositioning)
@@ -30,7 +30,7 @@ from TextGun import emboss_text
 
 import splintmeshes
 reload(splintmeshes)
-from splintmeshes import convert_to_export_meshes
+from splintmeshes import convert_to_export_meshes, save_job_output
 
 
 # Elevation angle clamp (degrees). Provisional range pending review with hand therapist Liz.
@@ -253,12 +253,12 @@ def build_profile_plane(raw_data, p1_lines_oriented):
     return profile_plane
 
 
-def build_profile_planes(raw_data, p1_lines_oriented, longitudinal_band_thickness_mm):
+def build_profile_planes(raw_data, p1_lines_oriented, longitudinal_band_width_mm):
     """Build the two parallel profile planes: the splint band's proximal and distal faces.
 
-    build_profile_plane defines the centre plane; the printed band has real thickness along the
+    build_profile_plane defines the centre plane; the printed band has real width along the
     hand's proximal-distal axis (World +X here), so its two outline profiles live on planes offset
-    from that centre by +/- longitudinal_band_thickness_mm / 2 along World X. Generating a profile
+    from that centre by +/- longitudinal_band_width_mm / 2 along World X. Generating a profile
     on each face and lofting between them gives the band its front and back surfaces.
 
     Returns (proximal_plane, distal_plane) - proximal is the -X (toward the hand) face, distal the
@@ -269,16 +269,16 @@ def build_profile_planes(raw_data, p1_lines_oriented, longitudinal_band_thicknes
         return None, None
 
     # Offset along the hand's proximal-distal axis (World +X), NOT the plane normal: the band's
-    # thickness is measured along the finger length, and the fit-line tilt would otherwise skew
+    # width is measured along the finger length, and the fit-line tilt would otherwise skew
     # the two faces off that axis.
-    half = longitudinal_band_thickness_mm / 2.0
+    half = longitudinal_band_width_mm / 2.0
     proximal = Plane(center_plane)
     proximal.Translate(Vector3d.XAxis * (-half))
     distal = Plane(center_plane)
     distal.Translate(Vector3d.XAxis * half)
 
     log("build_profile_planes: split centre plane into proximal/distal faces {0:.2f} mm "
-        "apart along World X".format(longitudinal_band_thickness_mm))
+        "apart along World X".format(longitudinal_band_width_mm))
     return proximal, distal
 
 
@@ -1662,20 +1662,31 @@ def emboss_object_id(splint_solid, raw_data, object_id, p_full_curves, d_full_cu
     return embossed, letter_breps, projected_letters, text_plane
 
 
-def generate_relative_motion_splint(raw_data, object_id="TEST"):
-    """Full RelativeMotion pipeline: raw_data -> bored splint solid, with every intermediate.
+def generate_relative_motion_splint(raw_data_dev, is_production,
+                                    should_save_mesh, object_id="TEST"):
+    """Full RelativeMotion pipeline: raw_data -> print-ready splint mesh, with every intermediate.
 
     This is the single orchestration entry point (moved out of the GhPython component so the
     algorithm lives in git, is diffable/testable, and can run headless in the geo processor).
-    The GH component becomes a thin shim: decode its input, call this, and fan the returned dict
-    out to output wires. All GH-host plumbing (ghenv, sys.path, splintcommon init, timing,
-    gh_decode_one, the try/except) stays in that shim, not here.
+    The GH component becomes a thin shim: pass its inputs, call this, and fan the returned dict
+    out to output wires. GH-host plumbing (ghenv, sys.path, splintcommon init, gh_decode of the
+    dev input, the try/except) stays in that shim, not here.
 
-    The tuning coefficients (design constants, not per-patient measurements) live here as locals.
-    raw_data carries only patient measurements + config that the future web form collects.
+    Data source (mirrors the first-component dev/production pattern used elsewhere):
+      - is_production=False (dev): use the caller-supplied raw_data_dev - fast for design sweeps.
+      - is_production=True: ignore raw_data_dev and pull the next job from the geo processor
+        inbox (raw_data, objectID, and the outbox path/filename to save under).
+
+    should_save_mesh gates writing the print-ready mesh (splint_oriented) so large permutation
+    sweeps can run without producing files. When True the mesh is written for the geo processor
+    to pick up: production saves under the job's outbox path/name, dev writes a DEV_-prefixed file
+    to the outbox (see RelativeMotion_prod_mesh_saver.py).
+
+    The tuning coefficients (design constants, not per-patient measurements) live here as locals;
+    raw_data carries only the patient measurements + config the web form will collect.
 
     Returns a dict of every phase's geometry so the component can still preview each stage; the
-    final bored solid is result["splint_solid"].
+    final bored solid is result["splint_solid"] and the print-ready mesh is result["splint_oriented"].
     """
     # --- Tuning coefficients (design constants) -------------------------------------------
     support_prong_arc_deg = 55.0            # END-support cradle prong arc width (wider contact)
@@ -1683,7 +1694,6 @@ def generate_relative_motion_splint(raw_data, object_id="TEST"):
 
     radial_band_thickness_mm = 1.65
     single_sided_support_thickness_mm = radial_band_thickness_mm * 1.5
-    longitudinal_band_thickness_mm = 10.0
     min_center_gap = radial_band_thickness_mm
     anchor_bridge_radius_mm = 3.0
     support_bridge_radius_mm = 10.0
@@ -1692,6 +1702,26 @@ def generate_relative_motion_splint(raw_data, object_id="TEST"):
     return_spine_touchdown_fraction = 0.35
     objectid_text_size_factor = 0.4         # objectID text height as a fraction of the band length
     objectid_extrusion_depth_factor = 0.5   # emboss depth as a fraction of the ring wall thickness
+
+    # --- Data source + job context (dev vs production) ------------------------------------
+    # geo_algorithm_name links the processing stages (web design -> job file -> this generator).
+    geo_algorithm_name = "RelativeMotion"
+    mark_generation_start()
+    if is_production:
+        # Pull the next job from the inbox; raises if the inbox has no matching job.
+        job_data, object_id, root_filename, output_dir, _ = load_job_data(
+            True, geo_algorithm_name)
+        raw_data = job_data["relative_motion_data"]
+        log("generate_relative_motion_splint: PROD job '{0}' (objectID {1})".format(
+            root_filename, object_id))
+    else:
+        # Dev sweep: use the caller-supplied data; save (if requested) to a DEV_ outbox file.
+        raw_data = raw_data_dev
+        root_filename = "DEV_{0}_{1}".format(geo_algorithm_name, object_id)
+        output_dir = splint_outbox_dir
+
+    # Band width along the finger axis (patient/config input from the web form; mm).
+    longitudinal_band_width_mm = raw_data.get("longitudinal_band_width_mm", 10.0)
 
     # --- Phase 1: finger positions --------------------------------------------------------
     mcp_points, p1_lines, p1_circles, p1_cylinders = setup_finger_positions(
@@ -1704,7 +1734,7 @@ def generate_relative_motion_splint(raw_data, object_id="TEST"):
 
     # --- Phase 3: proximal + distal profile planes ----------------------------------------
     proximal_profile_plane, distal_profile_plane = build_profile_planes(
-        raw_data, p1_lines_oriented, longitudinal_band_thickness_mm)
+        raw_data, p1_lines_oriented, longitudinal_band_width_mm)
 
     # --- Phase 4: finger cross-sections on each plane -------------------------------------
     p_full_curves, p_preserved = extract_finger_cross_sections(
@@ -1751,7 +1781,7 @@ def generate_relative_motion_splint(raw_data, object_id="TEST"):
     # --- Phase 7: emboss the objectID into the if-side anchor bore ------------------------
     if proximal_profile_plane is None or distal_profile_plane is None:
         raise ValueError("generate_relative_motion_splint: profile plane missing before Phase 7.")
-    objectid_text_size = objectid_text_size_factor * longitudinal_band_thickness_mm
+    objectid_text_size = objectid_text_size_factor * longitudinal_band_width_mm
     splint_solid, id_letter_breps, id_projected_letters, id_text_plane = emboss_object_id(
         splint_solid, raw_data, object_id, p_full_curves, d_full_curves,
         proximal_profile_plane.Normal, radial_band_thickness_mm, objectid_text_size,
@@ -1759,19 +1789,39 @@ def generate_relative_motion_splint(raw_data, object_id="TEST"):
 
     # Mesh the finished solid, then lay it distal-face-down on the build plate. The distal cap
     # (a planar loft end whose outward normal is the distal-plane normal, ~+X) becomes the first
-    # print layer: rotate that normal to world -Z, then drop the part so it rests on Z=0. The
-    # GH save component exports splint_oriented (see RelativeMotion_prod_mesh_saver.py).
+    # print layer: rotate that normal to world -Z, then drop the part so it rests on Z=0.
     splint_mesh = convert_to_export_meshes(splint_solid)[0]
     splint_oriented = splint_mesh.DuplicateMesh()
     splint_oriented.Transform(Transform.Rotation(
         distal_profile_plane.Normal, Vector3d(0.0, 0.0, -1.0), distal_profile_plane.Origin))
     splint_oriented.Translate(Vector3d(0.0, 0.0, -splint_oriented.GetBoundingBox(True).Min.Z))
 
+    # Save the print-ready mesh for the geo processor to pick up (skipped during design sweeps).
+    # Production writes under the job's outbox path/name; dev writes a DEV_-prefixed file.
+    saved = False
+    if should_save_mesh:
+        saved = save_job_output(splint_oriented, output_dir, root_filename, "3mf",
+                                custom_metadata={
+                                    "geo_algorithm": geo_algorithm_name,
+                                    "object_id": object_id,
+                                    "is_production": is_production,
+                                    "relative_elevation_angle": raw_data.get(
+                                        "relative_elevation_angle"),
+                                    "radial_band_thickness_mm": radial_band_thickness_mm,
+                                    "longitudinal_band_width_mm": longitudinal_band_width_mm,
+                                })
+        log("generate_relative_motion_splint: mesh save {0} ({1}/{2}.3mf)".format(
+            "ok" if saved else "FAILED", output_dir, root_filename))
+
     log("generate_relative_motion_splint: pipeline complete (objectID {0})".format(object_id))
 
     # Every intermediate is returned so the GH component can still preview each phase.
     return {
         "object_id": object_id,
+        "is_production": is_production,
+        "output_dir": output_dir,
+        "root_filename": root_filename,
+        "saved": saved,
         # Phase 1
         "mcp_points": mcp_points, "p1_lines": p1_lines,
         "p1_circles": p1_circles, "p1_cylinders": p1_cylinders,
