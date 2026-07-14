@@ -61,7 +61,8 @@ def compute_intersection_volume(brep_a, brep_b, tolerance):
     return 0.0
 
 
-def validate_difference_result(result_brep, minuend_brep, subtrahend_brep, intersection_vol=None, tolerance_pct=10.0):
+def validate_difference_result(result_brep, minuend_brep, subtrahend_brep, intersection_vol=None,
+                               tolerance_pct=10.0, min_result_fraction=None):
     """
     Validate boolean difference result quality.
     
@@ -71,6 +72,10 @@ def validate_difference_result(result_brep, minuend_brep, subtrahend_brep, inter
         subtrahend_brep: Brep being subtracted (inner)
         intersection_vol: Pre-computed intersection volume (optional)
         tolerance_pct: Allowed volume deviation percentage
+        min_result_fraction: Optional lower bound on result_vol / minuend_vol. Guards against
+            degenerate booleans (e.g. coincident faces returning the cutter itself) that collapse
+            the minuend. Unlike the intersection_vol check it fires even when volume validation was
+            'skipped', so a small chamfer cut that suddenly loses most of the solid is rejected.
     
     Returns:
         tuple: (is_valid: bool, issues: list of strings)
@@ -99,6 +104,12 @@ def validate_difference_result(result_brep, minuend_brep, subtrahend_brep, inter
         vol_diff = minuend_vol - result_vol
         if vol_diff < 0.001:  # Less than 0.001 mm^3 removed
             issues.append("NothingSubtracted")
+
+        # Degenerate-collapse guard: too much of the minuend vanished. Independent of
+        # intersection_vol so it still catches a bad cut when volume validation was skipped.
+        if min_result_fraction is not None and result_vol < minuend_vol * min_result_fraction:
+            issues.append("ResultTooSmall={:.1f}%<{:.0f}%".format(
+                100.0 * result_vol / minuend_vol, 100.0 * min_result_fraction))
         
         # If we have intersection volume, verify against expected
         if intersection_vol is not None and intersection_vol > 0:
@@ -151,7 +162,8 @@ def attempt_difference_with_lists(minuend, subtrahend, tolerance):
     return None
 
 
-def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volumes=True):
+def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volumes=True,
+                           min_result_fraction=None, allow_fallbacks=True):
     """
     Attempt brep boolean difference with multiple fallback strategies.
     
@@ -160,6 +172,13 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
         subtrahend: Brep to subtract (e.g., inner finger)
         base_tolerance: Base tolerance (uses doc tolerance if None)
         check_volumes: Validate volume conservation
+        min_result_fraction: Optional lower bound on result_vol / minuend_vol (e.g. 0.5 for a
+            small chamfer cut). Rejects a degenerate boolean that collapses the minuend even when
+            the intersection-volume validation was skipped, so a bad cut raises instead of
+            silently returning the cutter. Leave None for large cuts (e.g. hollowing).
+        allow_fallbacks: When False, run only the direct/list/tolerance strategies and then fail
+            fast - skips the expensive jiggle/repair/mesh strategies. Use for clean cutters (e.g.
+            chamfer wedges) where those heroics only waste time and can distort the result.
     
     Returns:
         tuple: (result_brep, success, method_used)
@@ -239,7 +258,8 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
     if result:
         result_vol = get_brep_volume(result)
         log("Result volume: {:.3f}".format(result_vol if result_vol else 0))
-        is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol)
+        is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol,
+                                                      min_result_fraction=min_result_fraction)
         if is_valid:
             log("SUCCESS - Clean boolean difference")
             return result, True, "Difference(tol={:.6f})".format(base_tolerance)
@@ -260,7 +280,8 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
     if result:
         result_vol = get_brep_volume(result)
         log("Result volume: {:.3f}".format(result_vol if result_vol else 0))
-        is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol)
+        is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol,
+                                                      min_result_fraction=min_result_fraction)
         if is_valid:
             log("SUCCESS - List-based difference")
             return result, True, "DifferenceList(tol={:.6f})".format(base_tolerance)
@@ -285,7 +306,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
         log("  Trying tolerance: {:.6f}".format(tol))
         result = attempt_boolean_difference(minuend, subtrahend, tol)
         if result:
-            is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol, tolerance_pct=15.0)
+            is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol, tolerance_pct=15.0, min_result_fraction=min_result_fraction)
             if is_valid:
                 log("SUCCESS - Difference at higher tolerance")
                 return result, True, "Difference(tol={:.6f})".format(tol)
@@ -295,6 +316,22 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
                     best_result = result
                     best_issues = issues
     
+    # Fast-fail gate for clean cutters (e.g. chamfer wedges). If direct/list/tolerance did not cut
+    # cleanly, the cutter itself is wrong; jiggling, repairing, and mesh-booleaning it just burns
+    # seconds per rail and mesh boolean can distort the part. Accept a solid best-effort result
+    # (unless it collapsed the minuend), otherwise fail fast instead of running strategies 4-6.
+    if not allow_fallbacks:
+        too_small = any(i.startswith("ResultTooSmall") for i in (best_issues or []))
+        if best_result is not None and best_result.IsSolid and not too_small:
+            log("Fallbacks disabled - accepting best solid result ({})".format(
+                ", ".join(best_issues)))
+            return best_result, True, "Imperfect({})".format(",".join(best_issues))
+        log("Fallbacks disabled - no clean difference; failing fast (skipping strategies 4-6)")
+        raise BrepDifferenceError(
+            "Boolean difference failed with fallbacks disabled (clean-cutter path). "
+            "Minuend vol={:.1f}, Subtrahend vol={:.1f}, Intersection vol={:.1f}".format(
+                minuend_vol or 0, subtrahend_vol or 0, intersection_vol))
+
     # STRATEGY 4: Jiggle subtrahend slightly
     log("")
     log("-" * 60)
@@ -317,7 +354,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
                 
                 result = attempt_boolean_difference(minuend, jiggled_subtrahend, base_tolerance)
                 if result:
-                    is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol, tolerance_pct=15.0)
+                    is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol, tolerance_pct=15.0, min_result_fraction=min_result_fraction)
                     if is_valid:
                         log("SUCCESS - Jiggle {:.4f}mm worked".format(offset_dist))
                         return result, True, "Jiggled({:.4f}mm)".format(offset_dist)
@@ -347,7 +384,7 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
         
         result = attempt_boolean_difference(fixed_minuend, fixed_subtrahend, base_tolerance * 10)
         if result:
-            is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol, tolerance_pct=20.0)
+            is_valid, issues = validate_difference_result(result, minuend, subtrahend, validation_vol, tolerance_pct=20.0, min_result_fraction=min_result_fraction)
             if is_valid:
                 log("SUCCESS - Repaired inputs worked")
                 return result, True, "Repaired"
@@ -409,8 +446,16 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
                 # Convert back to brep for consistent return type
                 result_brep = rg.Brep.CreateFromMesh(result_mesh, True)
                 if result_brep:
-                    log("SUCCESS - Mesh boolean difference")
-                    return result_brep, True, "MeshBoolean"
+                    # Degenerate-collapse guard: the mesh path is otherwise unvalidated, so a
+                    # coincident-face cut could still slip a collapsed solid through here.
+                    rv = get_brep_volume(result_brep)
+                    if (min_result_fraction is not None and rv and minuend_vol
+                            and rv < minuend_vol * min_result_fraction):
+                        log("  Mesh boolean rejected: result {:.3f} < {:.0f}% of minuend".format(
+                            rv, 100.0 * min_result_fraction))
+                    else:
+                        log("SUCCESS - Mesh boolean difference")
+                        return result_brep, True, "MeshBoolean"
                 else:
                     log("  Mesh boolean succeeded but conversion to brep failed")
                     log("  Returning mesh wrapped as brep")
@@ -430,10 +475,14 @@ def robust_brep_difference(minuend, subtrahend, base_tolerance=None, check_volum
         log("-" * 60)
         log("Issues: {}".format(", ".join(best_issues)))
         
-        # Accept if it's at least solid
-        if best_result.IsSolid:
+        # Accept if it's at least solid - unless it collapsed the minuend (degenerate cut), which
+        # we never want to hand back silently.
+        too_small = any(i.startswith("ResultTooSmall") for i in best_issues)
+        if best_result.IsSolid and not too_small:
             log("Result is solid - accepting with issues")
             return best_result, True, "Imperfect({})".format(",".join(best_issues))
+        if too_small:
+            log("Best result collapses the minuend - refusing degenerate difference")
     
     log("")
     log("=" * 60)

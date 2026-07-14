@@ -10,6 +10,68 @@ const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * Wait until a file is fully written and readable by a freshly-opened handle.
+ *
+ * Guards against a write/visibility race: a large geometry file can be visible to
+ * this process (size already validated) yet not stably readable by a newly-spawned
+ * child process. Observed on the Azure Windows host, where the large SizingRings
+ * 3mf (~2.3MB) intermittently failed slicing with CLI_FILE_NOTFOUND (-3) while
+ * small files sliced fine. Requires the size to hold steady across consecutive
+ * polls and confirms the file can actually be opened for reading.
+ *
+ * @returns true when the file is stable and readable, false on timeout.
+ */
+async function waitForFileStableAndReadable(
+  filePath: string,
+  logger?: { info: (obj: any, msg?: string) => void; warn: (obj: any, msg?: string) => void },
+  timeoutMs = 15_000
+): Promise<boolean> {
+  const start = Date.now();
+  const pollMs = 150;
+  const requiredStableChecks = 3; // consecutive equal, non-zero sizes
+  let lastSize = -1;
+  let stableCount = 0;
+
+  while (Date.now() - start < timeoutMs) {
+    let size = -1;
+    try {
+      size = fs.statSync(filePath).size;
+    } catch {
+      size = -1; // not visible yet
+    }
+
+    if (size > 0 && size === lastSize) {
+      stableCount++;
+      if (stableCount >= requiredStableChecks) {
+        // Final gate: confirm a fresh read handle can open the file. This mirrors
+        // what a newly-spawned child process does and catches transient locks
+        // (e.g. antivirus scanning a just-created large file).
+        try {
+          const fd = fs.openSync(filePath, 'r');
+          const probe = Buffer.alloc(1);
+          fs.readSync(fd, probe, 0, 1, 0);
+          fs.closeSync(fd);
+          logger?.info({ filePath, size, waitMs: Date.now() - start }, 'Geometry file confirmed stable and readable');
+          return true;
+        } catch (err: any) {
+          // Not yet readable (locked); reset and keep polling.
+          stableCount = 0;
+          logger?.warn({ filePath, error: err?.message }, 'Geometry file not yet readable (locked?) - retrying');
+        }
+      }
+    } else {
+      stableCount = 0;
+      lastSize = size;
+    }
+
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+
+  logger?.warn({ filePath, timeoutMs }, 'Timed out waiting for geometry file to become stable and readable');
+  return false;
+}
+
 // ===========================
 // Rhino/RhinoCode Utilities
 // ===========================
@@ -642,14 +704,25 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     return { geometryPath, printPath };
   }
 
-  // Resolve Grasshopper script path (algorithm.gh)
-  const ghScript = path.join(input.ghScriptsDir, `${input.algorithm}.gh`);
-  const ghScriptAbs = path.resolve(ghScript);
-  if (!fs.existsSync(ghScriptAbs)) {
-    const errorMsg = `Grasshopper script not found: ${ghScriptAbs}. Ensure it exists under splint_geo_processor/generators/ or set GH_SCRIPTS_DIR.`;
+  // Resolve generator script path. Prefer {algorithm}.py (rhinocode script) over {algorithm}.gh
+  // (GrasshopperPlayer): a runner .py bypasses Grasshopper entirely and keeps the algorithm as
+  // plain, diffable Python. Falling back to .gh keeps every existing algorithm working unchanged.
+  const pyScriptAbs = path.resolve(path.join(input.ghScriptsDir, `${input.algorithm}.py`));
+  const ghScriptAbs = path.resolve(path.join(input.ghScriptsDir, `${input.algorithm}.gh`));
+  let scriptKind: 'py' | 'gh';
+  let scriptAbs: string;
+  if (fs.existsSync(pyScriptAbs)) {
+    scriptKind = 'py';
+    scriptAbs = pyScriptAbs;
+  } else if (fs.existsSync(ghScriptAbs)) {
+    scriptKind = 'gh';
+    scriptAbs = ghScriptAbs;
+  } else {
+    const errorMsg = `Generator script not found: neither ${pyScriptAbs} nor ${ghScriptAbs} exists. Ensure one exists under splint_geo_processor/generators/ or set GH_SCRIPTS_DIR.`;
     logWarn(errorMsg);
     throw new Error(errorMsg);
   }
+  logInfo('Resolved generator script', { scriptKind, scriptAbs });
 
   // Rhino/Grasshopper step
   const rhinoCliPath = input.rhinoCli;
@@ -680,11 +753,8 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   const runGrasshopperAttempt = async (attemptNumber: number): Promise<{ error: Error | null; lockLikely: boolean }> => {
     clearPipelineAttemptArtifacts();
 
-    // Run GrasshopperPlayer with the script
-    // rhinocode command "- _GrasshopperPlayer {gh_script_path}" (hyphen underscore)
-    const ghArg = `-_GrasshopperPlayer "${ghScriptAbs}"`;
-    const runCmd = `${rhinoCodeCliPath} command ${ghArg}`;
-    logInfo('exec', { cmd: runCmd, attemptNumber });
+    // Dispatch: .py runs directly via `rhinocode script`; .gh runs via GrasshopperPlayer.
+    // Both paths write to the same log.txt / .meta.json so the poll loop below is identical.
     const execEnv = {
       ...process.env,
       SF_JOB_BASENAME: base,
@@ -693,12 +763,33 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       SF_PARAMS_JSON: typeof input.params === 'string' ? input.params : JSON.stringify(input.params ?? {})
     } as NodeJS.ProcessEnv;
 
-    const { stdout: ghStdout, stderr: ghStderr } = await executeRhinoCommand(
-      rhinoCodeCliPath,
-      ghArg,
-      { timeout: 10 * 60_000, env: execEnv },
-      { info: logInfo, warn: logWarn }
-    );
+    let ghStdout = '';
+    let ghStderr = '';
+    if (scriptKind === 'py') {
+      const runCmd = `${rhinoCodeCliPath} script ${scriptAbs}`;
+      logInfo('exec', { cmd: runCmd, attemptNumber });
+      const res = await executeRhinoCodeCli(
+        rhinoCodeCliPath,
+        ['script', scriptAbs],
+        { timeout: 10 * 60_000, env: execEnv },
+        { info: logInfo, warn: logWarn }
+      );
+      ghStdout = res.stdout;
+      ghStderr = res.stderr;
+    } else {
+      // rhinocode command "- _GrasshopperPlayer {gh_script_path}" (hyphen underscore)
+      const ghArg = `-_GrasshopperPlayer "${scriptAbs}"`;
+      const runCmd = `${rhinoCodeCliPath} command ${ghArg}`;
+      logInfo('exec', { cmd: runCmd, attemptNumber });
+      const res = await executeRhinoCommand(
+        rhinoCodeCliPath,
+        ghArg,
+        { timeout: 10 * 60_000, env: execEnv },
+        { info: logInfo, warn: logWarn }
+      );
+      ghStdout = res.stdout;
+      ghStderr = res.stderr;
+    }
     if (ghStdout && ghStdout.trim()) logInfo('stdout (rhinocode command)', { stdout: ghStdout.substring(0, 2000), attemptNumber });
     if (ghStderr && ghStderr.trim()) logWarn('stderr (rhinocode command)', { stderr: ghStderr.substring(0, 2000), attemptNumber });
 
@@ -954,6 +1045,14 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
   let sliceDurationSeconds: number | undefined;
   if (input.bambuCli) {
 
+    // Close the write/visibility race that intermittently caused Bambu to fail
+    // with CLI_FILE_NOTFOUND on the large SizingRings 3mf: ensure the geometry
+    // file is fully flushed and openable by a fresh handle before launching Bambu.
+    const geometryReady = await waitForFileStableAndReadable(geometryPath, input.logger);
+    if (!geometryReady) {
+      throw new Error(`Geometry file not stable/readable before slicing: ${geometryPath}`);
+    }
+
     const sliceStart = Date.now();
 
     const machineSettingsPath = path.join(__dirname, '../../printer-settings/machine/machine-final.json');
@@ -970,7 +1069,8 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       '--load-filaments', filamentJson,  // Single filament -> virtual slot 0 (runtime mapping via ams_mapping, see ../../agent-notes/ams_mapping_and_slicing.md)
       '--slice', '0',
       '--debug', '2',
-      '--export-3mf', printPath,
+      '--outputdir', input.outboxDir,  // Bambu writes result.json here (else CWD); makes per-job capture deterministic
+      '--export-3mf', path.basename(printPath),  // Bambu joins outputdir + this; must be a bare filename or the path doubles
       geometryPath
     ];
 
@@ -998,6 +1098,27 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       bambuStderr = err?.stderr ?? '';
     }
     sliceDurationSeconds = (Date.now() - sliceStart) / 1000;
+
+    // Capture Bambu's own result.json (written to --outputdir) before the next job
+    // overwrites it. It carries the authoritative return_code and error_string
+    // (e.g. CLI_FILE_NOTFOUND=-3), which are far more useful than the opaque OS exit
+    // code from execFile. Preserve a per-job copy so it survives and gets archived.
+    let bambuResultCode: number | undefined;
+    let bambuResultError: string | undefined;
+    const resultJsonPath = path.join(input.outboxDir, 'result.json');
+    try {
+      if (fs.existsSync(resultJsonPath)) {
+        const parsed = JSON.parse(fs.readFileSync(resultJsonPath, 'utf-8'));
+        bambuResultCode = typeof parsed?.return_code === 'number' ? parsed.return_code : undefined;
+        bambuResultError = typeof parsed?.error_string === 'string' ? parsed.error_string : undefined;
+        fs.copyFileSync(resultJsonPath, path.join(input.outboxDir, `${base}.slice-result.json`));
+        logInfo('Bambu result.json captured', { returnCode: bambuResultCode, errorString: bambuResultError });
+      } else {
+        logWarn('Bambu result.json not found after slice', { resultJsonPath });
+      }
+    } catch (err: any) {
+      logWarn('Failed to read/parse Bambu result.json', { error: err?.message, resultJsonPath });
+    }
 
     if (bambuStdout.trim()) logInfo('stdout (bambu)', { stdout: bambuStdout.substring(0, 2000) });
     if (bambuStderr.trim()) logWarn('stderr (bambu)', { stderr: bambuStderr.substring(0, 2000) });
@@ -1046,6 +1167,10 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
         reasons.push(`Bambu CLI exited with error${code !== undefined ? ` (code=${code})` : ''}: ${bambuErr.message || 'unknown'}`);
       } else if (!printOk) {
         reasons.push('Bambu CLI exited cleanly but produced no print file');
+      }
+      // Surface Bambu's authoritative failure reason from result.json when present.
+      if (bambuResultCode !== undefined || bambuResultError) {
+        reasons.push(`Bambu result.json: return_code=${bambuResultCode ?? 'unknown'}${bambuResultError ? `, error_string="${bambuResultError}"` : ''}`);
       }
       for (const m of matchedFailures) {
         reasons.push(`Detected: ${m.label}${m.hint ? ' -- ' + m.hint : ''}`);

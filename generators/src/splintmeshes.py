@@ -15,6 +15,8 @@ import os
 import json
 import time
 import math
+import tempfile
+import shutil
 from pathlib import Path
 from splintcommon import log, get_generation_elapsed
 
@@ -176,9 +178,10 @@ def _build_meshing_parameters(
         target_edge_length=None,
         min_edge_length=0.01,
         max_edge_length=None,
-    jagged_seams=False,
+        jagged_seams=False,
         simple_planes=True,
-        refine_grid=False):
+        refine_grid=False,
+        closed_object_post_process=True):
     """Build meshing parameters for Brep-to-mesh conversion."""
     q = (quality or "high").lower()
     if q == "fast":
@@ -203,6 +206,12 @@ def _build_meshing_parameters(
             params.SimplePlanes = bool(simple_planes)
         if hasattr(params, "RefineGrid"):
             params.RefineGrid = bool(refine_grid)
+        # Watertight post-process: for a closed solid, match seam / boolean-edge vertices so the
+        # render mesh stitches into a closed mesh. Fixes hairline naked-edge cracks along faces
+        # that are topologically joined but tessellate to mismatched vertices (e.g. chamfer
+        # facets from a wedge boolean), which otherwise appear only at some mesh densities.
+        if hasattr(params, "ClosedObjectPostProcess"):
+            params.ClosedObjectPostProcess = bool(closed_object_post_process)
     except Exception as err:
         log("  Warning: failed to apply meshing edge length settings: {}".format(err))
 
@@ -622,6 +631,38 @@ def _try_shrinkwrap_fallback(source_geometry, target_edge_length=None):
     return None
 
 
+def _debug_measure_export_size(meshes, format_type="3mf"):
+    """Export `meshes` to a scratch temp file/directory to measure the REAL on-disk size the
+    given format would produce, then delete the scratch file. This performs an actual Rhino
+    export (bake/select/export/cleanup via save_mesh) rather than an analytic estimate, so the
+    number reflects true encoded size - useful for tuning meshing parameters (target_edge_length,
+    etc.) directly from a GH panel without touching the production outbox.
+
+    Returns the file size in bytes, or -1 if the export fails or produces no/invalid file.
+    Never raises: any failure here is a debug-signal, not a reason to fail the real conversion.
+    """
+    tmp_dir = None
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="splint_mesh_debug_")
+        tmp_name = "debug_export"
+        save_mesh(meshes, tmp_dir, tmp_name, format_type)
+        export_ext = {"stl": "stl", "obj": "obj"}.get((format_type or "3mf").lower(), "3mf")
+        export_path = Path(tmp_dir) / "{}.{}".format(tmp_name, export_ext)
+        if not export_path.exists():
+            return -1
+        size = os.path.getsize(str(export_path))
+        return size if size > 0 else -1
+    except Exception as err:
+        log("  debug export size measurement failed: {}".format(err))
+        return -1
+    finally:
+        if tmp_dir is not None:
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+
 def convert_to_export_meshes(
         input_geometry,
         quality="high",
@@ -636,7 +677,9 @@ def convert_to_export_meshes(
         repair_if_needed=True,
         require_closed=True,
         require_manifold=True,
-        shrinkwrap_fallback=False):
+        shrinkwrap_fallback=False,
+        debug=None,
+        debug_export_format="3mf"):
     """Convert Brep/Mesh/Guid inputs to export-ready meshes with tunable quality.
 
     This function is intended as the final conversion step before save_mesh.
@@ -658,6 +701,16 @@ def convert_to_export_meshes(
         require_closed: Require closed meshes.
         require_manifold: Require zero non-manifold topology edges.
         shrinkwrap_fallback: Try ShrinkWrap if mesh still fails quality gate.
+        debug: Optional dict to populate with debug/observability data (acts as an extra
+            "out" parameter - handy from a GH panel while tuning meshing settings). Populated
+            keys:
+              - "saved_mesh_file_size_bytes": the REAL on-disk size (bytes) a `debug_export_format`
+                export of the returned meshes would produce. Computed by actually exporting to a
+                scratch temp file via save_mesh, then deleting it - not an estimate. -1 if the
+                debug export itself fails or produces an invalid/missing file (this does NOT
+                affect the real return value or raise - it's purely observational).
+        debug_export_format: Format used for the debug size measurement above ("3mf" default,
+            or "stl"/"obj"). Ignored when debug is None.
 
     Returns:
         list[Rhino.Geometry.Mesh]: Export-ready meshes.
@@ -689,14 +742,15 @@ def convert_to_export_meshes(
         jagged_seams=jagged_seams,
         simple_planes=simple_planes,
         refine_grid=refine_grid,
+        closed_object_post_process=require_closed,
     )
     weld_angle_radians = math.radians(float(weld_angle_degrees)) if weld_angle_degrees is not None else None
 
     log("convert_to_export_meshes: {} item(s), quality={}, target_edge_length={}, max_edge_length={}, min_edge_length={}, smoothing={}, repair_if_needed={}, shrinkwrap_fallback={}".format(
         len(items), quality, target_edge_length, max_edge_length, min_edge_length,
         smoothing_iterations, repair_if_needed, shrinkwrap_fallback))
-    log("  meshing_flags: jagged_seams={}, simple_planes={}, refine_grid={}".format(
-        jagged_seams, simple_planes, refine_grid))
+    log("  meshing_flags: jagged_seams={}, simple_planes={}, refine_grid={}, closed_object_post_process={}".format(
+        jagged_seams, simple_planes, refine_grid, require_closed))
     # Only warn about high weld angles when in-line smoothing is on; with
     # smoothing_iterations=0 a high weld angle is correct (and required when
     # downstream targeted mesh smoothing -- see MeshSmooth.py -- needs welded
@@ -781,6 +835,12 @@ def convert_to_export_meshes(
     est_binary_stl_mb = (84 + 50 * total_triangles) / (1024.0 * 1024.0)
     log("convert_to_export_meshes: total_triangles={} est_binary_stl_size_mb={:.2f}".format(
         total_triangles, est_binary_stl_mb))
+
+    if debug is not None and isinstance(debug, dict):
+        debug["saved_mesh_file_size_bytes"] = _debug_measure_export_size(
+            output_meshes, debug_export_format)
+        log("  debug: saved_mesh_file_size_bytes={} (format={})".format(
+            debug["saved_mesh_file_size_bytes"], debug_export_format))
 
     return output_meshes
 

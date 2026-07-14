@@ -84,7 +84,7 @@
   "seam_position": "aligned",
   "skirt_distance": "2",
   "skirt_height": "1",
-  "skirt_loops": 3,
+  "skirt_loops": "3",
   "smooth_coefficient": "150",
   "sparse_infill_density": "15%",
   "skeleton_infill_density": "15%",

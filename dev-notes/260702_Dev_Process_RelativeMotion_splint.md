@@ -606,6 +606,36 @@ objectid_text_size_factor (text height = factor * longitudinal_band_width_mm) an
 objectid_extrusion_depth_factor (emboss depth = factor * radial_band_thickness_mm). If the text
 reads upside down along the finger, flip the up-vector sign.
 
+#### Edge chamfering (Phase 7.5, native Rhino chamfer)
+
+See dev-notes/260709_Rhino_Fillet_And_Chamfer_Research.md for the full method survey. Landed
+approach: Rhino's native `Brep.CreateFilletEdges` with `BlendType.Chamfer` +
+`RailType.DistanceFromEdge`, driven by edge indices resolved from our construction curves via
+`BrepEdgeLocator`. The old hand-built wedge cutter (`BrepEdgeRound.py`) is retired: the native
+call proved reliable in the harness (dev/harness_relmotion.py PROD CANDIDATE, 2026-07-10) and
+avoids the wedge builder's fragile boolean subtraction path.
+
+Two-pass policy in `generate_relative_motion_splint` Phase 7.5, both uniform distance:
+1. Anchor bore rims (4 closed circles: proximal + distal per anchor finger) at
+   `_CHAMFER_RIM_MM = 0.5 mm`. Rails: `p_full_curves` / `d_full_curves` of anchor fingers,
+   resolved with `find_edges_for_curve`.
+2. Outer perimeter over support spans at `_CHAMFER_PERIMETER_MM = 0.25 mm`. Rails: the open
+   `p_support_rails` / `d_support_rails` from Phase 7 (`extract_support_rails`), resolved with
+   `find_edge_containing_curve` on the post-rim-chamfer brep (topology shifted, so re-lookup is
+   required). Return-spine rails don't lie on the perimeter and are skipped silently. Anchor
+   outer edges stay sharp on purpose (bed adhesion + slit curl).
+
+`BrepChamfer.chamfer_edges` fails loud (`BrepChamferError`) on empty result, non-solid, or
+invalid brep - the pipeline lets it propagate. Order within finishing: chamfer runs BEFORE
+`emboss_object_id`, because emboss adds ~276 short glyph edges that would make edge lookups
+expensive and are not chamfer targets. Slit work (future) comes after chamfering; slit lips
+would get their own chamfer pass on the fresh cut edge.
+
+Edge-lookup module: `BrepEdgeLocator.py` — see its docstring for the fast-then-strict strategy
+(midpoint filter, endpoint check, length-based coverage classification). It's the bridge from
+"curves we built" to "edge indices the native APIs need."
+
+
 #### Mesh conversion (convert_to_export_meshes, splintmeshes.py)
 
 Convert the embossed solid to an export-ready mesh with splintmeshes.convert_to_export_meshes,
@@ -689,7 +719,26 @@ The code registry drives /api/designs, but visibility is org-scoped. To make the
 ### Later phases (future work)
 
 Remaining work (to be specified as we get there):
-- Apply is_slitted to the anchor rings (the form collects it; geometry does not consume it yet).
-- Use the pipe subtraction method for creating fillets on sharp edges.
+
+- HIGH PRIORITY - Anchor slits. A full through-cut across an anchor ring so it can spread open, for
+  patients whose PIP joint is large relative to their P1 circumference (otherwise the splint is
+  hard or impossible to don). Driven by the is_slitted flag the form already collects (anchors
+  only); the geometry does not consume it yet. Requirements gathered so far:
+  - Placement. End anchors (the first or last included finger) slit on their outward Y extreme,
+    running directly away from the center of the hand (+Y for the index-most end, -Y for the
+    little-finger-most end). Interior anchors slit on max +Z or max -Z, chosen to match the
+    relative-elevation-angle sign (support side is +Z when angle >= 0), so pressure on the support
+    surface closes the slit rather than opening it.
+  - Cut. Full through-cut - severs the ring wall completely (bore to outer surface, across the full
+    band width) so the ring can spread. Overridable default gap width 0.3 mm. Improves on
+    BrepSlit.py by deriving placement/orientation from the ring geometry we already have.
+  - Edge finishing. Done AFTER rim chamfering (Phase 7 edge rounding), so the slit cut reveals the
+    fresh edge path that then gets smoothed by the same pipe-trim primitive - keeping the slit
+    edges round so they cannot pinch skin.
+- Extend edge rounding beyond the anchor rims (supported-finger edges) once the anchor-rim
+  beachhead is proven.
 - A direction indicator (embedded sphere) marking up / forward for assembly.
+
+
+
 

@@ -1,0 +1,18 @@
+=== RelativeMotion dev harness ===
+inputs available in /Users/jon/work_3d/splint_work/splint_geo_processor/generators/dev/inputs:
+  - BTR8_3anchor_prod.json  <== running
+  - if_mf_rf_2anchor_20deg.json  <== running
+
+=== row 0 at +Y 0mm: BTR8_3anchor_prod.json ===
+running generate_relative_motion_splint (objectID DV00)...
+  preview slot 0 at (+X 0, +Y 0) mm: splint_solid + support rails
+  preview slot 1 at (+X 90, +Y 0) mm: splint_solid
+  preview slot 2 at (+X 180, +Y 0) mm: splint_oriented
+
+=== row 1 at +Y 150mm: if_mf_rf_2anchor_20deg.json ===
+running generate_relative_motion_splint (objectID DV01)...
+  preview slot 0 at (+X 0, +Y 150) mm: splint_solid + support rails
+  preview slot 1 at (+X 90, +Y 150) mm: splint_solid
+  preview slot 2 at (+X 180, +Y 150) mm: splint_oriented
+
+done. report written to /Users/jon/work_3d/splint_work/splint_geo_processor/generators/dev/last_run_report.txt

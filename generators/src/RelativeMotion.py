@@ -12,7 +12,8 @@ import math
 from importlib import reload
 from Rhino.Geometry import (Point3d, Vector3d, Line, Plane, Circle, Cylinder, Transform,
                             LineCurve, Curve, CurveOffsetCornerStyle, BlendContinuity, Arc,
-                            Brep, LoftType, BrepSolidOrientation, AreaMassProperties)
+                            Brep, LoftType, BrepSolidOrientation, AreaMassProperties,
+                            PointContainment)
 from Rhino.Geometry.Intersect import Intersection
 from splintcommon import log, mark_generation_start, load_job_data, splint_outbox_dir
 
@@ -22,11 +23,22 @@ from TwoDCirclePositioning import multiple_circle_positioning
 
 import BrepDifference
 reload(BrepDifference)
-from BrepDifference import robust_brep_difference
+from BrepDifference import (robust_brep_difference, BrepDifferenceError,
+                           InvalidBrepError, NoIntersectionError)
+
+import BrepEdgeLocator
+reload(BrepEdgeLocator)
+from BrepEdgeLocator import find_edges_for_curve, find_edge_containing_curve
+
+import BrepChamfer
+reload(BrepChamfer)
+from BrepChamfer import chamfer_edges, chamfer_edges_variable, BrepChamferError
 
 import TextGun
 reload(TextGun)
 from TextGun import emboss_text
+
+
 
 import splintmeshes
 reload(splintmeshes)
@@ -48,6 +60,21 @@ _JOIN_TOL = 1e-2
 
 # Tolerance (mm) for capping the planar loft ends (Phase 6) into a closed solid.
 _CAP_TOL = 1e-2
+
+# Chamfer distances (mm). Harness-validated 2026-07-10 (dev/harness_relmotion.py PROD CANDIDATE):
+# native Brep.CreateFilletEdges + BlendType.Chamfer + RailType.DistanceFromEdge. Uniform per pass.
+_CHAMFER_RIM_MM = 0.5          # anchor bore rims (both proximal and distal, skin-contact points)
+_CHAMFER_PERIMETER_MM = 0.25   # outer perimeter over support spans (anchor stretches stay sharp)
+
+# Perimeter chamfer is applied variable-radius: taper to ~zero at both ends of each support
+# rail so the chamfer strip cannot collide with the corners of an already-chamfered anchor rim
+# (that collision is what made bulk uniform chamfers fail at rim-chamfer vertices). The inset
+# defines the "quiet zone" at each end of the rail measured as a fraction of the rail's edge-
+# parameter span. Endpoint distance is small but non-degenerate (Rhino rejects true zeros).
+_CHAMFER_PERIMETER_END_INSET_FRAC = 0.10   # last 10% of each rail end tapers to endpoint distance
+_CHAMFER_PERIMETER_ENDPOINT_MM = 0.02      # near-zero distance at the tapered rail endpoints
+
+
 
 # Sentinel a bridge builder returns when the two segments meet directly (their trimmed ends are
 # coincident), so no bridge curve is needed. Distinct from None, which signals a real failure.
@@ -625,26 +652,6 @@ def _build_cradle_curve(arc, anchor_center, plane, thickness):
         return None
     ret_free = return_edge.PointAt(rt_free)
 
-    # --- TEMP DIAGNOSTIC: dump the cradle-assembly geometry so +20 (works) vs -20 (fails) can be
-    # compared step by step. Remove once the negative-elevation cradle is fixed.
-    _as, _ae = arc.PointAtStart, arc.PointAtEnd
-    _rs, _re = return_edge.PointAtStart, return_edge.PointAtEnd
-    log("  cradle.dbg arc.start=({0:.2f},{1:.2f},{2:.2f}) arc.end=({3:.2f},{4:.2f},{5:.2f})".format(
-        _as.X, _as.Y, _as.Z, _ae.X, _ae.Y, _ae.Z))
-    log("  cradle.dbg anchor_center=({0:.2f},{1:.2f},{2:.2f}) d(start)={3:.2f} d(end)={4:.2f} "
-        "-> near_end={5}".format(
-            anchor_center.X, anchor_center.Y, anchor_center.Z,
-            _as.DistanceTo(anchor_center), _ae.DistanceTo(anchor_center),
-            "start" if near_t == arc.Domain.T0 else "end"))
-    log("  cradle.dbg return_edge.start=({0:.2f},{1:.2f},{2:.2f}) "
-        "return_edge.end=({3:.2f},{4:.2f},{5:.2f}) len={6:.2f}".format(
-            _rs.X, _rs.Y, _rs.Z, _re.X, _re.Y, _re.Z, return_edge.GetLength()))
-    log("  cradle.dbg arc_near=({0:.2f},{1:.2f},{2:.2f}) arc_free=({3:.2f},{4:.2f},{5:.2f}) "
-        "ret_free=({6:.2f},{7:.2f},{8:.2f})".format(
-            arc_near.X, arc_near.Y, arc_near.Z, arc_free.X, arc_free.Y, arc_free.Z,
-            ret_free.X, ret_free.Y, ret_free.Z))
-    # --- END TEMP DIAGNOSTIC
-
     # Semicircle cap through the two free ends, bulging off the arc (away from the anchor).
     cap_dir = arc.TangentAt(free_t)
     if _blend_reverse(arc, free_t):
@@ -668,12 +675,6 @@ def _build_cradle_curve(arc, anchor_center, plane, thickness):
     # this fixed orientation rather than nearest-endpoint guessing.
     if cradle.PointAtStart.DistanceTo(arc_near) > cradle.PointAtEnd.DistanceTo(arc_near):
         cradle.Reverse()
-    # --- TEMP DIAGNOSTIC: final prong positions after orientation.
-    _cs, _ce = cradle.PointAtStart, cradle.PointAtEnd
-    log("  cradle.dbg FINAL support_prong=({0:.2f},{1:.2f},{2:.2f}) "
-        "return_prong=({3:.2f},{4:.2f},{5:.2f})".format(
-            _cs.X, _cs.Y, _cs.Z, _ce.X, _ce.Y, _ce.Z))
-    # --- END TEMP DIAGNOSTIC
     return cradle
 
 
@@ -1246,6 +1247,146 @@ def _support_between(included, i, j):
     return any(not included[k].get("is_anchor_finger") for k in range(lo + 1, hi))
 
 
+# Perimeter-piece roles, used to tag each welded piece so the support-finger stretches of the
+# outer edge can later be selected (and chamfered) without touching the anchor-ring stretches.
+_ROLE_SUPPORT = "support"
+_ROLE_ANCHOR = "anchor"
+
+
+def _slot_role(kind):
+    """Role of a walk slot: support-finger geometry vs anchor-ring geometry."""
+    return _ROLE_SUPPORT if kind in ("support_arc", "end_support_cradle") else _ROLE_ANCHOR
+
+
+def _bridge_role(ka, kb, fa, fb, included):
+    """Role of the bridge joining two slots. A bridge is 'support' if it touches any support
+    piece, or if it is the return-side leap spine across a leapt-over support run (whose two
+    ends are anchor return hemispheres, so it must be recognised by the support-between test,
+    not by its neighbours' kinds). Every other bridge (anchor-to-anchor corner) is 'anchor'."""
+    if set([ka, kb]) & set(["support_arc", "end_support_cradle"]):
+        return _ROLE_SUPPORT
+    if (ka == "anchor_return_side" and kb == "anchor_return_side"
+            and _support_between(included, fa, fb)):
+        return _ROLE_SUPPORT
+    return _ROLE_ANCHOR
+
+
+def _build_perimeter_chain(walk_segments, work, bridge_after, included):
+    """Assemble the ordered, role-tagged perimeter chain from the welded pieces.
+
+    Each entry is {role, curve} in perimeter order: every trimmed walk slot, followed by the
+    bridge that trails it (if any). The role tags let a later pass pull out the support-finger
+    stretches of the outer edge (support arcs, cradles, their connecting bridges, and the return
+    spine) while leaving the anchor-ring stretches untouched. Curves are the final trimmed pieces,
+    so the chain lies exactly on the finished perimeter.
+    """
+    chain = []
+    count = len(walk_segments)
+    for k in range(count):
+        seg = walk_segments[k]
+        if work[k] is not None:
+            chain.append({"role": _slot_role(seg["kind"]), "curve": work[k]})
+        if bridge_after[k] is not None:
+            nxt = walk_segments[(k + 1) % count]
+            role = _bridge_role(seg["kind"], nxt["kind"], seg["finger_index"],
+                                nxt["finger_index"], included)
+            chain.append({"role": role, "curve": bridge_after[k]})
+    return chain
+
+
+def extract_support_rails(perimeter_chain, tolerance=None):
+    """Pull the support-finger stretches of the perimeter out as open rail curves.
+
+    Walks the (cyclic) role-tagged chain and joins each maximal contiguous run of 'support'
+    pieces into one open curve - one rail per support run on the support side, one per return
+    spine, and one spanning each end-support cradle (arc + cap + return). Anchor-ring pieces
+    delimit the runs and are excluded, so chamfering these rails never touches the anchor edges.
+
+    Returns a list of open Curves (empty if there is no support geometry).
+    """
+    tol = tolerance or _JOIN_TOL
+    n = len(perimeter_chain)
+    if n == 0:
+        return []
+    roles = [e["role"] for e in perimeter_chain]
+    # Rotate so the scan starts on an anchor boundary; a support run then never wraps the seam.
+    if _ROLE_ANCHOR in roles:
+        start = roles.index(_ROLE_ANCHOR)
+        ordered = perimeter_chain[start:] + perimeter_chain[:start]
+    else:
+        ordered = perimeter_chain  # no anchors at all: whole perimeter is one support run
+
+    runs = []
+    run = []
+    for entry in ordered:
+        if entry["role"] == _ROLE_SUPPORT:
+            if entry["curve"] is not None:
+                run.append(entry["curve"])
+        elif run:
+            runs.append(run)
+            run = []
+    if run:
+        runs.append(run)
+
+    rails = []
+    for pieces in runs:
+        joined = Curve.JoinCurves(pieces, tol)
+        if joined is not None and len(joined) > 0:
+            # A clean run joins into one open curve; if it fragments, keep the longest piece.
+            rails.append(max(joined, key=lambda c: c.GetLength()))
+    return rails
+
+
+def _build_perimeter_chamfer_handles(edge, rail, target_mm,
+                                       endpoint_mm=_CHAMFER_PERIMETER_ENDPOINT_MM,
+                                       end_inset_frac=_CHAMFER_PERIMETER_END_INSET_FRAC):
+    """Handles for a variable-distance perimeter chamfer along one brep edge that a support rail
+    lies on. Returns [(edge_param, distance_mm), ...] sorted, or None if the rail cannot be
+    located on the edge parameter range.
+
+    Shape of the ramp:
+      d = endpoint_mm at edge.Domain.T0
+      d = endpoint_mm at rail_start param (if inside the edge)
+      d = target_mm    at rail_start + inset
+      d = target_mm    at rail_end   - inset
+      d = endpoint_mm at rail_end   param (if inside the edge)
+      d = endpoint_mm at edge.Domain.T1
+    The tapered "quiet zones" at each end keep the chamfer strip from colliding with an already-
+    chamfered anchor-rim corner. Rhino rejects true zero distances so endpoint_mm stays small
+    but non-degenerate.
+    """
+    T0 = edge.Domain.T0
+    T1 = edge.Domain.T1
+    ok_start, t_a = edge.ClosestPoint(rail.PointAtStart)
+    ok_end, t_b = edge.ClosestPoint(rail.PointAtEnd)
+    if not ok_start or not ok_end:
+        return None
+    if t_a > t_b:
+        t_a, t_b = t_b, t_a
+    rail_span = t_b - t_a
+    if rail_span <= 1e-6:
+        return None
+    inset = end_inset_frac * rail_span
+    # Assemble the raw sequence, then deduplicate coincident parameters (the last write wins).
+    proposed = []
+    proposed.append((T0, endpoint_mm))
+    if t_a - T0 > 1e-6:
+        proposed.append((t_a, endpoint_mm))
+    proposed.append((t_a + inset, target_mm))
+    proposed.append((t_b - inset, target_mm))
+    if T1 - t_b > 1e-6:
+        proposed.append((t_b, endpoint_mm))
+    proposed.append((T1, endpoint_mm))
+    proposed.sort(key=lambda x: x[0])
+    merged = []
+    for t, d in proposed:
+        if merged and abs(merged[-1][0] - t) < 1e-6:
+            merged[-1] = (t, d)
+            continue
+        merged.append((t, d))
+    return merged
+
+
 def _log_walk_chain_gaps(walk_segments, work, bridge_after):
     """Diagnostic: walk the ordered chain (each slot then the bridge that follows it) and log
     any junction whose two pieces do not share an endpoint within _JOIN_TOL - i.e. exactly where
@@ -1326,8 +1467,10 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
     The mechanism (create_rounded_corner_bridge) is radius-agnostic; this dispatcher owns the
     policy of which radius applies to which joint type.
 
-    Returns (closed_profile_curve, bridge_curves) - the second list is for observability /
-    previewing the individual bridges. Raises ValueError if the pieces do not join into a
+    Returns (closed_profile_curve, bridge_curves, perimeter_chain) - bridge_curves is for
+    observability / previewing the individual bridges; perimeter_chain is the ordered, role-tagged
+    list of the finished pieces (see _build_perimeter_chain) so the support-finger stretches of the
+    outer edge can be selected for chamfering. Raises ValueError if the pieces do not join into a
     closed perimeter (the failing bridges are named in the message).
     """
     included = [f for f in raw_data["finger_data"] if f.get("is_included")]
@@ -1454,7 +1597,8 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
             "weld_perimeter_walk: failed to build a closed profile perimeter "
             "({0} segment piece(s) + {1} bridge(s) joined into {2} curve(s), none closed). "
             "Failures: {3}".format(piece_count, len(bridges), joined_count, detail))
-    return closed, bridges
+    perimeter_chain = _build_perimeter_chain(walk_segments, work, bridge_after, included)
+    return closed, bridges, perimeter_chain
 
 
 def build_splint_solid(proximal_profile, distal_profile):
@@ -1663,7 +1807,8 @@ def emboss_object_id(splint_solid, raw_data, object_id, p_full_curves, d_full_cu
 
 
 def generate_relative_motion_splint(raw_data_dev, is_production,
-                                    should_save_mesh, object_id="TEST"):
+                                    should_save_mesh, object_id="TEST",
+                                    stop_after_bores=False):
     """Full RelativeMotion pipeline: raw_data -> print-ready splint mesh, with every intermediate.
 
     This is the single orchestration entry point (moved out of the GhPython component so the
@@ -1697,7 +1842,7 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
     min_center_gap = radial_band_thickness_mm
     anchor_bridge_radius_mm = 3.0
     support_bridge_radius_mm = 10.0
-    return_spine_thickness_mm = 8.0
+    return_spine_thickness_mm = 5.0 #JG edited 7/10 5:31pm
     return_spine_end_reach = 0.2
     return_spine_touchdown_fraction = 0.35
     objectid_text_size_factor = 0.4         # objectID text height as a fraction of the band length
@@ -1723,134 +1868,287 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
     # Band width along the finger axis (patient/config input from the web form; mm).
     longitudinal_band_width_mm = raw_data.get("longitudinal_band_width_mm", 10.0)
 
-    # --- Phase 1: finger positions --------------------------------------------------------
-    mcp_points, p1_lines, p1_circles, p1_cylinders = setup_finger_positions(
-        raw_data, min_center_gap=min_center_gap)
-
-    # --- Phase 2: elevate supported fingers -----------------------------------------------
-    (mcp_points_oriented, p1_lines_oriented, p1_circles_oriented,
-     p1_cylinders_oriented, transforms) = elevate_supported_fingers(
-        raw_data, mcp_points, p1_lines, p1_circles, p1_cylinders)
-
-    # --- Phase 3: proximal + distal profile planes ----------------------------------------
-    proximal_profile_plane, distal_profile_plane = build_profile_planes(
-        raw_data, p1_lines_oriented, longitudinal_band_width_mm)
-
-    # --- Phase 4: finger cross-sections on each plane -------------------------------------
-    p_full_curves, p_preserved = extract_finger_cross_sections(
-        raw_data, proximal_profile_plane, p1_cylinders_oriented, p1_lines_oriented,
-        support_prong_arc_deg=support_prong_arc_deg, support_arc_deg=support_arc_deg)
-    d_full_curves, d_preserved = extract_finger_cross_sections(
-        raw_data, distal_profile_plane, p1_cylinders_oriented, p1_lines_oriented,
-        support_prong_arc_deg=support_prong_arc_deg, support_arc_deg=support_arc_deg)
-
-    # --- Phase 5: walk each profile perimeter ---------------------------------------------
-    # Proximal face.
-    p_rings, p_pos_hemis, p_neg_hemis = build_exterior_anchor_rings(
-        raw_data, proximal_profile_plane, p_preserved, radial_band_thickness_mm)
-    p_cradles = build_end_support_cradles(
-        raw_data, proximal_profile_plane, p_preserved, p_rings,
-        single_sided_support_thickness_mm)
-    p_walk_segments = plan_perimeter_walk(
-        raw_data, p_pos_hemis, p_neg_hemis, p_preserved, p_cradles)
-    p_walk_preview = [s["curve"] for s in p_walk_segments]
-    p_closed_profile, p_bridge_curves = weld_perimeter_walk(
-        raw_data, p_walk_segments, proximal_profile_plane, p_rings,
-        anchor_bridge_radius_mm, support_bridge_radius_mm, return_spine_thickness_mm,
-        return_spine_end_reach, return_spine_touchdown_fraction)
-
-    # Distal face.
-    d_rings, d_pos_hemis, d_neg_hemis = build_exterior_anchor_rings(
-        raw_data, distal_profile_plane, d_preserved, radial_band_thickness_mm)
-    d_cradles = build_end_support_cradles(
-        raw_data, distal_profile_plane, d_preserved, d_rings,
-        single_sided_support_thickness_mm)
-    d_walk_segments = plan_perimeter_walk(
-        raw_data, d_pos_hemis, d_neg_hemis, d_preserved, d_cradles)
-    d_walk_preview = [s["curve"] for s in d_walk_segments]
-    d_closed_profile, d_bridge_curves = weld_perimeter_walk(
-        raw_data, d_walk_segments, distal_profile_plane, d_rings,
-        anchor_bridge_radius_mm, support_bridge_radius_mm, return_spine_thickness_mm,
-        return_spine_end_reach, return_spine_touchdown_fraction)
-
-    # --- Phase 6: loft the two faces, then bore the fingers -------------------------------
-    splint_solid_blank = build_splint_solid(p_closed_profile, d_closed_profile)
-    finger_bores = build_finger_bores(p1_lines_oriented, p1_circles_oriented)
-    splint_solid = subtract_finger_bores(splint_solid_blank, finger_bores)
-
-    # --- Phase 7: emboss the objectID into the if-side anchor bore ------------------------
-    if proximal_profile_plane is None or distal_profile_plane is None:
-        raise ValueError("generate_relative_motion_splint: profile plane missing before Phase 7.")
-    objectid_text_size = objectid_text_size_factor * longitudinal_band_width_mm
-    splint_solid, id_letter_breps, id_projected_letters, id_text_plane = emboss_object_id(
-        splint_solid, raw_data, object_id, p_full_curves, d_full_curves,
-        proximal_profile_plane.Normal, radial_band_thickness_mm, objectid_text_size,
-        extrusion_depth_factor=objectid_extrusion_depth_factor)
-
-    # Mesh the finished solid, then lay it distal-face-down on the build plate. The distal cap
-    # (a planar loft end whose outward normal is the distal-plane normal, ~+X) becomes the first
-    # print layer: rotate that normal to world -Z, then drop the part so it rests on Z=0.
-    splint_mesh = convert_to_export_meshes(splint_solid)[0]
-    splint_oriented = splint_mesh.DuplicateMesh()
-    splint_oriented.Transform(Transform.Rotation(
-        distal_profile_plane.Normal, Vector3d(0.0, 0.0, -1.0), distal_profile_plane.Origin))
-    splint_oriented.Translate(Vector3d(0.0, 0.0, -splint_oriented.GetBoundingBox(True).Min.Z))
-
-    # Save the print-ready mesh for the geo processor to pick up (skipped during design sweeps).
-    # Production writes under the job's outbox path/name; dev writes a DEV_-prefixed file.
-    saved = False
-    if should_save_mesh:
-        saved = save_job_output(splint_oriented, output_dir, root_filename, "3mf",
-                                custom_metadata={
-                                    "geo_algorithm": geo_algorithm_name,
-                                    "object_id": object_id,
-                                    "is_production": is_production,
-                                    "relative_elevation_angle": raw_data.get(
-                                        "relative_elevation_angle"),
-                                    "radial_band_thickness_mm": radial_band_thickness_mm,
-                                    "longitudinal_band_width_mm": longitudinal_band_width_mm,
-                                })
-        log("generate_relative_motion_splint: mesh save {0} ({1}/{2}.3mf)".format(
-            "ok" if saved else "FAILED", output_dir, root_filename))
-
-    log("generate_relative_motion_splint: pipeline complete (objectID {0})".format(object_id))
-
-    # Every intermediate is returned so the GH component can still preview each phase.
-    return {
+    # Every intermediate is written into `out` as it is produced, so the GH component can preview
+    # each phase. In dev the pipeline runs inside a try/except: on failure we log the traceback and
+    # return whatever geometry made it that far (a partial preview), rather than dying with nothing
+    # on the output wires. Production still raises so bad jobs fail loudly.
+    out = {
         "object_id": object_id,
         "is_production": is_production,
         "output_dir": output_dir,
         "root_filename": root_filename,
-        "saved": saved,
-        # Phase 1
-        "mcp_points": mcp_points, "p1_lines": p1_lines,
-        "p1_circles": p1_circles, "p1_cylinders": p1_cylinders,
-        # Phase 2
-        "mcp_points_oriented": mcp_points_oriented, "p1_lines_oriented": p1_lines_oriented,
-        "p1_circles_oriented": p1_circles_oriented,
-        "p1_cylinders_oriented": p1_cylinders_oriented, "transforms": transforms,
-        # Phase 3
-        "proximal_profile_plane": proximal_profile_plane,
-        "distal_profile_plane": distal_profile_plane,
-        # Phase 4
-        "p_full_curves": p_full_curves, "p_preserved": p_preserved,
-        "d_full_curves": d_full_curves, "d_preserved": d_preserved,
-        # Phase 5 proximal
-        "p_rings": p_rings, "p_pos_hemis": p_pos_hemis, "p_neg_hemis": p_neg_hemis,
-        "p_cradles": p_cradles, "p_walk_segments": p_walk_segments,
-        "p_walk_preview": p_walk_preview, "p_closed_profile": p_closed_profile,
-        "p_bridge_curves": p_bridge_curves,
-        # Phase 5 distal
-        "d_rings": d_rings, "d_pos_hemis": d_pos_hemis, "d_neg_hemis": d_neg_hemis,
-        "d_cradles": d_cradles, "d_walk_segments": d_walk_segments,
-        "d_walk_preview": d_walk_preview, "d_closed_profile": d_closed_profile,
-        "d_bridge_curves": d_bridge_curves,
-        # Phase 6
-        "splint_solid_blank": splint_solid_blank, "finger_bores": finger_bores,
-        # Phase 7
-        "id_letter_breps": id_letter_breps, "id_projected_letters": id_projected_letters,
-        "id_text_plane": id_text_plane,
-        "splint_solid": splint_solid,
-        "splint_mesh": splint_mesh,
-        "splint_oriented": splint_oriented,
+        "saved": False,
+        "error": None,
     }
+
+    try:
+        # --- Phase 1: finger positions --------------------------------------------------------
+        mcp_points, p1_lines, p1_circles, p1_cylinders = setup_finger_positions(
+            raw_data, min_center_gap=min_center_gap)
+        out.update({"mcp_points": mcp_points, "p1_lines": p1_lines,
+                    "p1_circles": p1_circles, "p1_cylinders": p1_cylinders})
+
+        # --- Phase 2: elevate supported fingers -----------------------------------------------
+        (mcp_points_oriented, p1_lines_oriented, p1_circles_oriented,
+         p1_cylinders_oriented, transforms) = elevate_supported_fingers(
+            raw_data, mcp_points, p1_lines, p1_circles, p1_cylinders)
+        out.update({"mcp_points_oriented": mcp_points_oriented,
+                    "p1_lines_oriented": p1_lines_oriented,
+                    "p1_circles_oriented": p1_circles_oriented,
+                    "p1_cylinders_oriented": p1_cylinders_oriented, "transforms": transforms})
+
+        # --- Phase 3: proximal + distal profile planes ----------------------------------------
+        proximal_profile_plane, distal_profile_plane = build_profile_planes(
+            raw_data, p1_lines_oriented, longitudinal_band_width_mm)
+        out.update({"proximal_profile_plane": proximal_profile_plane,
+                    "distal_profile_plane": distal_profile_plane})
+
+        # --- Phase 4: finger cross-sections on each plane -------------------------------------
+        p_full_curves, p_preserved = extract_finger_cross_sections(
+            raw_data, proximal_profile_plane, p1_cylinders_oriented, p1_lines_oriented,
+            support_prong_arc_deg=support_prong_arc_deg, support_arc_deg=support_arc_deg)
+        d_full_curves, d_preserved = extract_finger_cross_sections(
+            raw_data, distal_profile_plane, p1_cylinders_oriented, p1_lines_oriented,
+            support_prong_arc_deg=support_prong_arc_deg, support_arc_deg=support_arc_deg)
+        out.update({"p_full_curves": p_full_curves, "p_preserved": p_preserved,
+                    "d_full_curves": d_full_curves, "d_preserved": d_preserved})
+
+        # --- Phase 5: walk each profile perimeter ---------------------------------------------
+        # Proximal face.
+        p_rings, p_pos_hemis, p_neg_hemis = build_exterior_anchor_rings(
+            raw_data, proximal_profile_plane, p_preserved, radial_band_thickness_mm)
+        p_cradles = build_end_support_cradles(
+            raw_data, proximal_profile_plane, p_preserved, p_rings,
+            single_sided_support_thickness_mm)
+        p_walk_segments = plan_perimeter_walk(
+            raw_data, p_pos_hemis, p_neg_hemis, p_preserved, p_cradles)
+        p_walk_preview = [s["curve"] for s in p_walk_segments]
+        p_closed_profile, p_bridge_curves, p_perimeter_chain = weld_perimeter_walk(
+            raw_data, p_walk_segments, proximal_profile_plane, p_rings,
+            anchor_bridge_radius_mm, support_bridge_radius_mm, return_spine_thickness_mm,
+            return_spine_end_reach, return_spine_touchdown_fraction)
+        out.update({"p_rings": p_rings, "p_pos_hemis": p_pos_hemis, "p_neg_hemis": p_neg_hemis,
+                    "p_cradles": p_cradles, "p_walk_segments": p_walk_segments,
+                    "p_walk_preview": p_walk_preview, "p_closed_profile": p_closed_profile,
+                    "p_bridge_curves": p_bridge_curves})
+
+        # Distal face.
+        d_rings, d_pos_hemis, d_neg_hemis = build_exterior_anchor_rings(
+            raw_data, distal_profile_plane, d_preserved, radial_band_thickness_mm)
+        d_cradles = build_end_support_cradles(
+            raw_data, distal_profile_plane, d_preserved, d_rings,
+            single_sided_support_thickness_mm)
+        d_walk_segments = plan_perimeter_walk(
+            raw_data, d_pos_hemis, d_neg_hemis, d_preserved, d_cradles)
+        d_walk_preview = [s["curve"] for s in d_walk_segments]
+        d_closed_profile, d_bridge_curves, d_perimeter_chain = weld_perimeter_walk(
+            raw_data, d_walk_segments, distal_profile_plane, d_rings,
+            anchor_bridge_radius_mm, support_bridge_radius_mm, return_spine_thickness_mm,
+            return_spine_end_reach, return_spine_touchdown_fraction)
+        out.update({"d_rings": d_rings, "d_pos_hemis": d_pos_hemis, "d_neg_hemis": d_neg_hemis,
+                    "d_cradles": d_cradles, "d_walk_segments": d_walk_segments,
+                    "d_walk_preview": d_walk_preview, "d_closed_profile": d_closed_profile,
+                    "d_bridge_curves": d_bridge_curves})
+
+        # --- Phase 6: loft the two faces, then bore the fingers -------------------------------
+        splint_solid_blank = build_splint_solid(p_closed_profile, d_closed_profile)
+        finger_bores = build_finger_bores(p1_lines_oriented, p1_circles_oriented)
+        splint_solid = subtract_finger_bores(splint_solid_blank, finger_bores)
+        splint_solid_bores = splint_solid.Duplicate()
+        out.update({"splint_solid_blank": splint_solid_blank, "finger_bores": finger_bores,
+                    "splint_solid": splint_solid, "splint_solid_bores": splint_solid_bores})
+
+        # --- Phase 7: extract support-perimeter rails --------------------------------------
+        # Open rail curves marking the support-path and return-path stretches on each face.
+        # Anchor outer edges stay sharp on purpose (bed adhesion + slit curl); only the support
+        # perimeter and the anchor bore rims get chamfered in Phase 7.5.
+        p_support_rails = extract_support_rails(p_perimeter_chain, _JOIN_TOL)
+        d_support_rails = extract_support_rails(d_perimeter_chain, _JOIN_TOL)
+        out.update({"p_support_rails": p_support_rails, "d_support_rails": d_support_rails})
+
+        # Dev-harness early exit: skip chamfer + emboss + mesh + save (all expensive, and the
+        # harness runs its own chamfer probes against the sharp solid). Production never sets this.
+        if stop_after_bores:
+            log("generate_relative_motion_splint: stop_after_bores=True; skipping chamfer + emboss + mesh.")
+            return out
+
+        # --- Phase 7.5: chamfer anchor rims then outer perimeter ------------------------------
+        # Rims first (skin-contact priority), then the support-perimeter runs with a VARIABLE-
+        # DISTANCE chamfer that tapers to near-zero at each rail's endpoints so the perimeter
+        # chamfer never collides with an already-chamfered rim corner.
+        #
+        # Log-and-continue policy: each rim and each perimeter-edge attempt is independent. On
+        # failure we log enough detail to diagnose later (edge index, length, closed?, rails on
+        # that edge, handle list, error message) and press on. A missing perimeter chamfer is a
+        # cosmetic regression, not a print blocker; a missing rim chamfer loses one skin-contact
+        # bevel but still ships. Successes accumulate on splint_solid; the sharp pre-chamfer
+        # brep remains available downstream as splint_solid_bores.
+        #
+        # Processing granularity: one brep edge per chamfer call. For rims that means one rim
+        # per call (rims are closed loops, topologically independent). For the perimeter, if
+        # multiple support rails land on the same brep edge we merge their handles into ONE call
+        # for that edge. We never subdivide finer than a single rail. Between calls we
+        # re-resolve edge indices on the mutated brep (each chamfer changes topology).
+        included = [f for f in raw_data["finger_data"] if f.get("is_included")]
+
+        # Rims: one closed loop per (anchor finger, face). Label carries enough context to
+        # correlate a failure back to the finger/face without cross-referencing indices.
+        rim_targets = []  # list of (label, rail_curve)
+        for i, f in enumerate(included):
+            if not f.get("is_anchor_finger"):
+                continue
+            if i < len(p_full_curves) and p_full_curves[i] is not None:
+                rim_targets.append(("finger {0} proximal".format(i), p_full_curves[i]))
+            if i < len(d_full_curves) and d_full_curves[i] is not None:
+                rim_targets.append(("finger {0} distal".format(i), d_full_curves[i]))
+        log("Phase 7.5a: per-rim chamfer on {0} anchor rim(s) at d={1}mm".format(
+            len(rim_targets), _CHAMFER_RIM_MM))
+        rim_successes = 0
+        for label, rail in rim_targets:
+            # Re-lookup on the CURRENT brep - previous rim chamfers shift edge indices.
+            res = find_edges_for_curve(splint_solid, rail)
+            if not res.edge_indices:
+                log("  rim {0}: no edges resolved on current brep (coverage={1!r}); "
+                    "skipping".format(label, res.coverage))
+                continue
+            edge_ids = sorted(set(res.edge_indices))
+            try:
+                splint_solid = chamfer_edges(splint_solid, edge_ids, _CHAMFER_RIM_MM)
+                log("  rim {0}: chamfer OK on edge(s) {1} at d={2}mm".format(
+                    label, edge_ids, _CHAMFER_RIM_MM))
+                rim_successes += 1
+            except BrepChamferError as exc:
+                log("  rim {0}: chamfer FAILED on edge(s) {1} at d={2}mm: {3}".format(
+                    label, edge_ids, _CHAMFER_RIM_MM, exc))
+        log("Phase 7.5a: rim chamfer finished, {0}/{1} rim(s) chamfered".format(
+            rim_successes, len(rim_targets)))
+
+        # Perimeter: one brep edge per call. Loop: re-resolve every remaining rail on the
+        # current brep, group rails by their containing edge, pick one edge, merge that edge's
+        # rails' handles, attempt one variable-distance chamfer, remove the processed rails
+        # (whether success or failure), repeat until no rails remain resolvable.
+        support_rails = [r for r in ((p_support_rails or []) + (d_support_rails or []))
+                         if r is not None]
+        log("Phase 7.5b: variable-distance perimeter chamfer on {0} support rail(s), "
+            "target d={1}mm, endpoints d={2}mm, end inset {3:.0%}".format(
+                len(support_rails), _CHAMFER_PERIMETER_MM,
+                _CHAMFER_PERIMETER_ENDPOINT_MM, _CHAMFER_PERIMETER_END_INSET_FRAC))
+        remaining = [(ri, rail) for ri, rail in enumerate(support_rails)]
+        perim_edge_attempts = 0
+        perim_edge_successes = 0
+        rails_off_perimeter = 0
+        while remaining:
+            # Re-resolve remaining rails on the current (possibly mutated) brep.
+            edge_to_rails = {}   # edge_index -> [(ri, rail), ...]
+            resolved_now = []    # (ri, rail) that landed on any perimeter edge this iteration
+            for ri, rail in remaining:
+                c = find_edge_containing_curve(splint_solid, rail)
+                if c is None:
+                    log("  rail {0}: no containing perimeter edge on current brep (likely a "
+                        "return-spine leap or an edge lost to earlier chamfers); "
+                        "skipping".format(ri))
+                    rails_off_perimeter += 1
+                    continue
+                edge_to_rails.setdefault(c.edge_index, []).append((ri, rail))
+                resolved_now.append((ri, rail))
+            if not edge_to_rails:
+                break
+            # Process one edge this iteration. Smallest index for a deterministic order.
+            ei = min(edge_to_rails.keys())
+            group = edge_to_rails[ei]
+            edge = splint_solid.Edges[ei]
+            merged = []
+            rail_descs = []
+            for ri, rail in group:
+                h = _build_perimeter_chamfer_handles(edge, rail, _CHAMFER_PERIMETER_MM)
+                if h is None:
+                    log("  rail {0}: could not build handles on edge {1} "
+                        "(rail_len={2:.2f}mm, edge_len={3:.2f}mm); dropping".format(
+                            ri, ei, rail.GetLength(), edge.GetLength()))
+                    continue
+                merged.extend(h)
+                rail_descs.append("rail {0} (len={1:.1f})".format(ri, rail.GetLength()))
+            processed_ris = set(ri for ri, _ in group)
+            if not merged:
+                # No usable handles for any rail on this edge; drop them and iterate.
+                remaining = [(ri, rl) for ri, rl in resolved_now if ri not in processed_ris]
+                continue
+            # Sort + dedup coincident params (max distance wins where two rails coincide).
+            merged.sort(key=lambda x: x[0])
+            deduped = []
+            for t, d in merged:
+                if deduped and abs(deduped[-1][0] - t) < 1e-6:
+                    deduped[-1] = (t, max(deduped[-1][1], d))
+                    continue
+                deduped.append((t, d))
+            handle_strs = ["(t={0:.3f}, d={1:.3f})".format(t, d) for t, d in deduped]
+            perim_edge_attempts += 1
+            try:
+                splint_solid = chamfer_edges_variable(splint_solid, {ei: deduped})
+                log("  edge {0}: chamfer OK ({1} rail(s): {2}) edge_len={3:.2f}mm "
+                    "closed={4} handles={5}".format(
+                        ei, len(group), ", ".join(rail_descs),
+                        edge.GetLength(), edge.IsClosed, handle_strs))
+                perim_edge_successes += 1
+            except BrepChamferError as exc:
+                log("  edge {0}: chamfer FAILED ({1} rail(s): {2}) edge_len={3:.2f}mm "
+                    "closed={4} handles={5}: {6}".format(
+                        ei, len(group), ", ".join(rail_descs),
+                        edge.GetLength(), edge.IsClosed, handle_strs, exc))
+            remaining = [(ri, rl) for ri, rl in resolved_now if ri not in processed_ris]
+        log("Phase 7.5b: perimeter chamfer finished, {0}/{1} edge attempt(s) succeeded "
+            "({2} rail(s) skipped as off-perimeter)".format(
+                perim_edge_successes, perim_edge_attempts, rails_off_perimeter))
+        out["splint_solid"] = splint_solid
+
+        # --- Phase 8: emboss the objectID into the if-side anchor bore ------------------------
+        if proximal_profile_plane is None or distal_profile_plane is None:
+            raise ValueError(
+                "generate_relative_motion_splint: profile plane missing before Phase 8.")
+        objectid_text_size = objectid_text_size_factor * longitudinal_band_width_mm
+        splint_solid, id_letter_breps, id_projected_letters, id_text_plane = emboss_object_id(
+            splint_solid, raw_data, object_id, p_full_curves, d_full_curves,
+            proximal_profile_plane.Normal, radial_band_thickness_mm, objectid_text_size,
+            extrusion_depth_factor=objectid_extrusion_depth_factor)
+        out.update({"id_letter_breps": id_letter_breps,
+                    "id_projected_letters": id_projected_letters,
+                    "id_text_plane": id_text_plane, "splint_solid": splint_solid})
+
+        # Mesh the finished solid, then lay it distal-face-down on the build plate. The distal cap
+        # (a planar loft end whose outward normal is the distal-plane normal, ~+X) becomes the first
+        # print layer: rotate that normal to world -Z, then drop the part so it rests on Z=0.
+        splint_mesh = convert_to_export_meshes(splint_solid)[0]
+        splint_oriented = splint_mesh.DuplicateMesh()
+        splint_oriented.Transform(Transform.Rotation(
+            distal_profile_plane.Normal, Vector3d(0.0, 0.0, -1.0), distal_profile_plane.Origin))
+        splint_oriented.Translate(Vector3d(0.0, 0.0, -splint_oriented.GetBoundingBox(True).Min.Z))
+        out.update({"splint_mesh": splint_mesh, "splint_oriented": splint_oriented})
+
+        # Save the print-ready mesh for the geo processor to pick up (skipped during design sweeps).
+        # Production writes under the job's outbox path/name; dev writes a DEV_-prefixed file.
+        if should_save_mesh:
+            saved = save_job_output(splint_oriented, output_dir, root_filename, "3mf",
+                                    custom_metadata={
+                                        "geo_algorithm": geo_algorithm_name,
+                                        "object_id": object_id,
+                                        "is_production": is_production,
+                                        "relative_elevation_angle": raw_data.get(
+                                            "relative_elevation_angle"),
+                                        "radial_band_thickness_mm": radial_band_thickness_mm,
+                                        "longitudinal_band_width_mm": longitudinal_band_width_mm,
+                                    })
+            out["saved"] = saved
+            log("generate_relative_motion_splint: mesh save {0} ({1}/{2}.3mf)".format(
+                "ok" if saved else "FAILED", output_dir, root_filename))
+
+        log("generate_relative_motion_splint: pipeline complete (objectID {0})".format(object_id))
+    except Exception as exc:
+        # Production must fail loudly; dev keeps the partial `out` so GH can still show what built.
+        if is_production:
+            raise
+        import traceback
+        out["error"] = "{0}: {1}".format(type(exc).__name__, exc)
+        log("generate_relative_motion_splint: DEV pipeline error (returning partial results):\n"
+            + traceback.format_exc())
+
+    return out
