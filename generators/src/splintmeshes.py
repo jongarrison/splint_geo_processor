@@ -18,7 +18,7 @@ import math
 import tempfile
 import shutil
 from pathlib import Path
-from splintcommon import log, get_generation_elapsed
+from splintcommon import log, get_generation_elapsed, confirm_job_is_processed_and_exit
 
 
 class MeshExportError(Exception):
@@ -645,7 +645,7 @@ def _debug_measure_export_size(meshes, format_type="3mf"):
     try:
         tmp_dir = tempfile.mkdtemp(prefix="splint_mesh_debug_")
         tmp_name = "debug_export"
-        save_mesh(meshes, tmp_dir, tmp_name, format_type)
+        save_mesh(meshes, tmp_dir, tmp_name, format_type, emit_pipeline_signal=False)
         export_ext = {"stl": "stl", "obj": "obj"}.get((format_type or "3mf").lower(), "3mf")
         export_path = Path(tmp_dir) / "{}.{}".format(tmp_name, export_ext)
         if not export_path.exists():
@@ -845,7 +845,7 @@ def convert_to_export_meshes(
     return output_meshes
 
 
-def save_mesh(input_meshes, directory, root_filename, format_type="stl"):
+def save_mesh(input_meshes, directory, root_filename, format_type="stl", emit_pipeline_signal=True):
     """Export one or more meshes to a single file.
     
     Uses Rhino's bake-select-export pipeline: bakes meshes to a temp layer,
@@ -857,6 +857,13 @@ def save_mesh(input_meshes, directory, root_filename, format_type="stl"):
         directory: Directory path (no dots allowed).
         root_filename: Base filename without extension (no dots allowed).
         format_type: "stl" (default), "obj", or "3mf".
+        emit_pipeline_signal: When True (default), emits the [PIPELINE_RESULT:SUCCESS] /
+            [PIPELINE_RESULT:FAILURE] sentinel splint_geo_processor's pipeline.ts scans log.txt
+            for, so any failure here (mesh None, export command silently aborting, quality gate,
+            etc.) is detected immediately instead of only after the full inactivity timeout -
+            even if a calling .gh graph catches the resulting exception and keeps running.
+            Set False for throwaway/debug exports (see _debug_measure_export_size) that must
+            never post a completion signal for the real job.
         
     Returns:
         bool: True if export succeeded.
@@ -865,6 +872,16 @@ def save_mesh(input_meshes, directory, root_filename, format_type="stl"):
         MeshExportError: If export fails.
         ValueError: If inputs are invalid.
     """
+    def _signal_pipeline_result(is_success, reason):
+        """Emit the shared [PIPELINE_RESULT:...] sentinel (best-effort, never raises itself)
+        so pipeline.ts's log.txt scanner can react immediately rather than only on timeout."""
+        if not emit_pipeline_signal:
+            return
+        try:
+            confirm_job_is_processed_and_exit(root_filename or "unknown_job", is_success, reason)
+        except Exception:
+            pass
+
     # Normalize single mesh to list
     if not hasattr(input_meshes, '__iter__'):
         meshes = [input_meshes]
@@ -876,9 +893,11 @@ def save_mesh(input_meshes, directory, root_filename, format_type="stl"):
     log("save_mesh: directory='{}'".format(directory))
 
     if len(meshes) == 0:
+        _signal_pipeline_result(False, "No meshes provided")
         raise ValueError("No meshes provided")
     for i, m in enumerate(meshes):
         if m is None:
+            _signal_pipeline_result(False, "Mesh {} is None".format(i))
             raise ValueError("Mesh {} is None".format(i))
         log("  mesh {}: type={}, vertices={}, faces={}".format(
             i, type(m).__name__,
@@ -909,8 +928,10 @@ def save_mesh(input_meshes, directory, root_filename, format_type="stl"):
             log("  mesh {} sanity pass failed: {}".format(i, sanity_err))
 
     if directory is None or root_filename is None:
+        _signal_pipeline_result(False, "directory and root_filename are required")
         raise ValueError("directory and root_filename are required")
     if "." in directory or "." in root_filename:
+        _signal_pipeline_result(False, "directory and root_filename must not contain dots")
         raise ValueError("directory and root_filename must not contain dots")
 
     # Pick export settings
@@ -1036,7 +1057,12 @@ def save_mesh(input_meshes, directory, root_filename, format_type="stl"):
 
         t_total = time.process_time() - t_start
         log("save_mesh: Complete ({:.4f}s total)".format(t_total))
+        _signal_pipeline_result(True, "mesh export complete: {}".format(export_fpath.name))
         return True
+
+    except Exception as exc:
+        _signal_pipeline_result(False, str(exc))
+        raise
 
     finally:
         # Always clean up the temp layer
