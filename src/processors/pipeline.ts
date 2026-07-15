@@ -1053,8 +1053,6 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
       throw new Error(`Geometry file not stable/readable before slicing: ${geometryPath}`);
     }
 
-    const sliceStart = Date.now();
-
     const machineSettingsPath = path.join(__dirname, '../../printer-settings/machine/machine-final.json');
     const processSettingsPath = path.join(__dirname, '../../printer-settings/process/process-final.json');
     const filamentSettingsPath = path.join(__dirname, '../../printer-settings/filament/filament-final.json');
@@ -1081,110 +1079,141 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     // Slicing is normally seconds; fail fast on hangs (e.g. UI dialogs blocking
     // the CLI like the update-available popup or GLFW/OpenGL init failures).
     const BAMBU_TIMEOUT_MS = 3 * 60_000;
-    let bambuStdout = '';
-    let bambuStderr = '';
-    let bambuErr: any = null;
-    try {
-      const result = await execFileAsync(input.bambuCli, args, {
-        timeout: BAMBU_TIMEOUT_MS,
-        killSignal: 'SIGKILL', // SIGTERM is unreliable on Windows GUI hangs
-        maxBuffer: 16 * 1024 * 1024,
-      });
-      bambuStdout = result.stdout ?? '';
-      bambuStderr = result.stderr ?? '';
-    } catch (err: any) {
-      bambuErr = err;
-      bambuStdout = err?.stdout ?? '';
-      bambuStderr = err?.stderr ?? '';
-    }
-    sliceDurationSeconds = (Date.now() - sliceStart) / 1000;
-
-    // Capture Bambu's own result.json (written to --outputdir) before the next job
-    // overwrites it. It carries the authoritative return_code and error_string
-    // (e.g. CLI_FILE_NOTFOUND=-3), which are far more useful than the opaque OS exit
-    // code from execFile. Preserve a per-job copy so it survives and gets archived.
-    let bambuResultCode: number | undefined;
-    let bambuResultError: string | undefined;
     const resultJsonPath = path.join(input.outboxDir, 'result.json');
-    try {
-      if (fs.existsSync(resultJsonPath)) {
-        const parsed = JSON.parse(fs.readFileSync(resultJsonPath, 'utf-8'));
-        bambuResultCode = typeof parsed?.return_code === 'number' ? parsed.return_code : undefined;
-        bambuResultError = typeof parsed?.error_string === 'string' ? parsed.error_string : undefined;
-        fs.copyFileSync(resultJsonPath, path.join(input.outboxDir, `${base}.slice-result.json`));
-        logInfo('Bambu result.json captured', { returnCode: bambuResultCode, errorString: bambuResultError });
-      } else {
-        logWarn('Bambu result.json not found after slice', { resultJsonPath });
-      }
-    } catch (err: any) {
-      logWarn('Failed to read/parse Bambu result.json', { error: err?.message, resultJsonPath });
-    }
 
-    if (bambuStdout.trim()) logInfo('stdout (bambu)', { stdout: bambuStdout.substring(0, 2000) });
-    if (bambuStderr.trim()) logWarn('stderr (bambu)', { stderr: bambuStderr.substring(0, 2000) });
+    // Bambu occasionally fails for transient reasons unrelated to the geometry
+    // itself -- e.g. CLI_FILE_NOTFOUND (-3) from an antivirus/lock race on a
+    // freshly-written large 3mf (see waitForFileStableAndReadable above), or a
+    // one-off CLI hiccup. Retrying the slice alone is cheap (seconds) compared to
+    // re-running the whole Grasshopper generation, so give it a few attempts
+    // before failing the job.
+    const maxBambuAttempts = 3;
+    const bambuRetryDelayMs = 3000;
+    let bambuError: Error | null = null;
 
-    // On timeout, ensure no orphan bambu-studio.exe is left behind blocking the
-    // next job's slot or filesystem locks.
-    const timedOut = bambuErr?.killed === true || bambuErr?.signal === 'SIGKILL' || bambuErr?.signal === 'SIGTERM';
-    if (timedOut) {
-      logWarn(`Bambu CLI exceeded ${BAMBU_TIMEOUT_MS / 1000}s timeout - force killing any survivors`);
+    for (let bambuAttempt = 1; bambuAttempt <= maxBambuAttempts; bambuAttempt++) {
+      bambuError = null;
+      // Clear artifacts from a previous failed attempt so printOk/result.json
+      // checks below reflect only this attempt.
+      try { if (fs.existsSync(printPath)) fs.unlinkSync(printPath); } catch { /* best-effort */ }
+      try { if (fs.existsSync(resultJsonPath)) fs.unlinkSync(resultJsonPath); } catch { /* best-effort */ }
+
+      const sliceStart = Date.now();
+      let bambuStdout = '';
+      let bambuStderr = '';
+      let bambuErr: any = null;
       try {
-        if (process.platform === 'win32') {
-          await execAsync('taskkill /F /T /IM bambu-studio.exe', { timeout: 10_000 });
+        const result = await execFileAsync(input.bambuCli, args, {
+          timeout: BAMBU_TIMEOUT_MS,
+          killSignal: 'SIGKILL', // SIGTERM is unreliable on Windows GUI hangs
+          maxBuffer: 16 * 1024 * 1024,
+        });
+        bambuStdout = result.stdout ?? '';
+        bambuStderr = result.stderr ?? '';
+      } catch (err: any) {
+        bambuErr = err;
+        bambuStdout = err?.stdout ?? '';
+        bambuStderr = err?.stderr ?? '';
+      }
+      sliceDurationSeconds = (Date.now() - sliceStart) / 1000;
+
+      // Capture Bambu's own result.json (written to --outputdir) before the next job
+      // overwrites it. It carries the authoritative return_code and error_string
+      // (e.g. CLI_FILE_NOTFOUND=-3), which are far more useful than the opaque OS exit
+      // code from execFile. Preserve a per-job copy so it survives and gets archived.
+      let bambuResultCode: number | undefined;
+      let bambuResultError: string | undefined;
+      try {
+        if (fs.existsSync(resultJsonPath)) {
+          const parsed = JSON.parse(fs.readFileSync(resultJsonPath, 'utf-8'));
+          bambuResultCode = typeof parsed?.return_code === 'number' ? parsed.return_code : undefined;
+          bambuResultError = typeof parsed?.error_string === 'string' ? parsed.error_string : undefined;
+          fs.copyFileSync(resultJsonPath, path.join(input.outboxDir, `${base}.slice-result.json`));
+          logInfo('Bambu result.json captured', { returnCode: bambuResultCode, errorString: bambuResultError, attempt: bambuAttempt });
         } else {
-          await execAsync('pkill -9 -i bambu-studio', { timeout: 10_000 });
+          logWarn('Bambu result.json not found after slice', { resultJsonPath, attempt: bambuAttempt });
         }
-      } catch { /* best-effort */ }
-    }
+      } catch (err: any) {
+        logWarn('Failed to read/parse Bambu result.json', { error: err?.message, resultJsonPath, attempt: bambuAttempt });
+      }
 
-    // Classify known hostile failure modes from stderr so the error surfaced to
-    // the factory carries an actionable name, not just "Bambu failed".
-    const haystack = `${bambuStdout}\n${bambuStderr}`;
-    const knownFailures: Array<{ pattern: RegExp; label: string; hint?: string }> = [
-      {
-        pattern: /WGL: Failed to create OpenGL context|Failed to create GLFW window/i,
-        label: 'OpenGL/GLFW init failed',
-        hint: 'Bambu Studio could not create a window. Often caused by an interactive popup (e.g. "update available") that consumed the GL context. Try launching Bambu Studio interactively once to dismiss any pending dialog, then disable auto-update under Help > Settings.',
-      },
-      {
-        pattern: /update.*available/i,
-        label: 'Bambu update prompt blocked CLI',
-        hint: 'Disable auto-update in Bambu Studio settings.',
-      },
-    ];
-    const matchedFailures = knownFailures.filter(k => k.pattern.test(haystack));
+      if (bambuStdout.trim()) logInfo('stdout (bambu)', { stdout: bambuStdout.substring(0, 2000) });
+      if (bambuStderr.trim()) logWarn('stderr (bambu)', { stderr: bambuStderr.substring(0, 2000) });
 
-    // Verify the print file actually landed. Bambu can exit 0 without producing
-    // output when a hostile dialog is involved, so existence is the real gate.
-    const printOk = fs.existsSync(printPath) && fs.statSync(printPath).size > 0;
-
-    if (bambuErr || !printOk) {
-      const reasons: string[] = [];
+      // On timeout, ensure no orphan bambu-studio.exe is left behind blocking the
+      // next job's slot or filesystem locks.
+      const timedOut = bambuErr?.killed === true || bambuErr?.signal === 'SIGKILL' || bambuErr?.signal === 'SIGTERM';
       if (timedOut) {
-        reasons.push(`Bambu CLI timed out after ${BAMBU_TIMEOUT_MS / 1000}s`);
-      } else if (bambuErr) {
-        const code = bambuErr.code ?? bambuErr.exitCode;
-        reasons.push(`Bambu CLI exited with error${code !== undefined ? ` (code=${code})` : ''}: ${bambuErr.message || 'unknown'}`);
-      } else if (!printOk) {
-        reasons.push('Bambu CLI exited cleanly but produced no print file');
+        logWarn(`Bambu CLI exceeded ${BAMBU_TIMEOUT_MS / 1000}s timeout - force killing any survivors`);
+        try {
+          if (process.platform === 'win32') {
+            await execAsync('taskkill /F /T /IM bambu-studio.exe', { timeout: 10_000 });
+          } else {
+            await execAsync('pkill -9 -i bambu-studio', { timeout: 10_000 });
+          }
+        } catch { /* best-effort */ }
       }
-      // Surface Bambu's authoritative failure reason from result.json when present.
-      if (bambuResultCode !== undefined || bambuResultError) {
-        reasons.push(`Bambu result.json: return_code=${bambuResultCode ?? 'unknown'}${bambuResultError ? `, error_string="${bambuResultError}"` : ''}`);
-      }
-      for (const m of matchedFailures) {
-        reasons.push(`Detected: ${m.label}${m.hint ? ' -- ' + m.hint : ''}`);
-      }
-      // Include a short stderr tail so the failure cause is in the result log.
-      const stderrTail = bambuStderr.trim().split('\n').slice(-8).join('\n');
-      if (stderrTail) reasons.push(`stderr tail:\n${stderrTail}`);
 
-      const errorMsg = reasons.join('\n');
-      logWarn('Bambu slicing failed', { durationSeconds: sliceDurationSeconds, timedOut, printOk });
-      throw new Error(errorMsg);
+      // Classify known hostile failure modes from stderr so the error surfaced to
+      // the factory carries an actionable name, not just "Bambu failed".
+      const haystack = `${bambuStdout}\n${bambuStderr}`;
+      const knownFailures: Array<{ pattern: RegExp; label: string; hint?: string }> = [
+        {
+          pattern: /WGL: Failed to create OpenGL context|Failed to create GLFW window/i,
+          label: 'OpenGL/GLFW init failed',
+          hint: 'Bambu Studio could not create a window. Often caused by an interactive popup (e.g. "update available") that consumed the GL context. Try launching Bambu Studio interactively once to dismiss any pending dialog, then disable auto-update under Help > Settings.',
+        },
+        {
+          pattern: /update.*available/i,
+          label: 'Bambu update prompt blocked CLI',
+          hint: 'Disable auto-update in Bambu Studio settings.',
+        },
+      ];
+      const matchedFailures = knownFailures.filter(k => k.pattern.test(haystack));
+
+      // Verify the print file actually landed. Bambu can exit 0 without producing
+      // output when a hostile dialog is involved, so existence is the real gate.
+      const printOk = fs.existsSync(printPath) && fs.statSync(printPath).size > 0;
+
+      if (bambuErr || !printOk) {
+        const reasons: string[] = [];
+        if (timedOut) {
+          reasons.push(`Bambu CLI timed out after ${BAMBU_TIMEOUT_MS / 1000}s`);
+        } else if (bambuErr) {
+          const code = bambuErr.code ?? bambuErr.exitCode;
+          reasons.push(`Bambu CLI exited with error${code !== undefined ? ` (code=${code})` : ''}: ${bambuErr.message || 'unknown'}`);
+        } else if (!printOk) {
+          reasons.push('Bambu CLI exited cleanly but produced no print file');
+        }
+        // Surface Bambu's authoritative failure reason from result.json when present.
+        if (bambuResultCode !== undefined || bambuResultError) {
+          reasons.push(`Bambu result.json: return_code=${bambuResultCode ?? 'unknown'}${bambuResultError ? `, error_string="${bambuResultError}"` : ''}`);
+        }
+        for (const m of matchedFailures) {
+          reasons.push(`Detected: ${m.label}${m.hint ? ' -- ' + m.hint : ''}`);
+        }
+        // Include a short stderr tail so the failure cause is in the result log.
+        const stderrTail = bambuStderr.trim().split('\n').slice(-8).join('\n');
+        if (stderrTail) reasons.push(`stderr tail:\n${stderrTail}`);
+
+        bambuError = new Error(reasons.join('\n'));
+        logWarn('Bambu slicing attempt failed', { attempt: bambuAttempt, maxBambuAttempts, durationSeconds: sliceDurationSeconds, timedOut, printOk });
+
+        if (bambuAttempt < maxBambuAttempts) {
+          logWarn(`Retrying Bambu slice (attempt ${bambuAttempt + 1}/${maxBambuAttempts}) after ${bambuRetryDelayMs}ms`);
+          await new Promise((r) => setTimeout(r, bambuRetryDelayMs));
+          continue;
+        }
+        break;
+      }
+
+      logInfo(`Bambu slicer completed in ${sliceDurationSeconds.toFixed(1)}s${bambuAttempt > 1 ? ` (attempt ${bambuAttempt}/${maxBambuAttempts})` : ''}`);
+      break;
     }
 
-    logInfo(`Bambu slicer completed in ${sliceDurationSeconds.toFixed(1)}s`);
+    if (bambuError) {
+      throw bambuError;
+    }
   }
 
   return { geometryPath, printPath: fs.existsSync(printPath) ? printPath : undefined, sliceDurationSeconds };
