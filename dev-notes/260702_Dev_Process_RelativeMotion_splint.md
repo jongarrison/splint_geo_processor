@@ -628,12 +628,117 @@ Two-pass policy in `generate_relative_motion_splint` Phase 7.5, both uniform dis
 `BrepChamfer.chamfer_edges` fails loud (`BrepChamferError`) on empty result, non-solid, or
 invalid brep - the pipeline lets it propagate. Order within finishing: chamfer runs BEFORE
 `emboss_object_id`, because emboss adds ~276 short glyph edges that would make edge lookups
-expensive and are not chamfer targets. Slit work (future) comes after chamfering; slit lips
-would get their own chamfer pass on the fresh cut edge.
+expensive and are not chamfer targets. Slit cutting runs AFTER chamfering (see Phase 7.6
+below); the slit cutter's inward-arc shape leaves rounded slit faces on the remaining
+material, so no separate slit-edge finishing pass is needed.
 
 Edge-lookup module: `BrepEdgeLocator.py` — see its docstring for the fast-then-strict strategy
 (midpoint filter, endpoint check, length-based coverage classification). It's the bridge from
 "curves we built" to "edge indices the native APIs need."
+
+
+#### Anchor slit cutting (Phase 7.6, RingSlit.py)
+
+A slit is a full through-cut across an anchor ring wall so the ring can spread open, for
+patients whose PIP joint is larger than their P1 circumference (otherwise the splint is hard
+or impossible to don). Driven by the per-finger is_slitted flag (anchors only). Runs AFTER
+edge chamfering (Phase 7.5) and BEFORE embossing: chamfer needs continuous edges, and emboss
+adds ~276 short glyph edges that would slow the slit boolean.
+
+The cut is done by a general-purpose module (RingSlit.py) that any ring-based splint design
+can reuse; nothing in it is RelativeMotion-specific.
+
+Cutter shape: an "inverted stadium" (hourglass) - a rectangular cutter body with two
+inward-bulging semi-circular arcs at its tangential ends. Viewed in the cutter plane
+(slit_gap_axis_line = tangential horizontal; slit_location_vector = radial vertical):
+
+```
+              slit_gap_width
+           +----------------+
+    ------------------------------  radial +r  (tangent to outer wall + 15% overshoot)
+     \                      /
+      )     SLIT GAP       (        inward-curving arcs, radius r each
+     /                      \
+    ------------------------------  radial -r  (tangent to inner bore + 15% overshoot)
+   center                    center
+   at -C                     at +C
+
+   r = 1.15 * ring_wall_thickness / 2
+   C = slit_gap_width/2 + r     (arc centers on slit_gap_axis_line, distance C from wall centroid)
+   slit_gap_width = distance between the two arcs' innermost points
+```
+
+The 15% radial overshoot guarantees a clean cut through the wall even with small measurement
+noise. The inward-arc walls of the cutter mean the material left after the boolean subtraction
+has rounded (concave, radius r) faces on each side of the slit - no sharp lip against skin,
+so no separate slit-edge finishing pass is needed.
+
+Function inputs (`cut_ring_slit`):
+- splint_solid                    - closed Brep to cut
+- ring_centroid                   - 3D point inside the ring bore (e.g. bore axis midpoint at
+                                    the mid-band-width position along the finger axis)
+- slit_location_vector            - unit vector from ring_centroid toward the wall to slit.
+                                    The caller must choose a direction whose ray hits only the
+                                    intended wall (no bridges, other anchors, or return-spine
+                                    geometry in the way)
+- slit_cutting_orientation_vector - unit vector for the cutter's extrusion (the slit's axial
+                                    direction). For an anchor ring this is the finger axis
+                                    (+X in RelativeMotion). Must be perpendicular to
+                                    slit_location_vector; the module cross-checks and derives
+                                    slit_gap_axis_line from a clean orthonormal frame
+- slit_gap_width                  - the narrowest tangential opening of the resulting slit
+                                    (distance between the two inward arcs' closest points)
+- cutter_depth                    - half-length of the symmetric extrusion. Should be clearly
+                                    larger than the ring's band width along the extrusion
+                                    direction (e.g. band_width_mm * 2) because ring
+                                    cross-sections can be skewed / trapezoidal rather than
+                                    clean rectangles
+- (optional) tolerance            - falls back to doc absolute tolerance
+- (optional) wall_thickness_range - default (0.1, 20.0) mm; wall hits outside this range raise
+                                    a clean error (catches "ray hit wrong surfaces")
+
+Process:
+1. Normalise + orthogonality-check the two input vectors. Derive slit_gap_axis_line via
+   cross(orientation, location) so the frame is exactly orthogonal.
+2. Ray-shoot from ring_centroid along slit_location_vector (very long ray, ~500 mm). Sort
+   the hits by distance, take the first two: inner bore, outer wall. Validate spacing against
+   wall_thickness_range. ring_wall_thickness = distance between hits; ring_wall_centroid =
+   midpoint.
+3. Build the cutter profile curve in slit_cutter_plane (normal = orientation, origin =
+   ring_wall_centroid): four corner points (arc endpoints), two arc centers, join top-line
+   -> left-arc -> bottom-line -> right-arc into one closed polycurve (CCW viewed from
+   +orientation).
+4. Brep.CreatePlanarBreps on the closed profile. Translate the profile back by cutter_depth
+   along -orientation, then Extrusion.Create by 2*cutter_depth in +orientation with cap=True.
+   Result: a capped solid Brep cutter symmetric around slit_cutter_plane.
+5. BrepDifference.robust_brep_difference(splint_solid, cutter_brep) to subtract. Raises
+   RingSlitError if the boolean fails after all fallbacks.
+
+Returns a tuple:
+- splint_solid_result       - the cut brep
+- slit_cutter_brep          - the cutter used (for baking / previewing)
+- ring_wall_thickness       - measured value (mm)
+- ring_wall_centroid        - exact 3D point used (for debugging placement)
+- slit_cutter_profile_curve - the closed 2D profile curve (for previewing before cutting)
+
+Failure mode: raises `RingSlitError` on any problem (degenerate vectors, wall not found,
+implausible thickness, cutter construction failure, boolean failure). The caller decides
+whether to fail hard or log-and-continue.
+
+Caller wiring plan for RelativeMotion (not yet implemented - separate step):
+- Loop over included fingers where is_slitted=True (anchors only; enforced upstream in the
+  form's validation).
+- End anchor (index-most or little-most included): slit_location_vector = +Y or -Y
+  respectively (outward, away from hand center).
+- Interior anchor: slit_location_vector = +Z when relative_elevation_angle >= 0, else -Z
+  (pressure on the support side closes the slit rather than opening it).
+- slit_cutting_orientation_vector = +X (the anchor's finger axis; anchors are not elevated).
+- ring_centroid = the anchor's bore centerline at the band's mid-width X position.
+- cutter_depth = longitudinal_band_width_mm * 2 (safe margin for the trapezoidal-ish band
+  cross-section caused by pip_neighbor_fwd_offset).
+- slit_gap_width = from raw_data (per-finger override) or a global default.
+- Wrap the call in `try/except RingSlitError` with log-and-continue, matching the chamfer
+  pattern (a splint without its slit still functions, just harder to don).
 
 
 #### Mesh conversion (convert_to_export_meshes, splintmeshes.py)
@@ -720,21 +825,6 @@ The code registry drives /api/designs, but visibility is org-scoped. To make the
 
 Remaining work (to be specified as we get there):
 
-- HIGH PRIORITY - Anchor slits. A full through-cut across an anchor ring so it can spread open, for
-  patients whose PIP joint is large relative to their P1 circumference (otherwise the splint is
-  hard or impossible to don). Driven by the is_slitted flag the form already collects (anchors
-  only); the geometry does not consume it yet. Requirements gathered so far:
-  - Placement. End anchors (the first or last included finger) slit on their outward Y extreme,
-    running directly away from the center of the hand (+Y for the index-most end, -Y for the
-    little-finger-most end). Interior anchors slit on max +Z or max -Z, chosen to match the
-    relative-elevation-angle sign (support side is +Z when angle >= 0), so pressure on the support
-    surface closes the slit rather than opening it.
-  - Cut. Full through-cut - severs the ring wall completely (bore to outer surface, across the full
-    band width) so the ring can spread. Overridable default gap width 0.3 mm. Improves on
-    BrepSlit.py by deriving placement/orientation from the ring geometry we already have.
-  - Edge finishing. Done AFTER rim chamfering (Phase 7 edge rounding), so the slit cut reveals the
-    fresh edge path that then gets smoothed by the same pipe-trim primitive - keeping the slit
-    edges round so they cannot pinch skin.
 - Extend edge rounding beyond the anchor rims (supported-finger edges) once the anchor-rim
   beachhead is proven.
 - A direction indicator (embedded sphere) marking up / forward for assembly.
