@@ -34,6 +34,10 @@ import BrepChamfer
 reload(BrepChamfer)
 from BrepChamfer import chamfer_edges, chamfer_edges_variable, BrepChamferError
 
+import RingSlit
+reload(RingSlit)
+from RingSlit import cut_ring_slit, RingSlitError
+
 import TextGun
 reload(TextGun)
 from TextGun import emboss_text
@@ -73,6 +77,14 @@ _CHAMFER_PERIMETER_MM = 0.25   # outer perimeter over support spans (anchor stre
 # parameter span. Endpoint distance is small but non-degenerate (Rhino rejects true zeros).
 _CHAMFER_PERIMETER_END_INSET_FRAC = 0.10   # last 10% of each rail end tapers to endpoint distance
 _CHAMFER_PERIMETER_ENDPOINT_MM = 0.02      # near-zero distance at the tapered rail endpoints
+
+# Anchor slit geometry (Phase 7.6). Slit_gap_width is the visible tangential opening between
+# the two remaining wall halves after subtraction; 0.3mm is small enough to close under skin
+# contact but large enough for the slicer to resolve reliably. Cutter depth is expressed as a
+# multiple of longitudinal_band_width_mm so ring cross-sections with any modest longitudinal
+# skew still get punched through completely along the P1 axis.
+_SLIT_GAP_WIDTH_MM = 0.3
+_SLIT_CUTTER_DEPTH_FACTOR = 3.0
 
 
 
@@ -2100,6 +2112,82 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
             "({2} rail(s) skipped as off-perimeter)".format(
                 perim_edge_successes, perim_edge_attempts, rails_off_perimeter))
         out["splint_solid"] = splint_solid
+
+        # --- Phase 7.6: cut anchor slits ------------------------------------------------------
+        # For every anchor finger flagged is_slitted, punch a small through-slit across its ring
+        # wall on the low-pressure side so the ring can spread open when donning the splint.
+        # Slit_location_vector picking (in the current oriented coords - +X distal, +Z dorsal):
+        #   * First-included anchor: slit outward laterally, on the Y side away from the row.
+        #       - right hand -> +Y ; left hand -> -Y
+        #   * Last-included anchor:  slit outward laterally on the opposite Y side.
+        #       - right hand -> -Y ; left hand -> +Y
+        #   * Interior anchor (has support bridges on both sides): slit on the SAME side as
+        #     the support connections so the split ring can spread on the free side.
+        #     elevation >= 0 -> slit on +Z (dorsal); elevation < 0 -> slit on -Z (volar).
+        # Log-and-continue: a failed slit leaves that ring un-slit rather than aborting the
+        # print. The Phase 7.6 cutter breps, panels, and cross-section curves are surfaced on
+        # `out` for harness debugging.
+        elevation_angle_deg = raw_data["relative_elevation_angle"]
+        is_right_hand = raw_data["is_right_hand"]
+        n_included = len(included)
+        slit_targets = []  # list of (finger_idx, slit_location_vector, label)
+        for i, f in enumerate(included):
+            if not f.get("is_slitted"):
+                continue
+            if not f.get("is_anchor_finger"):
+                # Form-side validation should prevent this; log defensively and skip.
+                log("Phase 7.6: finger {0} has is_slitted=True but is not an anchor - "
+                    "skipping".format(i))
+                continue
+            if i == 0:
+                y_sign = 1.0 if is_right_hand else -1.0
+                slit_loc = Vector3d(0.0, y_sign, 0.0)
+                label = "first-included (Y={0:+.0f})".format(y_sign)
+            elif i == n_included - 1:
+                y_sign = -1.0 if is_right_hand else 1.0
+                slit_loc = Vector3d(0.0, y_sign, 0.0)
+                label = "last-included (Y={0:+.0f})".format(y_sign)
+            else:
+                z_sign = 1.0 if elevation_angle_deg >= 0 else -1.0
+                slit_loc = Vector3d(0.0, 0.0, z_sign)
+                label = "interior (Z={0:+.0f}, elev={1:+.1f}deg)".format(
+                    z_sign, elevation_angle_deg)
+            slit_targets.append((i, slit_loc, label))
+        log("Phase 7.6: {0} anchor slit target(s), gap_width={1}mm, "
+            "cutter_depth=+/-{2:.2f}mm ({3}x band_width)".format(
+                len(slit_targets), _SLIT_GAP_WIDTH_MM,
+                _SLIT_CUTTER_DEPTH_FACTOR * longitudinal_band_width_mm,
+                _SLIT_CUTTER_DEPTH_FACTOR))
+        slit_cutter_breps = []
+        slit_panels = []
+        slit_cross_sections = []
+        slit_successes = 0
+        for finger_idx, slit_loc, label in slit_targets:
+            try:
+                (splint_solid, cutter_brep, wall_thick, ring_wall_cent, _profile_crv,
+                 panel_brep, xsection_crv) = cut_ring_slit(
+                    splint_solid,
+                    p1_lines_oriented[finger_idx],
+                    slit_loc,
+                    _SLIT_GAP_WIDTH_MM,
+                    _SLIT_CUTTER_DEPTH_FACTOR * longitudinal_band_width_mm)
+                log("Phase 7.6: finger {0} [{1}] slit OK - wall_thickness={2:.3f}mm at "
+                    "centroid ({3:.2f},{4:.2f},{5:.2f})".format(
+                        finger_idx, label, wall_thick,
+                        ring_wall_cent.X, ring_wall_cent.Y, ring_wall_cent.Z))
+                slit_cutter_breps.append(cutter_brep)
+                slit_panels.append(panel_brep)
+                slit_cross_sections.append(xsection_crv)
+                slit_successes += 1
+            except RingSlitError as exc:
+                log("Phase 7.6: finger {0} [{1}] slit FAILED (ring left un-slit): {2}".format(
+                    finger_idx, label, exc))
+        log("Phase 7.6: anchor slitting finished, {0}/{1} slit(s) applied".format(
+            slit_successes, len(slit_targets)))
+        out.update({"splint_solid": splint_solid,
+                    "slit_cutter_breps": slit_cutter_breps,
+                    "slit_panels": slit_panels,
+                    "slit_cross_sections": slit_cross_sections})
 
         # --- Phase 8: emboss the objectID into the if-side anchor bore ------------------------
         if proximal_profile_plane is None or distal_profile_plane is None:

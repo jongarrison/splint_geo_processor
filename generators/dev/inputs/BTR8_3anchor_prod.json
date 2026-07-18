@@ -8,7 +8,7 @@
       "p1_mid_circ": 60,
       "p1_length": 55,
       "pip_neighbor_fwd_offset": 0,
-      "is_slitted": false
+      "is_slitted": true
     },
     {
       "finger_abbr": "mf",
@@ -26,7 +26,7 @@
       "p1_mid_circ": 70,
       "p1_length": 55,
       "pip_neighbor_fwd_offset": -10,
-      "is_slitted": false
+      "is_slitted": true
     },
     {
       "finger_abbr": "sf",
@@ -35,7 +35,7 @@
       "p1_mid_circ": 55,
       "p1_length": 55,
       "pip_neighbor_fwd_offset": -5,
-      "is_slitted": false
+      "is_slitted": true
     }
   ],
   "all_splint_finger_circ": 140,

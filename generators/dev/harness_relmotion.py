@@ -253,6 +253,7 @@ def main():
             flush_report()
             return
         input_paths.append((name, p))
+        break #just one for now
 
     clear_doc()
 
@@ -286,6 +287,22 @@ def main():
         label_rails(support_rails, "DEV_support_rails_labels", "support rail",
                     (0, 200, 255), offset=offset0)
 
+        # Filename text-dot sitting well above slot 0's splint so each row is instantly
+        # identifiable by the source input at a glance from the top-down view.
+        if splint_solid is not None:
+            try:
+                bbox = splint_solid.GetBoundingBox(True)
+                fn_dot_pt = rg.Point3d(
+                    0.5 * (bbox.Min.X + bbox.Max.X) + offset0.X,
+                    0.5 * (bbox.Min.Y + bbox.Max.Y) + offset0.Y,
+                    bbox.Max.Z + 40.0)
+                ensure_layer("DEV_row_filename", (255, 220, 0))
+                fn_dot = rs.AddTextDot(name, (fn_dot_pt.X, fn_dot_pt.Y, fn_dot_pt.Z))
+                if fn_dot:
+                    rs.ObjectLayer(fn_dot, "DEV_row_filename")
+            except Exception:
+                pass
+
         # Slot 1: splint_solid on its own for a clean look at the finished
         # bored/chamfered/embossed brep without the rail overlay.
         offset1 = next_preview_offset("splint_solid")
@@ -296,6 +313,31 @@ def main():
         offset2 = next_preview_offset("splint_oriented")
         bake_preview("splint_oriented (print-ready mesh)", splint_oriented,
                      "DEV_splint_oriented", (200, 200, 255), offset=offset2)
+
+        # Slot 3: dedicated Phase 7.6 slit-debug view. Shows the splint_solid as a dim
+        # reference alongside the slit cutter breps (red), wall cross-section curves
+        # (yellow), and detection panels (gray). Each piece gets its own layer so noisy
+        # bits (panels are large flat rectangles) can be toggled off in the Layers panel
+        # while keeping cutters + cross-sections visible for placement checks.
+        slit_cutter_breps = r.get("slit_cutter_breps") or []
+        slit_panels = r.get("slit_panels") or []
+        slit_cross_sections = r.get("slit_cross_sections") or []
+        offset3 = next_preview_offset("slit debug (splint reference + cutters + panels)")
+        bake_preview("slit debug", splint_solid,
+                     "DEV_slit_debug_splint_ref", (110, 130, 110), offset=offset3)
+        if slit_cutter_breps:
+            bake(slit_cutter_breps, "DEV_slit_cutters", (255, 60, 60), offset=offset3)
+            report("  baked {0} slit cutter brep(s) on DEV_slit_cutters".format(
+                len(slit_cutter_breps)))
+        if slit_cross_sections:
+            bake(slit_cross_sections, "DEV_slit_cross_sections", (255, 255, 0),
+                 offset=offset3)
+            report("  baked {0} slit wall cross-section curve(s) on "
+                   "DEV_slit_cross_sections".format(len(slit_cross_sections)))
+        if slit_panels:
+            bake(slit_panels, "DEV_slit_panels", (140, 140, 140), offset=offset3)
+            report("  baked {0} slit panel brep(s) on DEV_slit_panels".format(
+                len(slit_panels)))
 
     sc.doc.Views.Redraw()
     report("")
