@@ -253,7 +253,7 @@ def main():
             flush_report()
             return
         input_paths.append((name, p))
-        break #just one for now
+        #break #just one for now
 
     clear_doc()
 

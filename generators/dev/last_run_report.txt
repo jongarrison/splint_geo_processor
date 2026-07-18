@@ -13,4 +13,14 @@ running generate_relative_motion_splint (objectID DV00)...
   baked 3 slit wall cross-section curve(s) on DEV_slit_cross_sections
   baked 3 slit panel brep(s) on DEV_slit_panels
 
+=== row 1 at +Y 150mm: if_mf_rf_2anchor_20deg.json ===
+running generate_relative_motion_splint (objectID DV01)...
+  preview slot 0 at (+X 0, +Y 150) mm: splint_solid + support rails
+  preview slot 1 at (+X 90, +Y 150) mm: splint_solid
+  preview slot 2 at (+X 180, +Y 150) mm: splint_oriented
+  preview slot 3 at (+X 270, +Y 150) mm: slit debug (splint reference + cutters + panels)
+  baked 2 slit cutter brep(s) on DEV_slit_cutters
+  baked 2 slit wall cross-section curve(s) on DEV_slit_cross_sections
+  baked 2 slit panel brep(s) on DEV_slit_panels
+
 done. report written to /Users/jon/work_3d/splint_work/splint_geo_processor/generators/dev/last_run_report.txt

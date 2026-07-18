@@ -76,8 +76,8 @@ def cut_ring_slit(splint_solid,
                   cutter_depth,
                   tolerance=None,
                   wall_thickness_range=None,
-                  panel_length_multiplier=4.0,
-                  edge_radar_length_mm=200.0):
+                  panel_length_multiplier=0.8,
+                  edge_radar_length_mm=40.0):
     """Cut a through-slit across a ring wall of splint_solid.
 
     Applies an inverted-stadium cutter (rectangle + two inward-bulging semi-circles) that
