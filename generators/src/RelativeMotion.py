@@ -84,7 +84,7 @@ _CHAMFER_PERIMETER_ENDPOINT_MM = 0.02      # near-zero distance at the tapered r
 # multiple of longitudinal_band_width_mm so ring cross-sections with any modest longitudinal
 # skew still get punched through completely along the P1 axis.
 _SLIT_GAP_WIDTH_MM = 0.3
-_SLIT_CUTTER_DEPTH_FACTOR = 3.0
+_SLIT_CUTTER_DEPTH_FACTOR = 2.0
 
 
 
@@ -1818,6 +1818,36 @@ def emboss_object_id(splint_solid, raw_data, object_id, p_full_curves, d_full_cu
     return embossed, letter_breps, projected_letters, text_plane
 
 
+def _log_splint_health(brep, label):
+    """Log topology-health snapshot of splint_solid at a checkpoint. Non-mutating; safe to
+    call anywhere the caller wants to bisect "was the brep already sick, or did this phase
+    make it sick?". Emits Rhino's IsValidWithLog reasons on any validity failure."""
+    if brep is None:
+        log("HEALTH [{0}]: splint_solid is None!".format(label))
+        return
+    try:
+        ok, reasons = brep.IsValidWithLog()
+    except Exception:
+        ok, reasons = bool(brep.IsValid), ""
+    # Brep.IsManifold has an out-parameter overload in .NET; handle both.
+    try:
+        manifold_str = str(brep.IsManifold)
+    except Exception:
+        try:
+            m, _o = brep.IsManifold()
+            manifold_str = str(m)
+        except Exception:
+            manifold_str = "?"
+    log("HEALTH [{0}]: IsValid={1} IsSolid={2} IsManifold={3} faces={4} edges={5} verts={6}".format(
+        label, ok, brep.IsSolid, manifold_str,
+        brep.Faces.Count, brep.Edges.Count, brep.Vertices.Count))
+    if not ok and reasons:
+        for line in reasons.splitlines():
+            line = line.strip()
+            if line:
+                log("  invalid: {0}".format(line))
+
+
 def generate_relative_motion_splint(raw_data_dev, is_production,
                                     should_save_mesh, object_id="TEST",
                                     stop_after_bores=False):
@@ -2158,36 +2188,74 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
                 len(slit_targets), _SLIT_GAP_WIDTH_MM,
                 _SLIT_CUTTER_DEPTH_FACTOR * longitudinal_band_width_mm,
                 _SLIT_CUTTER_DEPTH_FACTOR))
+        # Baseline health snapshot: this tells us whether the splint entered Phase 7.6 with
+        # any topology damage from earlier phases (chamfers, boolean bores, etc.). If a slit
+        # then fails and the pre-slit snapshot ALSO shows damage, the chamfer/bore is the
+        # suspect; if pre-slit is clean but the slit still fails, the fault is in cut_ring_slit.
+        _log_splint_health(splint_solid, "Phase 7.6 entry (after chamfer)")
+        # Successful-slit construction geometry, one entry per slit.
         slit_cutter_breps = []
         slit_panels = []
         slit_cross_sections = []
+        # Failed-slit construction geometry: whatever was populated in each slit's debug
+        # dict before the raise. Useful for bisecting where cut_ring_slit gave up.
+        failed_slit_panels = []
+        failed_slit_raw_intersections = []
+        failed_slit_joined_intersections = []
+        failed_slit_cutters = []
         slit_successes = 0
         for finger_idx, slit_loc, label in slit_targets:
+            _log_splint_health(
+                splint_solid, "before finger {0} slit [{1}]".format(finger_idx, label))
+            # Fresh out-parameter dict per slit. cut_ring_slit populates it progressively;
+            # on a raise, whatever got built before the failure is still here to inspect.
+            slit_debug = {}
             try:
-                (splint_solid, cutter_brep, wall_thick, ring_wall_cent, _profile_crv,
-                 panel_brep, xsection_crv) = cut_ring_slit(
+                splint_solid = cut_ring_slit(
                     splint_solid,
                     p1_lines_oriented[finger_idx],
                     slit_loc,
                     _SLIT_GAP_WIDTH_MM,
-                    _SLIT_CUTTER_DEPTH_FACTOR * longitudinal_band_width_mm)
+                    _SLIT_CUTTER_DEPTH_FACTOR * longitudinal_band_width_mm,
+                    debug=slit_debug)
+                wall_thick = slit_debug.get("wall_thickness_mm", 0.0)
+                ring_wall_cent = slit_debug.get("ring_wall_centroid")
+                cent_str = ("({0:.2f},{1:.2f},{2:.2f})".format(
+                    ring_wall_cent.X, ring_wall_cent.Y, ring_wall_cent.Z)
+                    if ring_wall_cent is not None else "(?)")
                 log("Phase 7.6: finger {0} [{1}] slit OK - wall_thickness={2:.3f}mm at "
-                    "centroid ({3:.2f},{4:.2f},{5:.2f})".format(
-                        finger_idx, label, wall_thick,
-                        ring_wall_cent.X, ring_wall_cent.Y, ring_wall_cent.Z))
-                slit_cutter_breps.append(cutter_brep)
-                slit_panels.append(panel_brep)
-                slit_cross_sections.append(xsection_crv)
+                    "centroid {3}".format(finger_idx, label, wall_thick, cent_str))
+                if slit_debug.get("cutter_brep") is not None:
+                    slit_cutter_breps.append(slit_debug["cutter_brep"])
+                if slit_debug.get("panel_brep") is not None:
+                    slit_panels.append(slit_debug["panel_brep"])
+                if slit_debug.get("ring_wall_cross_section_curve") is not None:
+                    slit_cross_sections.append(slit_debug["ring_wall_cross_section_curve"])
                 slit_successes += 1
             except RingSlitError as exc:
                 log("Phase 7.6: finger {0} [{1}] slit FAILED (ring left un-slit): {2}".format(
                     finger_idx, label, exc))
+                # Whatever construction stages ran before the raise are in slit_debug.
+                if slit_debug.get("panel_brep") is not None:
+                    failed_slit_panels.append(slit_debug["panel_brep"])
+                if slit_debug.get("raw_intersection_curves"):
+                    failed_slit_raw_intersections.extend(
+                        slit_debug["raw_intersection_curves"])
+                if slit_debug.get("joined_intersection_curves"):
+                    failed_slit_joined_intersections.extend(
+                        slit_debug["joined_intersection_curves"])
+                if slit_debug.get("cutter_brep") is not None:
+                    failed_slit_cutters.append(slit_debug["cutter_brep"])
         log("Phase 7.6: anchor slitting finished, {0}/{1} slit(s) applied".format(
             slit_successes, len(slit_targets)))
         out.update({"splint_solid": splint_solid,
                     "slit_cutter_breps": slit_cutter_breps,
                     "slit_panels": slit_panels,
-                    "slit_cross_sections": slit_cross_sections})
+                    "slit_cross_sections": slit_cross_sections,
+                    "failed_slit_panels": failed_slit_panels,
+                    "failed_slit_raw_intersections": failed_slit_raw_intersections,
+                    "failed_slit_joined_intersections": failed_slit_joined_intersections,
+                    "failed_slit_cutters": failed_slit_cutters})
 
         # --- Phase 8: emboss the objectID into the if-side anchor bore ------------------------
         if proximal_profile_plane is None or distal_profile_plane is None:

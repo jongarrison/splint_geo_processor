@@ -30,6 +30,7 @@ SWITCHING INPUTS
 INPUT_FILES = [
     "BTR8_3anchor_prod.json",
     "if_mf_rf_2anchor_20deg.json",
+    "ZM1Q_prod.json",
 ]
 
 import os
@@ -338,6 +339,33 @@ def main():
             bake(slit_panels, "DEV_slit_panels", (140, 140, 140), offset=offset3)
             report("  baked {0} slit panel brep(s) on DEV_slit_panels".format(
                 len(slit_panels)))
+
+        # Failed-slit debug geometry (from cut_ring_slit's debug dict, surfaced by Phase 7.6).
+        # Bright magenta/orange to draw the eye - if you see any of these layers populated,
+        # a slit failed and its panel + intersection curves are here for inspection.
+        # Raw and joined are baked separately so you can see whether JoinCurves changed
+        # anything (identical geometry means join was a no-op; different means joining
+        # stitched or split pieces).
+        failed_panels = r.get("failed_slit_panels") or []
+        failed_raw = r.get("failed_slit_raw_intersections") or []
+        failed_joined = r.get("failed_slit_joined_intersections") or []
+        failed_cutters = r.get("failed_slit_cutters") or []
+        if failed_panels:
+            bake(failed_panels, "DEV_slit_FAILED_panels", (255, 0, 255), offset=offset3)
+            report("  baked {0} FAILED-slit panel brep(s) on DEV_slit_FAILED_panels".format(
+                len(failed_panels)))
+        if failed_raw:
+            bake(failed_raw, "DEV_slit_FAILED_raw_ix", (255, 100, 100), offset=offset3)
+            report("  baked {0} FAILED-slit raw intersection curve(s) on "
+                   "DEV_slit_FAILED_raw_ix".format(len(failed_raw)))
+        if failed_joined:
+            bake(failed_joined, "DEV_slit_FAILED_joined_ix", (255, 140, 0), offset=offset3)
+            report("  baked {0} FAILED-slit joined intersection curve(s) on "
+                   "DEV_slit_FAILED_joined_ix".format(len(failed_joined)))
+        if failed_cutters:
+            bake(failed_cutters, "DEV_slit_FAILED_cutters", (255, 0, 255), offset=offset3)
+            report("  baked {0} FAILED-slit cutter brep(s) on DEV_slit_FAILED_cutters".format(
+                len(failed_cutters)))
 
     sc.doc.Views.Redraw()
     report("")
