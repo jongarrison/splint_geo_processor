@@ -606,6 +606,105 @@ objectid_text_size_factor (text height = factor * longitudinal_band_width_mm) an
 objectid_extrusion_depth_factor (emboss depth = factor * radial_band_thickness_mm). If the text
 reads upside down along the finger, flip the up-vector sign.
 
+#### Support Path Ramp (Phase 7.4, PLANNED - not yet implemented)
+
+Goal: grow a solid protuberance ("ramp") off the DISTAL face, rooted along each distal support
+run, as a foundation for a future feature (not yet specified) that needs geometry projecting
+forward past the distal face. Runs BEFORE chamfering (Phase 7.5), since the ramp adds new brep
+faces/edges to splint_solid that Phase 7.5's chamfer passes should be able to treat like any
+other perimeter surface. Runs AFTER Phase 7's rail extraction, since it consumes
+`d_support_rails` directly.
+
+This is also why `splint_oriented`'s build-plate orientation flipped to proximal-face-down (see
+"Build-plate orientation" below): the distal face needs to stay clear/upward-facing so the ramp
+prints without support material underneath it.
+
+Per-call inputs, currently plain Python constants (candidates for future raw_data fields once the
+feature is validated - flagged with the eventual json key name). Starting placeholder values
+(pending clinical guidance) are derived from existing splint dimensions rather than new magic
+numbers:
+- `enable_support_path_ramp` (bool) - master on/off switch. Default False until validated.
+- `support_path_ramp_thickness` (float, mm) - both the ramp_profile's constant band thickness
+  (the -Z shift distance) AND the cap semicircle diameter (radius = thickness / 2). Starting
+  value: `radial_band_thickness_mm` (1.65mm design constant - same order as the ring wall).
+- `support_path_ramp_length` (float, mm) - ARC LENGTH (not chord) of `ramp_rail`. Starting value:
+  `longitudinal_band_width_mm` (per-patient input, default 10.0mm).
+- `support_path_ramp_arc_radius` (float, mm) - radius of curvature of `ramp_rail`; arc sweep
+  angle = support_path_ramp_length / support_path_ramp_arc_radius (radians). Starting value:
+  `support_path_ramp_length / 2`.
+
+Applies once per entry in `d_support_rails` (there can be more than one distal support run - e.g.
+two separate supported-finger stretches in an A-S-S-A config), so the construction below is a
+per-rail loop.
+
+Construction (per `d_support_rail` open curve, which lies EXACTLY within `distal_profile_plane`).
+Gotcha: `distal_profile_plane.Normal` is NOT necessarily world +X - `build_profile_plane`'s fit
+line is through each included finger's (X,Y) footprint, and differing `pip_neighbor_fwd_offset`
+values across fingers can tilt that fit direction away from pure world Y, which tilts the
+plane's Normal away from pure +X by the same amount (Normal always stays confined to the world
+XY plane - Z component 0 - since the plane's Y axis is always exactly world Z, but its X axis,
+and therefore its Normal, can point anywhere in XY). So don't assume a shared "world-X depth";
+the invariant is that every point on `d_support_rail` lies exactly within `distal_profile_plane`
+itself (whatever tilt that plane has), since `distal_profile_plane`'s own Y axis is exactly
+world Z:
+
+1. Canonicalize `d_support_rail`'s direction so it starts on the +Y side (matching the existing
+   Phase 4/5 "+Y start" convention - `Curve.JoinCurves` in `extract_support_rails` does not
+   guarantee which end becomes `PointAtStart`, so this keeps the ramp's placement deterministic
+   across hand/elevation permutations). Reverse the curve if its start is on the -Y side.
+2. `rail_top = d_support_rail` (the canonicalized curve).
+3. `rail_bottom = rail_top` translated by `Vector3d(0, 0, -support_path_ramp_thickness)` - a pure
+   world-Z shift, which is exactly `distal_profile_plane`'s own Y-axis direction, so
+   `rail_bottom` stays exactly within the SAME infinite plane as `rail_top` (not just a parallel
+   copy). The distance between any corresponding pair of points on rail_top/rail_bottom is
+   exactly `support_path_ramp_thickness` everywhere (a pure translation, not a curve-normal
+   offset).
+4. Cap the two open ends: at each end, join `rail_top`'s endpoint to `rail_bottom`'s corresponding
+   endpoint with a semicircular arc of diameter `support_path_ramp_thickness` (radius =
+   thickness / 2), tangent to both curves at that end (this exactly closes the gap since the
+   endpoint-to-endpoint distance is uniformly `thickness`, same shape family as RingSlit's
+   inward-arc cutter, but here the arcs bulge OUTWARD to close a stadium, not inward to cut one).
+5. `Curve.JoinCurves([rail_top, end_cap_a, rail_bottom, end_cap_b], tol)` into one CLOSED planar
+   curve: `ramp_profile`. This is the sweep's 2D cross-section shape.
+6. Build `ramp_rail`'s starting tangent: world `Vector3d.XAxis` rotated by (clamped)
+   `relative_elevation_angle` about axis `Vector3d(0, -1, 0)` - the EXACT SAME rotation used in
+   `elevate_supported_fingers` for tilting a supported finger's P1 line, so the ramp continues
+   forward along the same elevated direction the supported finger's phalanx already travels.
+   At `relative_elevation_angle == 0` this is exactly world +X. Build `ramp_rail`'s plane the
+   same way `build_profile_plane` builds `distal_profile_plane` itself: a vertical plane whose
+   X axis is this start_tangent direction and whose Y axis is world Z, origin at `ramp_profile`'s
+   reference point (the canonicalized `PointAtStart`). `ramp_rail` is then a planar arc in that
+   plane: radius `support_path_ramp_arc_radius`, arc length `support_path_ramp_length`, starting
+   at the reference point tangent to `start_tangent` (so the swept solid starts flush against
+   the distal cap, profile perpendicular to the rail's initial direction - standard Sweep1
+   setup), curving toward -Z (VOLAR / under the finger, not dorsal) as it extends away from the
+   distal face.
+7. `Brep.CreateFromSweep(ramp_rail, ramp_profile, True, tolerance)` (closed=True since
+   ramp_profile is closed) -> one swept solid (`ramp_solid`) per support rail.
+8. Nudge `ramp_solid` by a small `-start_tangent * _RAMP_UNION_EPSILON_MM` (the OPPOSITE
+   direction of `ramp_rail`'s starting tangent from step 6, NOT a fixed world axis - this is
+   what guarantees the nudge always drives the ramp cleanly INTO the splint body regardless of
+   elevation angle or fit-line skew) before unioning, so the sweep's flush starting face doesn't
+   sit exactly coplanar with splint_solid's distal cap - coincident faces are a classic
+   boolean-union failure mode. `_RAMP_UNION_EPSILON_MM` candidate: 0.01mm (10 microns; matches
+   `RingSlit._INTERSECTION_JOIN_TOL_MM`'s reasoning - far below print resolution, comfortably
+   above float noise).
+9. Union `ramp_solid` into `splint_solid` via a new `BrepUnion.robust_brep_union` helper (mirrors
+   `BrepDifference.py`'s module structure/naming, but starts as a thin wrapper around
+   `Brep.CreateBooleanUnion` - fallback strategies get added later only if/when real unions need
+   them, same incremental spirit as `robust_brep_difference`'s history).
+
+Failure policy: log-and-continue per rail, matching the Phase 7.5 chamfer / Phase 7.6 slit
+pattern - a splint missing one ramp still ships; a `BrepUnionError` (or similar) on one rail
+should not abort the whole job.
+
+Known risk to watch for during bring-up: after the union, the topology at the distal support
+perimeter changes (new faces/edges where the ramp meets the perimeter). Phase 7.5's perimeter
+chamfer re-resolves `d_support_rails` against the CURRENT brep via `find_edge_containing_curve`
+before each pass, so this should self-heal the same way it already handles chamfer-induced
+topology shifts between passes - but confirm in the harness that the rail curve still lands
+cleanly on a single edge post-union, rather than getting split across the new ramp-junction edge.
+
 #### Edge chamfering (Phase 7.5, native Rhino chamfer)
 
 See dev-notes/260709_Rhino_Fillet_And_Chamfer_Research.md for the full method survey. Landed
@@ -750,11 +849,19 @@ meshes - one for our single solid, kept as splint_mesh.
 
 #### Build-plate orientation (splint_oriented)
 
-Lay the part distal-face-down for FDM printing. The distal loft cap is a planar face whose
-outward normal is the distal-plane normal (~+X), which makes a good flat first layer. Rotate that
-normal to world -Z (Transform.Rotation(distal_plane.Normal, -Z, distal_plane.Origin)), then drop
-the mesh so its lowest point rests on Z=0. The result is splint_oriented, the geometry handed to
-the printer.
+Lay the part proximal-face-down for FDM printing (switched from distal-face-down 2026-07-20, in
+prep for the Support Path Ramp feature above - the ramp grows off the distal face, which must
+stay clear/upward-facing rather than pressed against the build plate). The proximal loft cap is
+a planar face; rotate its outward-facing normal to world -Z, then drop the mesh so its lowest
+point rests on Z=0. The result is splint_oriented, the geometry handed to the printer.
+
+Gotcha: `proximal_profile_plane` and `distal_profile_plane` are both simple world-X-translated
+copies of the same centre plane (see build_profile_planes), so their `Plane.Normal` properties
+point in the IDENTICAL direction (~world +X) - that direction literally IS the distal cap's
+outward-facing normal, but is the OPPOSITE of the proximal cap's outward-facing normal. So the
+proximal-face-down rotation must negate `proximal_profile_plane.Normal` before rotating it to
+-Z; using it unnegated (or swapping in `distal_profile_plane.Normal` directly) reproduces the
+OLD distal-face-down behavior instead of flipping it.
 
 #### Data source + saving (integrated into the orchestrator)
 

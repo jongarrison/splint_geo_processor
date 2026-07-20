@@ -38,6 +38,10 @@ import RingSlit
 reload(RingSlit)
 from RingSlit import cut_ring_slit, RingSlitError
 
+import SupportPathRamp
+reload(SupportPathRamp)
+from SupportPathRamp import build_support_path_ramp, SupportPathRampError
+
 import TextGun
 reload(TextGun)
 from TextGun import emboss_text
@@ -1261,25 +1265,42 @@ def _support_between(included, i, j):
 
 # Perimeter-piece roles, used to tag each welded piece so the support-finger stretches of the
 # outer edge can later be selected (and chamfered) without touching the anchor-ring stretches.
-_ROLE_SUPPORT = "support"
+# Split into two sub-roles on the support side (not just one) so callers can tell apart the
+# support-arc side of the perimeter (_ROLE_SUPPORT_PATH: support arcs/cradles and the bridges
+# that connect them) from the return-leap spine that bridges directly across a leapt-over
+# support run on the OTHER side of the perimeter (_ROLE_RETURN_PATH). Both used to share one
+# combined "support" role because Phase 7.5's chamfer wants to treat them the same way
+# (extract_support_rails still does, via _SUPPORT_SIDE_ROLES below) - but Phase 7.4's Support
+# Path Ramp must root ONLY on the true support-arc side (extract_support_path_rails).
+_ROLE_SUPPORT_PATH = "support_path"
+_ROLE_RETURN_PATH = "return_path"
 _ROLE_ANCHOR = "anchor"
+# Roles extract_support_rails treats as "support" for chamfering purposes (both sides).
+_SUPPORT_SIDE_ROLES = (_ROLE_SUPPORT_PATH, _ROLE_RETURN_PATH)
 
 
 def _slot_role(kind):
-    """Role of a walk slot: support-finger geometry vs anchor-ring geometry."""
-    return _ROLE_SUPPORT if kind in ("support_arc", "end_support_cradle") else _ROLE_ANCHOR
+    """Role of a walk slot: support-arc geometry (support path) vs anchor-ring geometry. Plain
+    walk slots are never on the return-leap spine (that's always a BRIDGE, not a slot - see
+    _bridge_role), so this only ever needs to distinguish support-path vs anchor."""
+    return _ROLE_SUPPORT_PATH if kind in ("support_arc", "end_support_cradle") else _ROLE_ANCHOR
 
 
 def _bridge_role(ka, kb, fa, fb, included):
-    """Role of the bridge joining two slots. A bridge is 'support' if it touches any support
-    piece, or if it is the return-side leap spine across a leapt-over support run (whose two
-    ends are anchor return hemispheres, so it must be recognised by the support-between test,
-    not by its neighbours' kinds). Every other bridge (anchor-to-anchor corner) is 'anchor'."""
+    """Role of the bridge joining two slots.
+
+    - _ROLE_SUPPORT_PATH: the bridge touches a support arc/cradle directly (anchor-to-support
+      or support-to-support) - genuinely on the support-arc side of the perimeter.
+    - _ROLE_RETURN_PATH: the return-side leap spine across a leapt-over support run (whose two
+      ends are anchor RETURN hemispheres, so it must be recognised by the support-between
+      test, not by its neighbours' kinds - it never touches a support_arc/cradle slot itself).
+    - _ROLE_ANCHOR: every other bridge (a plain anchor-to-anchor corner).
+    """
     if set([ka, kb]) & set(["support_arc", "end_support_cradle"]):
-        return _ROLE_SUPPORT
+        return _ROLE_SUPPORT_PATH
     if (ka == "anchor_return_side" and kb == "anchor_return_side"
             and _support_between(included, fa, fb)):
-        return _ROLE_SUPPORT
+        return _ROLE_RETURN_PATH
     return _ROLE_ANCHOR
 
 
@@ -1306,32 +1327,37 @@ def _build_perimeter_chain(walk_segments, work, bridge_after, included):
     return chain
 
 
-def extract_support_rails(perimeter_chain, tolerance=None):
-    """Pull the support-finger stretches of the perimeter out as open rail curves.
+def _extract_rails_by_role(perimeter_chain, roles, tolerance=None):
+    """Shared implementation for extract_support_rails / extract_support_path_rails: join each
+    maximal contiguous run of chain entries whose role is in `roles` into one open rail curve.
 
-    Walks the (cyclic) role-tagged chain and joins each maximal contiguous run of 'support'
-    pieces into one open curve - one rail per support run on the support side, one per return
-    spine, and one spanning each end-support cradle (arc + cap + return). Anchor-ring pieces
-    delimit the runs and are excluded, so chamfering these rails never touches the anchor edges.
+    Rails per role set:
+      - _SUPPORT_SIDE_ROLES (support_path + return_path): one rail per support run on the
+        support side, one per return spine, and one spanning each end-support cradle (arc +
+        cap + return) - the original extract_support_rails behavior, used for chamfering.
+      - (_ROLE_SUPPORT_PATH,) only: just the support-arc side runs, excluding any return-leap
+        spine - used by features that must root specifically on the support arc (e.g. the
+        Support Path Ramp, Phase 7.4).
 
-    Returns a list of open Curves (empty if there is no support geometry).
+    Anchor-ring pieces always delimit runs and are excluded.
+    Returns a list of open Curves (empty if there is no matching geometry).
     """
     tol = tolerance or _JOIN_TOL
     n = len(perimeter_chain)
     if n == 0:
         return []
-    roles = [e["role"] for e in perimeter_chain]
-    # Rotate so the scan starts on an anchor boundary; a support run then never wraps the seam.
-    if _ROLE_ANCHOR in roles:
-        start = roles.index(_ROLE_ANCHOR)
+    all_roles = [e["role"] for e in perimeter_chain]
+    # Rotate so the scan starts on an anchor boundary; a run then never wraps the seam.
+    if _ROLE_ANCHOR in all_roles:
+        start = all_roles.index(_ROLE_ANCHOR)
         ordered = perimeter_chain[start:] + perimeter_chain[:start]
     else:
-        ordered = perimeter_chain  # no anchors at all: whole perimeter is one support run
+        ordered = perimeter_chain  # no anchors at all: whole perimeter is one run
 
     runs = []
     run = []
     for entry in ordered:
-        if entry["role"] == _ROLE_SUPPORT:
+        if entry["role"] in roles:
             if entry["curve"] is not None:
                 run.append(entry["curve"])
         elif run:
@@ -1347,6 +1373,31 @@ def extract_support_rails(perimeter_chain, tolerance=None):
             # A clean run joins into one open curve; if it fragments, keep the longest piece.
             rails.append(max(joined, key=lambda c: c.GetLength()))
     return rails
+
+
+def extract_support_rails(perimeter_chain, tolerance=None):
+    """Pull BOTH the support-arc side AND the return-leap-spine side of the perimeter out as
+    open rail curves (used for chamfering - Phase 7.5 treats both sides the same way).
+
+    See _extract_rails_by_role for the shared run-joining logic. If you need ONLY the
+    support-arc side (e.g. to root a feature that must not land on the return spine), use
+    extract_support_path_rails instead.
+
+    Returns a list of open Curves (empty if there is no support geometry).
+    """
+    return _extract_rails_by_role(perimeter_chain, _SUPPORT_SIDE_ROLES, tolerance)
+
+
+def extract_support_path_rails(perimeter_chain, tolerance=None):
+    """Pull ONLY the support-arc side of the perimeter out as open rail curves - support arcs,
+    end-support cradles, and the bridges connecting them - EXCLUDING the return-leap spine
+    that bridges anchors directly across a leapt-over support run on the opposite side of the
+    perimeter. Use this (not extract_support_rails) for features that must root specifically
+    on the support-arc side, e.g. the Support Path Ramp (Phase 7.4).
+
+    Returns a list of open Curves (empty if there is no support-arc-side geometry).
+    """
+    return _extract_rails_by_role(perimeter_chain, (_ROLE_SUPPORT_PATH,), tolerance)
 
 
 def _build_perimeter_chamfer_handles(edge, rail, target_mm,
@@ -1910,6 +1961,15 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
     # Band width along the finger axis (patient/config input from the web form; mm).
     longitudinal_band_width_mm = raw_data.get("longitudinal_band_width_mm", 10.0)
 
+    # Support Path Ramp (Phase 7.4, PLANNED feature - see dev-notes/260702_..._splint.md).
+    # Off by default until validated; starting placeholder values derived from existing splint
+    # dimensions rather than new magic numbers (no clinical guidance yet).
+    enable_support_path_ramp = True  # TEMP: True for harness validation, flip back after review
+    support_path_ramp_thickness = radial_band_thickness_mm
+    support_path_ramp_length = longitudinal_band_width_mm
+    support_path_ramp_arc_radius = support_path_ramp_length * 2.0
+    support_path_ramp_trim_mm = 2.5  # trim off each end of the rail before building ramp profile
+
     # Every intermediate is written into `out` as it is produced, so the GH component can preview
     # each phase. In dev the pipeline runs inside a try/except: on failure we log the traceback and
     # return whatever geometry made it that far (a partial preview), rather than dying with nothing
@@ -2006,7 +2066,12 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
         # perimeter and the anchor bore rims get chamfered in Phase 7.5.
         p_support_rails = extract_support_rails(p_perimeter_chain, _JOIN_TOL)
         d_support_rails = extract_support_rails(d_perimeter_chain, _JOIN_TOL)
-        out.update({"p_support_rails": p_support_rails, "d_support_rails": d_support_rails})
+        # Support-arc-side ONLY (excludes the return-leap spine) - Phase 7.4's Support Path
+        # Ramp must root on the true support-arc side, not the return-path stretch that
+        # extract_support_rails also (correctly, for chamfering) lumps in.
+        d_support_path_rails = extract_support_path_rails(d_perimeter_chain, _JOIN_TOL)
+        out.update({"p_support_rails": p_support_rails, "d_support_rails": d_support_rails,
+                    "d_support_path_rails": d_support_path_rails})
 
         # Dev-harness early exit: skip chamfer + emboss + mesh + save (all expensive, and the
         # harness runs its own chamfer probes against the sharp solid). Production never sets this.
@@ -2065,82 +2130,12 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
         log("Phase 7.5a: rim chamfer finished, {0}/{1} rim(s) chamfered".format(
             rim_successes, len(rim_targets)))
 
-        # Perimeter: one brep edge per call. Loop: re-resolve every remaining rail on the
-        # current brep, group rails by their containing edge, pick one edge, merge that edge's
-        # rails' handles, attempt one variable-distance chamfer, remove the processed rails
-        # (whether success or failure), repeat until no rails remain resolvable.
-        support_rails = [r for r in ((p_support_rails or []) + (d_support_rails or []))
-                         if r is not None]
-        log("Phase 7.5b: variable-distance perimeter chamfer on {0} support rail(s), "
-            "target d={1}mm, endpoints d={2}mm, end inset {3:.0%}".format(
-                len(support_rails), _CHAMFER_PERIMETER_MM,
-                _CHAMFER_PERIMETER_ENDPOINT_MM, _CHAMFER_PERIMETER_END_INSET_FRAC))
-        remaining = [(ri, rail) for ri, rail in enumerate(support_rails)]
-        perim_edge_attempts = 0
-        perim_edge_successes = 0
-        rails_off_perimeter = 0
-        while remaining:
-            # Re-resolve remaining rails on the current (possibly mutated) brep.
-            edge_to_rails = {}   # edge_index -> [(ri, rail), ...]
-            resolved_now = []    # (ri, rail) that landed on any perimeter edge this iteration
-            for ri, rail in remaining:
-                c = find_edge_containing_curve(splint_solid, rail)
-                if c is None:
-                    log("  rail {0}: no containing perimeter edge on current brep (likely a "
-                        "return-spine leap or an edge lost to earlier chamfers); "
-                        "skipping".format(ri))
-                    rails_off_perimeter += 1
-                    continue
-                edge_to_rails.setdefault(c.edge_index, []).append((ri, rail))
-                resolved_now.append((ri, rail))
-            if not edge_to_rails:
-                break
-            # Process one edge this iteration. Smallest index for a deterministic order.
-            ei = min(edge_to_rails.keys())
-            group = edge_to_rails[ei]
-            edge = splint_solid.Edges[ei]
-            merged = []
-            rail_descs = []
-            for ri, rail in group:
-                h = _build_perimeter_chamfer_handles(edge, rail, _CHAMFER_PERIMETER_MM)
-                if h is None:
-                    log("  rail {0}: could not build handles on edge {1} "
-                        "(rail_len={2:.2f}mm, edge_len={3:.2f}mm); dropping".format(
-                            ri, ei, rail.GetLength(), edge.GetLength()))
-                    continue
-                merged.extend(h)
-                rail_descs.append("rail {0} (len={1:.1f})".format(ri, rail.GetLength()))
-            processed_ris = set(ri for ri, _ in group)
-            if not merged:
-                # No usable handles for any rail on this edge; drop them and iterate.
-                remaining = [(ri, rl) for ri, rl in resolved_now if ri not in processed_ris]
-                continue
-            # Sort + dedup coincident params (max distance wins where two rails coincide).
-            merged.sort(key=lambda x: x[0])
-            deduped = []
-            for t, d in merged:
-                if deduped and abs(deduped[-1][0] - t) < 1e-6:
-                    deduped[-1] = (t, max(deduped[-1][1], d))
-                    continue
-                deduped.append((t, d))
-            handle_strs = ["(t={0:.3f}, d={1:.3f})".format(t, d) for t, d in deduped]
-            perim_edge_attempts += 1
-            try:
-                splint_solid = chamfer_edges_variable(splint_solid, {ei: deduped})
-                log("  edge {0}: chamfer OK ({1} rail(s): {2}) edge_len={3:.2f}mm "
-                    "closed={4} handles={5}".format(
-                        ei, len(group), ", ".join(rail_descs),
-                        edge.GetLength(), edge.IsClosed, handle_strs))
-                perim_edge_successes += 1
-            except BrepChamferError as exc:
-                log("  edge {0}: chamfer FAILED ({1} rail(s): {2}) edge_len={3:.2f}mm "
-                    "closed={4} handles={5}: {6}".format(
-                        ei, len(group), ", ".join(rail_descs),
-                        edge.GetLength(), edge.IsClosed, handle_strs, exc))
-            remaining = [(ri, rl) for ri, rl in resolved_now if ri not in processed_ris]
-        log("Phase 7.5b: perimeter chamfer finished, {0}/{1} edge attempt(s) succeeded "
-            "({2} rail(s) skipped as off-perimeter)".format(
-                perim_edge_successes, perim_edge_attempts, rails_off_perimeter))
+        # Perimeter chamfer (Phase 7.5b) TEMPORARILY DISABLED while developing Support Path Ramp.
+        # The ramp changes perimeter topology in a way that makes the rail-based edge lookup
+        # unreliable until we've confirmed the union succeeds. Anchor rim chamfers (7.5a above)
+        # stay active - those are independent of the perimeter shape.
+        # TODO: re-enable once Phase 7.4 ramp unions are landing successfully.
+        log("Phase 7.5b: SKIPPED (perimeter chamfer temporarily disabled for ramp dev)")
         out["splint_solid"] = splint_solid
 
         # --- Phase 7.6: cut anchor slits ------------------------------------------------------
@@ -2270,13 +2265,72 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
                     "id_projected_letters": id_projected_letters,
                     "id_text_plane": id_text_plane, "splint_solid": splint_solid})
 
-        # Mesh the finished solid, then lay it distal-face-down on the build plate. The distal cap
-        # (a planar loft end whose outward normal is the distal-plane normal, ~+X) becomes the first
-        # print layer: rotate that normal to world -Z, then drop the part so it rests on Z=0.
+        # Capture the "finished body" (post-chamfer, post-slit, post-emboss) BEFORE the ramp
+        # attaches, so the harness can preview it regardless of whether the ramp succeeds.
+        splint_solid_pre_ramp = splint_solid.DuplicateBrep()
+        out["splint_solid_pre_ramp"] = splint_solid_pre_ramp
+
+        # --- Phase 9: Support Path Ramp (additive feature off the distal face) ----------------
+        # Grows a solid protuberance off the distal support-path rail(s) for a future feature.
+        # Runs AFTER all subtractive finishing (chamfer, slit, emboss) so those phases see a
+        # stable topology. Log-and-continue per rail - a splint without its ramp still ships.
+        if enable_support_path_ramp:
+            if distal_profile_plane is None:
+                raise ValueError(
+                    "generate_relative_motion_splint: distal_profile_plane missing before "
+                    "Phase 9 ramp.")
+            clamped_elevation = max(MIN_ELEVATION_ANGLE, min(
+                MAX_ELEVATION_ANGLE, raw_data["relative_elevation_angle"]))
+            elevation_rad = math.radians(clamped_elevation)
+            ramp_start_tangent = Vector3d(1.0, 0.0, 0.0)
+            ramp_start_tangent.Transform(Transform.Rotation(
+                elevation_rad, Vector3d(0.0, -1.0, 0.0), Point3d.Origin))
+            ramp_bend_z_sign = -1.0 if clamped_elevation >= 0 else 1.0
+
+            h_axis = _plane_horizontal_axis(distal_profile_plane)
+            rails_to_ramp = [r for r in (d_support_path_rails or []) if r is not None]
+            log("Phase 9: {0} distal support-path rail(s), ramp thickness={1:.2f}mm "
+                "length={2:.2f}mm arc_radius={3:.2f}mm".format(
+                    len(rails_to_ramp), support_path_ramp_thickness, support_path_ramp_length,
+                    support_path_ramp_arc_radius))
+            ramp_successes = 0
+            support_path_ramp_debugs = []
+            for ri, rail in enumerate(rails_to_ramp):
+                oriented_rail = rail.DuplicateCurve()
+                _orient_start_plus_y(oriented_rail, distal_profile_plane.Origin, h_axis)
+                ramp_debug = {}
+                try:
+                    splint_solid = build_support_path_ramp(
+                        splint_solid, oriented_rail, ramp_start_tangent,
+                        support_path_ramp_thickness, support_path_ramp_length,
+                        support_path_ramp_arc_radius, bend_z_sign=ramp_bend_z_sign,
+                        rail_trim_mm=support_path_ramp_trim_mm,
+                        debug=ramp_debug)
+                    log("Phase 9: rail {0} ramp OK".format(ri))
+                    ramp_successes += 1
+                except SupportPathRampError as exc:
+                    log("Phase 9: rail {0} ramp FAILED (splint left un-ramped): {1}".format(
+                        ri, exc))
+                support_path_ramp_debugs.append(ramp_debug)
+            log("Phase 9: support path ramp finished, {0}/{1} ramp(s) applied".format(
+                ramp_successes, len(rails_to_ramp)))
+            out.update({"splint_solid": splint_solid,
+                        "support_path_ramp_debugs": support_path_ramp_debugs})
+
+        # Mesh the finished solid, then lay it proximal-face-down on the build plate (in prep for
+        # the Support Path Ramp feature, which grows a protuberance off the DISTAL face - that
+        # face must stay upward-facing/unobstructed, so we flip which end sits on the plate).
+        # proximal_profile_plane/distal_profile_plane are simple X-translated copies of the same
+        # centre plane, so BOTH share the identical Plane.Normal direction (~world +X, the same
+        # sign for either end). That Normal literally IS the outward-facing direction of the
+        # DISTAL cap (the +X end of the loft) but is the OPPOSITE of the outward-facing direction
+        # of the PROXIMAL cap (the -X end) - so proximal needs its normal negated before use.
+        # Rotate that outward normal to world -Z, then drop the part so it rests on Z=0.
+        proximal_outward_normal = proximal_profile_plane.Normal * -1.0
         splint_mesh = convert_to_export_meshes(splint_solid)[0]
         splint_oriented = splint_mesh.DuplicateMesh()
         splint_oriented.Transform(Transform.Rotation(
-            distal_profile_plane.Normal, Vector3d(0.0, 0.0, -1.0), distal_profile_plane.Origin))
+            proximal_outward_normal, Vector3d(0.0, 0.0, -1.0), proximal_profile_plane.Origin))
         splint_oriented.Translate(Vector3d(0.0, 0.0, -splint_oriented.GetBoundingBox(True).Min.Z))
         out.update({"splint_mesh": splint_mesh, "splint_oriented": splint_oriented})
 

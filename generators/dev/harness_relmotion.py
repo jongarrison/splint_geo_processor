@@ -274,25 +274,21 @@ def main():
             report("PARTIAL RUN for '{0}': {1}".format(name, r["error"]))
 
         splint_solid = r.get("splint_solid")
+        splint_solid_pre_ramp = r.get("splint_solid_pre_ramp")
         splint_oriented = r.get("splint_oriented")
-        support_rails = [c for c in ((r.get("p_support_rails") or [])
-                                     + (r.get("d_support_rails") or [])) if c is not None]
 
-        # Slot 0 (row's X=0): splint_solid overlaid with the support rails that drove Phase
-        # 7.5b's variable-distance perimeter chamfer. Eyeballing the two together shows where
-        # the chamfer strips landed (or where they should have landed if a rail's edge failed).
-        offset0 = next_preview_offset("splint_solid + support rails")
-        bake_preview("splint_solid + support rails", splint_solid,
-                     "DEV_splint_solid_with_rails", (150, 220, 150), offset=offset0)
-        bake(support_rails, "DEV_support_rails", (0, 200, 255), offset=offset0)
-        label_rails(support_rails, "DEV_support_rails_labels", "support rail",
-                    (0, 200, 255), offset=offset0)
+        # Slot 0: "Finished body" = post-chamfer + post-slit + post-emboss, BEFORE ramp.
+        # This is the stable splint body that all subtractive finishing has been applied to.
+        offset0 = next_preview_offset("pre-ramp splint body (chamfer+slit+emboss)")
+        bake_preview("pre-ramp splint body", splint_solid_pre_ramp,
+                     "DEV_splint_pre_ramp", (150, 220, 150), offset=offset0)
 
         # Filename text-dot sitting well above slot 0's splint so each row is instantly
         # identifiable by the source input at a glance from the top-down view.
-        if splint_solid is not None:
+        ref_brep = splint_solid_pre_ramp or splint_solid
+        if ref_brep is not None:
             try:
-                bbox = splint_solid.GetBoundingBox(True)
+                bbox = ref_brep.GetBoundingBox(True)
                 fn_dot_pt = rg.Point3d(
                     0.5 * (bbox.Min.X + bbox.Max.X) + offset0.X,
                     0.5 * (bbox.Min.Y + bbox.Max.Y) + offset0.Y,
@@ -304,68 +300,75 @@ def main():
             except Exception:
                 pass
 
-        # Slot 1: splint_solid on its own for a clean look at the finished
-        # bored/chamfered/embossed brep without the rail overlay.
-        offset1 = next_preview_offset("splint_solid")
-        bake_preview("splint_solid", splint_solid,
-                     "DEV_splint_solid", (150, 220, 150), offset=offset1)
-
-        # Slot 2: splint_oriented (print-ready mesh, resting distal-face-down on Z=0).
-        offset2 = next_preview_offset("splint_oriented")
-        bake_preview("splint_oriented (print-ready mesh)", splint_oriented,
-                     "DEV_splint_oriented", (200, 200, 255), offset=offset2)
-
-        # Slot 3: dedicated Phase 7.6 slit-debug view. Shows the splint_solid as a dim
-        # reference alongside the slit cutter breps (red), wall cross-section curves
-        # (yellow), and detection panels (gray). Each piece gets its own layer so noisy
-        # bits (panels are large flat rectangles) can be toggled off in the Layers panel
-        # while keeping cutters + cross-sections visible for placement checks.
+        # Slot 1: slit debug (existing - splint ref + cutters + panels + cross-sections).
         slit_cutter_breps = r.get("slit_cutter_breps") or []
         slit_panels = r.get("slit_panels") or []
         slit_cross_sections = r.get("slit_cross_sections") or []
-        offset3 = next_preview_offset("slit debug (splint reference + cutters + panels)")
-        bake_preview("slit debug", splint_solid,
-                     "DEV_slit_debug_splint_ref", (110, 130, 110), offset=offset3)
+        offset1 = next_preview_offset("slit debug")
+        bake_preview("slit debug", splint_solid_pre_ramp,
+                     "DEV_slit_debug_splint_ref", (110, 130, 110), offset=offset1)
         if slit_cutter_breps:
-            bake(slit_cutter_breps, "DEV_slit_cutters", (255, 60, 60), offset=offset3)
+            bake(slit_cutter_breps, "DEV_slit_cutters", (255, 60, 60), offset=offset1)
             report("  baked {0} slit cutter brep(s) on DEV_slit_cutters".format(
                 len(slit_cutter_breps)))
         if slit_cross_sections:
-            bake(slit_cross_sections, "DEV_slit_cross_sections", (255, 255, 0),
-                 offset=offset3)
+            bake(slit_cross_sections, "DEV_slit_cross_sections", (255, 255, 0), offset=offset1)
             report("  baked {0} slit wall cross-section curve(s) on "
                    "DEV_slit_cross_sections".format(len(slit_cross_sections)))
         if slit_panels:
-            bake(slit_panels, "DEV_slit_panels", (140, 140, 140), offset=offset3)
+            bake(slit_panels, "DEV_slit_panels", (140, 140, 140), offset=offset1)
             report("  baked {0} slit panel brep(s) on DEV_slit_panels".format(
                 len(slit_panels)))
-
-        # Failed-slit debug geometry (from cut_ring_slit's debug dict, surfaced by Phase 7.6).
-        # Bright magenta/orange to draw the eye - if you see any of these layers populated,
-        # a slit failed and its panel + intersection curves are here for inspection.
-        # Raw and joined are baked separately so you can see whether JoinCurves changed
-        # anything (identical geometry means join was a no-op; different means joining
-        # stitched or split pieces).
         failed_panels = r.get("failed_slit_panels") or []
         failed_raw = r.get("failed_slit_raw_intersections") or []
         failed_joined = r.get("failed_slit_joined_intersections") or []
         failed_cutters = r.get("failed_slit_cutters") or []
         if failed_panels:
-            bake(failed_panels, "DEV_slit_FAILED_panels", (255, 0, 255), offset=offset3)
-            report("  baked {0} FAILED-slit panel brep(s) on DEV_slit_FAILED_panels".format(
-                len(failed_panels)))
+            bake(failed_panels, "DEV_slit_FAILED_panels", (255, 0, 255), offset=offset1)
         if failed_raw:
-            bake(failed_raw, "DEV_slit_FAILED_raw_ix", (255, 100, 100), offset=offset3)
-            report("  baked {0} FAILED-slit raw intersection curve(s) on "
-                   "DEV_slit_FAILED_raw_ix".format(len(failed_raw)))
+            bake(failed_raw, "DEV_slit_FAILED_raw_ix", (255, 100, 100), offset=offset1)
         if failed_joined:
-            bake(failed_joined, "DEV_slit_FAILED_joined_ix", (255, 140, 0), offset=offset3)
-            report("  baked {0} FAILED-slit joined intersection curve(s) on "
-                   "DEV_slit_FAILED_joined_ix".format(len(failed_joined)))
+            bake(failed_joined, "DEV_slit_FAILED_joined_ix", (255, 140, 0), offset=offset1)
         if failed_cutters:
-            bake(failed_cutters, "DEV_slit_FAILED_cutters", (255, 0, 255), offset=offset3)
-            report("  baked {0} FAILED-slit cutter brep(s) on DEV_slit_FAILED_cutters".format(
-                len(failed_cutters)))
+            bake(failed_cutters, "DEV_slit_FAILED_cutters", (255, 0, 255), offset=offset1)
+
+        # Slot 2: ramp construction (ramp solid + pre-ramp splint as SEPARATE bodies).
+        ramp_debugs = r.get("support_path_ramp_debugs") or []
+        offset2 = next_preview_offset("ramp construction (separate bodies)")
+        bake_preview("ramp: splint ref", splint_solid_pre_ramp,
+                     "DEV_ramp_splint_ref", (110, 130, 110), offset=offset2)
+        for rd in ramp_debugs:
+            if rd.get("ramp_solid") is not None:
+                bake(rd["ramp_solid"], "DEV_ramp_solid", (255, 60, 60), offset=offset2)
+            elif rd.get("ramp_tube") is not None:
+                bake(rd["ramp_tube"], "DEV_ramp_FAILED_tube", (255, 0, 255), offset=offset2)
+            if rd.get("ramp_profile") is not None:
+                bake(rd["ramp_profile"], "DEV_ramp_profile", (255, 255, 0), offset=offset2)
+            if rd.get("ramp_rail") is not None:
+                bake(rd["ramp_rail"], "DEV_ramp_rail", (255, 140, 0), offset=offset2)
+            if rd.get("trimmed_rail") is not None:
+                bake(rd["trimmed_rail"], "DEV_ramp_trimmed_rail", (0, 200, 255), offset=offset2)
+        if ramp_debugs:
+            report("  baked {0} ramp debug set(s) on DEV_ramp_* layers".format(len(ramp_debugs)))
+
+        # Slot 3: ramp/splint union result (the final splint_solid after union, or pre-ramp
+        # if union failed). Comparing this to slot 0 reveals whether the ramp actually merged.
+        offset3 = next_preview_offset("ramp union result (final splint_solid)")
+        bake_preview("ramp union result", splint_solid,
+                     "DEV_ramp_union_result", (150, 220, 150), offset=offset3)
+
+        # Slot 4: final mesh oriented (print-ready, resting proximal-face-down on Z=0).
+        offset4 = next_preview_offset("splint_oriented (print-ready mesh)")
+        bake_preview("splint_oriented", splint_oriented,
+                     "DEV_splint_oriented", (200, 200, 255), offset=offset4)
+
+    # Timestamp text-dot at the origin so there's a freshness indicator in the viewport.
+    import datetime
+    now_str = datetime.datetime.now().strftime("%H:%M:%S")
+    ensure_layer("DEV_timestamp", (200, 200, 200))
+    ts_dot = rs.AddTextDot("harness run: {0}".format(now_str), (0.0, -30.0, 0.0))
+    if ts_dot:
+        rs.ObjectLayer(ts_dot, "DEV_timestamp")
 
     sc.doc.Views.Redraw()
     report("")

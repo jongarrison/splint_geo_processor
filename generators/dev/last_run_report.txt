@@ -8,32 +8,40 @@ inputs available in /Users/jon/work_3d/splint_work/splint_geo_processor/generato
 
 === row 0 at +Y 0mm: BTR8_3anchor_prod.json ===
 running generate_relative_motion_splint (objectID DV00)...
-  preview slot 0 at (+X 0, +Y 0) mm: splint_solid + support rails
-  preview slot 1 at (+X 90, +Y 0) mm: splint_solid
-  preview slot 2 at (+X 180, +Y 0) mm: splint_oriented
-  preview slot 3 at (+X 270, +Y 0) mm: slit debug (splint reference + cutters + panels)
+PARTIAL RUN for 'BTR8_3anchor_prod.json': MeshExportError: Item 0 mesh failed quality gate: valid=True, closed=False, non_manifold_edges=0
+  preview slot 0 at (+X 0, +Y 0) mm: pre-ramp splint body (chamfer+slit+emboss)
+  preview slot 1 at (+X 90, +Y 0) mm: slit debug
   baked 3 slit cutter brep(s) on DEV_slit_cutters
   baked 3 slit wall cross-section curve(s) on DEV_slit_cross_sections
   baked 3 slit panel brep(s) on DEV_slit_panels
+  preview slot 2 at (+X 180, +Y 0) mm: ramp construction (separate bodies)
+  baked 1 ramp debug set(s) on DEV_ramp_* layers
+  preview slot 3 at (+X 270, +Y 0) mm: ramp union result (final splint_solid)
+  preview slot 4 at (+X 360, +Y 0) mm: splint_oriented (print-ready mesh)
+preview 'splint_oriented': geometry missing (None); skipping bake
 
 === row 1 at +Y 150mm: if_mf_rf_2anchor_20deg.json ===
 running generate_relative_motion_splint (objectID DV01)...
-  preview slot 0 at (+X 0, +Y 150) mm: splint_solid + support rails
-  preview slot 1 at (+X 90, +Y 150) mm: splint_solid
-  preview slot 2 at (+X 180, +Y 150) mm: splint_oriented
-  preview slot 3 at (+X 270, +Y 150) mm: slit debug (splint reference + cutters + panels)
+  preview slot 0 at (+X 0, +Y 150) mm: pre-ramp splint body (chamfer+slit+emboss)
+  preview slot 1 at (+X 90, +Y 150) mm: slit debug
   baked 2 slit cutter brep(s) on DEV_slit_cutters
   baked 2 slit wall cross-section curve(s) on DEV_slit_cross_sections
   baked 2 slit panel brep(s) on DEV_slit_panels
+  preview slot 2 at (+X 180, +Y 150) mm: ramp construction (separate bodies)
+  baked 1 ramp debug set(s) on DEV_ramp_* layers
+  preview slot 3 at (+X 270, +Y 150) mm: ramp union result (final splint_solid)
+  preview slot 4 at (+X 360, +Y 150) mm: splint_oriented (print-ready mesh)
 
 === row 2 at +Y 300mm: ZM1Q_prod.json ===
 running generate_relative_motion_splint (objectID DV02)...
-  preview slot 0 at (+X 0, +Y 300) mm: splint_solid + support rails
-  preview slot 1 at (+X 90, +Y 300) mm: splint_solid
-  preview slot 2 at (+X 180, +Y 300) mm: splint_oriented
-  preview slot 3 at (+X 270, +Y 300) mm: slit debug (splint reference + cutters + panels)
+  preview slot 0 at (+X 0, +Y 300) mm: pre-ramp splint body (chamfer+slit+emboss)
+  preview slot 1 at (+X 90, +Y 300) mm: slit debug
   baked 2 slit cutter brep(s) on DEV_slit_cutters
   baked 2 slit wall cross-section curve(s) on DEV_slit_cross_sections
   baked 2 slit panel brep(s) on DEV_slit_panels
+  preview slot 2 at (+X 180, +Y 300) mm: ramp construction (separate bodies)
+  baked 1 ramp debug set(s) on DEV_ramp_* layers
+  preview slot 3 at (+X 270, +Y 300) mm: ramp union result (final splint_solid)
+  preview slot 4 at (+X 360, +Y 300) mm: splint_oriented (print-ready mesh)
 
 done. report written to /Users/jon/work_3d/splint_work/splint_geo_processor/generators/dev/last_run_report.txt
