@@ -8,7 +8,6 @@ inputs available in /Users/jon/work_3d/splint_work/splint_geo_processor/generato
 
 === row 0 at +Y 0mm: BTR8_3anchor_prod.json ===
 running generate_relative_motion_splint (objectID DV00)...
-PARTIAL RUN for 'BTR8_3anchor_prod.json': MeshExportError: Item 0 mesh failed quality gate: valid=True, closed=False, non_manifold_edges=0
   preview slot 0 at (+X 0, +Y 0) mm: pre-ramp splint body (chamfer+slit+emboss)
   preview slot 1 at (+X 90, +Y 0) mm: slit debug
   baked 3 slit cutter brep(s) on DEV_slit_cutters
@@ -18,7 +17,6 @@ PARTIAL RUN for 'BTR8_3anchor_prod.json': MeshExportError: Item 0 mesh failed qu
   baked 1 ramp debug set(s) on DEV_ramp_* layers
   preview slot 3 at (+X 270, +Y 0) mm: ramp union result (final splint_solid)
   preview slot 4 at (+X 360, +Y 0) mm: splint_oriented (print-ready mesh)
-preview 'splint_oriented': geometry missing (None); skipping bake
 
 === row 1 at +Y 150mm: if_mf_rf_2anchor_20deg.json ===
 running generate_relative_motion_splint (objectID DV01)...

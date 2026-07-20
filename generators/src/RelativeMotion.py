@@ -48,9 +48,9 @@ from TextGun import emboss_text
 
 
 
-import splintmeshes
-reload(splintmeshes)
-from splintmeshes import convert_to_export_meshes, save_job_output
+import SplintMeshes2
+reload(SplintMeshes2)
+from SplintMeshes2 import mesh_brep, inspect_mesh, export_mesh_with_metadata
 
 
 # Elevation angle clamp (degrees). Provisional range pending review with hand therapist Liz.
@@ -2317,17 +2317,11 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
             out.update({"splint_solid": splint_solid,
                         "support_path_ramp_debugs": support_path_ramp_debugs})
 
-        # Mesh the finished solid, then lay it proximal-face-down on the build plate (in prep for
-        # the Support Path Ramp feature, which grows a protuberance off the DISTAL face - that
-        # face must stay upward-facing/unobstructed, so we flip which end sits on the plate).
-        # proximal_profile_plane/distal_profile_plane are simple X-translated copies of the same
-        # centre plane, so BOTH share the identical Plane.Normal direction (~world +X, the same
-        # sign for either end). That Normal literally IS the outward-facing direction of the
-        # DISTAL cap (the +X end of the loft) but is the OPPOSITE of the outward-facing direction
-        # of the PROXIMAL cap (the -X end) - so proximal needs its normal negated before use.
-        # Rotate that outward normal to world -Z, then drop the part so it rests on Z=0.
+        # Mesh the finished solid, then lay it proximal-face-down on the build plate.
         proximal_outward_normal = proximal_profile_plane.Normal * -1.0
-        splint_mesh = convert_to_export_meshes(splint_solid)[0]
+        splint_mesh = mesh_brep(splint_solid)
+        mesh_quality = inspect_mesh(splint_mesh, "final splint")
+        out["mesh_quality"] = mesh_quality
         splint_oriented = splint_mesh.DuplicateMesh()
         splint_oriented.Transform(Transform.Rotation(
             proximal_outward_normal, Vector3d(0.0, 0.0, -1.0), proximal_profile_plane.Origin))
@@ -2335,21 +2329,20 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
         out.update({"splint_mesh": splint_mesh, "splint_oriented": splint_oriented})
 
         # Save the print-ready mesh for the geo processor to pick up (skipped during design sweeps).
-        # Production writes under the job's outbox path/name; dev writes a DEV_-prefixed file.
         if should_save_mesh:
-            saved = save_job_output(splint_oriented, output_dir, root_filename, "3mf",
-                                    custom_metadata={
-                                        "geo_algorithm": geo_algorithm_name,
-                                        "object_id": object_id,
-                                        "is_production": is_production,
-                                        "relative_elevation_angle": raw_data.get(
-                                            "relative_elevation_angle"),
-                                        "radial_band_thickness_mm": radial_band_thickness_mm,
-                                        "longitudinal_band_width_mm": longitudinal_band_width_mm,
-                                    })
-            out["saved"] = saved
-            log("generate_relative_motion_splint: mesh save {0} ({1}/{2}.3mf)".format(
-                "ok" if saved else "FAILED", output_dir, root_filename))
+            saved = export_mesh_with_metadata(
+                splint_oriented, output_dir, root_filename, "3mf",
+                custom_metadata={
+                    "geo_algorithm": geo_algorithm_name,
+                    "object_id": object_id,
+                    "is_production": is_production,
+                    "relative_elevation_angle": raw_data.get("relative_elevation_angle"),
+                    "radial_band_thickness_mm": radial_band_thickness_mm,
+                    "longitudinal_band_width_mm": longitudinal_band_width_mm,
+                })
+            out["saved"] = True
+            log("generate_relative_motion_splint: mesh saved ({0}/{1}.3mf)".format(
+                output_dir, root_filename))
 
         log("generate_relative_motion_splint: pipeline complete (objectID {0})".format(object_id))
     except Exception as exc:
