@@ -98,7 +98,19 @@ def validate_difference_result(result_brep, minuend_brep, subtrahend_brep, inter
     # Volume checks
     result_vol = get_brep_volume(result_brep)
     minuend_vol = get_brep_volume(minuend_brep)
-    
+
+    # Sign check (unconditional - always applies, independent of intersection_vol
+    # availability). Brep.GetVolume() is SIGNED: an inside-out / flipped-normal solid
+    # reports a NEGATIVE volume. A genuine difference result can never be <= 0, so this
+    # catches garbage results even when the intersection_vol ratio check below is
+    # skipped (e.g. when compute_intersection_volume itself failed and volume validation
+    # was disabled upstream - see the "Proceeding with difference (volume validation
+    # disabled)" warning). Without this, a degenerate CreateBooleanDifference call that
+    # returns an inverted copy of the subtrahend can pass every other check (IsValid,
+    # IsSolid, IsManifold, no naked edges) and silently corrupt the result.
+    if result_vol is not None and result_vol <= 0.0:
+        issues.append("NonPositiveVolume={:.3f}".format(result_vol))
+
     if result_vol and minuend_vol:
         # Result should be smaller than minuend (something was subtracted)
         vol_diff = minuend_vol - result_vol

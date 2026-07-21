@@ -1,7 +1,7 @@
 """
 BrepChamfer.py
 Thin wrapper over Rhino's native Brep.CreateFilletEdges with BlendType.Chamfer, the approach
-proven out in dev/harness_relmotion.py (2026-07-10 PROD CANDIDATE): flat bevels on a closed
+proven out in dev/RelativeMotion/harness.py (2026-07-10 PROD CANDIDATE): flat bevels on a closed
 solid, driven by edge indices resolved via BrepEdgeLocator. Uniform distance per call; run the
 wrapper twice (rims, then perimeter) for the two-radius policy.
 

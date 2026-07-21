@@ -8,7 +8,7 @@
             "p1_mid_circ": 67.0,
             "p1_length": 45.0,
             "pip_neighbor_fwd_offset": 0, 
-            "is_slitted": true, 
+            "is_slitted": true 
         },
         {
             "finger_abbr": "mf", 
@@ -17,7 +17,7 @@
             "p1_mid_circ": 68.0,
             "p1_length": 50.0,
             "pip_neighbor_fwd_offset": 5.0, 
-            "is_slitted": false,
+            "is_slitted": false
         },
         {
             "finger_abbr": "rf", 
@@ -26,7 +26,7 @@
             "p1_mid_circ": 62.0,
             "p1_length": 47.0,
             "pip_neighbor_fwd_offset": -10,
-            "is_slitted": false,
+            "is_slitted": false
         },
         {
             "finger_abbr": "sf", 
@@ -35,10 +35,11 @@
             "p1_mid_circ": 59.0,
             "p1_length": 40,
             "pip_neighbor_fwd_offset": -11.0,
-            "is_slitted": true,            
+            "is_slitted": true
         }
     ],
     "all_splint_finger_circ": 148.0,
     "relative_elevation_angle": 20.0, 
-    "longitudinal_band_width_mm": 9.0
+    "longitudinal_band_width_mm": 9.0,
+    "enable_support_path_ramp": true
 }

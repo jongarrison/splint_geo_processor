@@ -69,8 +69,9 @@ _JOIN_TOL = 1e-2
 # Tolerance (mm) for capping the planar loft ends (Phase 6) into a closed solid.
 _CAP_TOL = 1e-2
 
-# Chamfer distances (mm). Harness-validated 2026-07-10 (dev/harness_relmotion.py PROD CANDIDATE):
-# native Brep.CreateFilletEdges + BlendType.Chamfer + RailType.DistanceFromEdge. Uniform per pass.
+# Chamfer distances (mm). Harness-validated 2026-07-10 (dev/RelativeMotion/harness.py PROD
+# CANDIDATE): native Brep.CreateFilletEdges + BlendType.Chamfer + RailType.DistanceFromEdge.
+# Uniform per pass.
 _CHAMFER_RIM_MM = 0.5          # anchor bore rims (both proximal and distal, skin-contact points)
 _CHAMFER_PERIMETER_MM = 0.25   # outer perimeter over support spans (anchor stretches stay sharp)
 
@@ -1961,13 +1962,14 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
     # Band width along the finger axis (patient/config input from the web form; mm).
     longitudinal_band_width_mm = raw_data.get("longitudinal_band_width_mm", 10.0)
 
-    # Support Path Ramp (Phase 7.4, PLANNED feature - see dev-notes/260702_..._splint.md).
-    # Off by default until validated; starting placeholder values derived from existing splint
-    # dimensions rather than new magic numbers (no clinical guidance yet).
-    enable_support_path_ramp = True  # TEMP: True for harness validation, flip back after review
+    # Support Path Ramp (Phase 9 feature - see dev-notes/260702_..._splint.md).
+    # Controlled by the web form's enable_support_path_ramp checkbox (defaults True when not
+    # present in older payloads). Starting placeholder dimension values derived from existing
+    # splint dimensions rather than new magic numbers (no clinical guidance yet).
+    enable_support_path_ramp = raw_data.get("enable_support_path_ramp", False)
     support_path_ramp_thickness = radial_band_thickness_mm
-    support_path_ramp_length = longitudinal_band_width_mm
-    support_path_ramp_arc_radius = support_path_ramp_length * 2.0
+    support_path_ramp_length = longitudinal_band_width_mm * 0.4
+    support_path_ramp_arc_radius = longitudinal_band_width_mm * 0.3
     support_path_ramp_trim_mm = 2.5  # trim off each end of the rail before building ramp profile
 
     # Every intermediate is written into `out` as it is produced, so the GH component can preview
