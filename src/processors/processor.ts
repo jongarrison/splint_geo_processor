@@ -882,7 +882,11 @@ export class Processor {
     // Reuse the debug launch flow: write inbox JSON, launch Rhino, open GH script
     const algoPart = job.algorithmName || 'algorithm';
     const idPart = job.id || `inspect_${Date.now()}`;
+    const objectId = job.objectId || jobIdentifier;
     const baseName = `${algoPart}_${idPart}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+    // Python-only splints (generators/{algorithm}.py exists) run without Grasshopper entirely -
+    // inspect mode just needs to fetch the job data, not launch Rhino/GH for them.
+    const isPythonSplint = fs.existsSync(path.join(this.config.ghScriptsDir, `${algoPart}.py`));
 
     // Clean stale inbox files for this algorithm
     try {
@@ -913,8 +917,13 @@ export class Processor {
     fs.writeFileSync(inboxJson, JSON.stringify(inputPayload, null, 2), 'utf8');
     this.logger.info({ inboxJson, objectId: job.objectId }, 'Inspect: wrote input JSON to inbox');
 
+    // Python-only splints (generators/{algorithm}.py exists) keep their dev-harness inputs
+    // under generators/dev/{algorithm}/inputs/ - capture this job's params there too.
+    if (saveFixture) {
+      this.saveDevHarnessInput(algoPart, objectId, job.inputParameters);
+    }
+
     // Offer to save as test fixture
-    const objectId = job.objectId || jobIdentifier;
     const fixtureName = `${algoPart}_${objectId}`.replace(/[^a-zA-Z0-9._-]/g, '_');
     const fixturesDir = path.resolve('test-fixtures');
     const fixturePath = path.join(fixturesDir, `${fixtureName}.fixture.json`);
@@ -954,6 +963,17 @@ export class Processor {
           this.logger.warn({ error: result.error }, 'Inspect: pipeline failed - no benchmark written');
         }
       }
+    }
+
+    // Python-only splints run without Grasshopper entirely - the job data has been fetched and
+    // saved (inbox JSON, dev harness input, optional fixture); nothing left to do.
+    if (isPythonSplint) {
+      this.logger.info({
+        id: job.id,
+        objectId: job.objectId,
+        algorithm: algoPart,
+      }, 'Inspect: complete - Python-only generator, skipping Grasshopper launch');
+      process.exit(0);
     }
 
     // Resolve GH script path
@@ -1017,6 +1037,51 @@ export class Processor {
       algorithm: algoPart,
     }, 'Inspect: complete - Grasshopper is open for manual inspection');
     process.exit(0);
+  }
+
+  /**
+   * If `algorithm` has a Python-only generator script (generators/{algorithm}.py), write the
+   * job's raw params directly to generators/dev/{algorithm}/inputs/{objectId}.json - the exact
+   * shape the dev harness (generators/dev/{algorithm}/harness.py) reads (a bare raw_data
+   * payload, not wrapped in {id, algorithm, params}). No-op if the splint has no .py generator
+   * yet (GH-only splints have no dev/ harness input folder convention).
+   *
+   * `rawParams` is exactly job.inputParameters from the server: a JSON-ENCODED STRING (bespoke
+   * forms POST a nested object; splint_factory stores/returns it as a string - see
+   * dev-notes/260702_Dev_Process_RelativeMotion_splint.md). Bespoke-form payloads also wrap the
+   * actual raw_data under a single top-level key (e.g. RelativeMotion's Python loader reads
+   * job_data["relative_motion_data"]). That wrapper key is chosen per-splint by whoever wrote
+   * its form/loader, so we unwrap generically here: parse the string, and if the result has
+   * exactly one top-level key holding an object, use that inner object - matching what the dev
+   * harness inputs actually contain (see generators/dev/RelativeMotion/inputs/*.json).
+   */
+  private saveDevHarnessInput(algorithm: string, objectId: string, rawParams: any) {
+    const pyScriptPath = path.join(this.config.ghScriptsDir, `${algorithm}.py`);
+    if (!fs.existsSync(pyScriptPath)) {
+      return;
+    }
+
+    let params: any = rawParams;
+    if (typeof params === 'string') {
+      try {
+        params = JSON.parse(params);
+      } catch (err: any) {
+        this.logger.warn({ error: err?.message }, 'Inspect: params was not valid JSON - saving raw string');
+      }
+    }
+    if (params && typeof params === 'object' && !Array.isArray(params)) {
+      const keys = Object.keys(params);
+      if (keys.length === 1 && params[keys[0]] && typeof params[keys[0]] === 'object') {
+        params = params[keys[0]];
+      }
+    }
+
+    const devInputsDir = path.join(this.config.ghScriptsDir, 'dev', algorithm, 'inputs');
+    fs.mkdirSync(devInputsDir, { recursive: true });
+    const safeName = String(objectId).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const devInputPath = path.join(devInputsDir, `${safeName}.json`);
+    fs.writeFileSync(devInputPath, JSON.stringify(params, null, 2), 'utf8');
+    this.logger.info({ devInputPath }, 'Inspect: saved dev harness input');
   }
 
   /**

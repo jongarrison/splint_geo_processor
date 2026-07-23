@@ -37,7 +37,8 @@ INPUT_FILES = [
     # "ASSA_20.json",
     # "XASA_ZM1Q_prod.json",
     # "ASSA_2QY6.json",
-    "2QY6_prod_exact.json",
+    # "2QY6_prod_exact.json",
+    "MX2E.json"
 ]
 
 import sys

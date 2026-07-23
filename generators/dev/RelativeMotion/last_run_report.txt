@@ -1,23 +1,24 @@
 === RelativeMotion dev harness ===
-inputs available in /Users/jon/work_3d/splint_work/splint_geo_processor/generators/dev/inputs:
-  - 2QY6_prod_exact.json  <== running
+inputs available in /Users/jon/work_3d/splint_work/splint_geo_processor/generators/dev/RelativeMotion/inputs:
+  - 2QY6_prod_exact.json
   - AASA_20.json
   - ASAA_BTR8_prod.json
   - ASAX_20deg.json
   - ASSA_20.json
   - ASSA_2QY6.json
+  - MX2E.json  <== running
   - XASA_ZM1Q_prod.json
 
-=== row 0 at +Y 0mm: 2QY6_prod_exact.json ===
+=== row 0 at +Y 0mm: MX2E.json ===
 running generate_relative_motion_splint (objectID DV00)...
   preview slot 0 at (+X 0, +Y 0) mm: pre-ramp splint body (chamfer+slit+emboss)
   preview slot 1 at (+X 90, +Y 0) mm: slit debug
-  baked 1 slit cutter brep(s) on DEV_slit_cutters
-  baked 1 slit wall cross-section curve(s) on DEV_slit_cross_sections
-  baked 1 slit panel brep(s) on DEV_slit_panels
+  baked 2 slit cutter brep(s) on DEV_slit_cutters
+  baked 2 slit wall cross-section curve(s) on DEV_slit_cross_sections
+  baked 2 slit panel brep(s) on DEV_slit_panels
   preview slot 2 at (+X 180, +Y 0) mm: ramp construction (separate bodies)
   baked 1 ramp debug set(s) on DEV_ramp_* layers
   preview slot 3 at (+X 270, +Y 0) mm: ramp union result (final splint_solid)
   preview slot 4 at (+X 360, +Y 0) mm: splint_oriented (print-ready mesh)
 
-done. report written to /Users/jon/work_3d/splint_work/splint_geo_processor/generators/dev/last_run_report.txt
+done. report written to /Users/jon/work_3d/splint_work/splint_geo_processor/generators/dev/RelativeMotion/last_run_report.txt

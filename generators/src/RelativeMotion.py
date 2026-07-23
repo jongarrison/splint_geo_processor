@@ -58,7 +58,7 @@ MIN_ELEVATION_ANGLE = -120.0
 MAX_ELEVATION_ANGLE = 45.0
 
 # Total angular width (deg) of a supported finger's preserved support arc. Provisional.
-DEFAULT_SUPPORT_ARC_DEG = 120.0
+DEFAULT_SUPPORT_ARC_DEG = 60.0 #120
 
 # Tolerance (document units, mm) for plane/curve intersection and trim operations.
 _INTERSECT_TOL = 1e-6
@@ -1929,7 +1929,7 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
     """
     # --- Tuning coefficients (design constants) -------------------------------------------
     support_prong_arc_deg = 55.0            # END-support cradle prong arc width (wider contact)
-    support_arc_deg = 45.0                  # MID-support arc width
+    support_arc_deg = 40.0                  # MID-support arc width
 
     radial_band_thickness_mm = 1.65
     single_sided_support_thickness_mm = radial_band_thickness_mm * 1.5
