@@ -1,10 +1,12 @@
-"""Locate the Brep edges that correspond to a known construction curve.
+"""Locate the Brep edges and faces that correspond to known construction geometry.
 
 The native Rhino fillet/chamfer methods (Brep.CreateFilletEdges,
 Brep.CreateFilletEdgesVariableRadius, etc.) all take EDGE INDICES into brep.Edges. But what we
 usually own during splint construction are the CURVES we built the solid from (bore rims, walk
 segments, offset rails, etc.). This module is the bridge: given a construction curve, find the
-brep edge(s) whose geometry coincides with it.
+brep edge(s) whose geometry coincides with it - and, for callers rebuilding a face in place (see
+find_planar_face_by_plane below), the brep FACE whose planar surface coincides with a known
+plane.
 
 Strategy (fast-then-strict):
     1. Midpoint filter: for each brep edge, compute distance from its midpoint to the target
@@ -291,4 +293,91 @@ def nearest_containing_edge(brep, target_curve):
         worst = max(gap_s, gap_m, gap_e)
         if best is None or worst < best[1]:
             best = (i, worst, gap_s, gap_m, gap_e)
+    return best
+
+
+class FaceMatch(object):
+    """The single brep face whose planar surface coincides with a target plane.
+
+    Attributes:
+        face_index: index into brep.Faces.
+        gap: distance (mm) from the target plane's origin to the matched face's own fitted
+            plane origin - logged for diagnostics. Matching itself is planarity + plane
+            coincidence only; it does NOT confirm any particular curve lies within the face's
+            trimmed region (see the module-level note on find_planar_face_by_plane).
+    """
+    __slots__ = ("face_index", "gap")
+
+    def __init__(self, face_index, gap):
+        self.face_index = face_index
+        self.gap = gap
+
+    def __repr__(self):
+        return "FaceMatch(face_index={0}, gap={1:.4f}mm)".format(self.face_index, self.gap)
+
+
+def find_planar_face_by_plane(brep, plane, point_tol=DEFAULT_POINT_TOL_MM):
+    """Locate the single brep face whose surface is planar and coincides with `plane`.
+
+    Companion to find_edges_for_curve/find_edge_containing_curve above, but answers "which FACE
+    is this" instead of "which EDGE is this". Useful when a caller already knows a target plane
+    analytically (e.g. SupportPathRamp.py fits a plane to its own planar ramp_profile curve,
+    which by construction is coplanar with the splint's flat distal-cap face) rather than having
+    to search for it.
+
+    Matching is by planarity + plane coincidence ONLY (origin distance and normal alignment,
+    normal sign-agnostic since a face's orientation can be flipped relative to the caller's
+    plane) - this does NOT confirm that any particular curve or point lies within the face's
+    TRIMMED region, only that the face's underlying (infinite) plane matches. Callers that also
+    need "does my curve/points actually land inside this face's boundary" should follow up per
+    point with BrepFace.ClosestPoint(pt, out u, out v) + BrepFace.IsPointOnFace(u, v).
+
+    Args:
+        brep: rg.Brep to search.
+        plane: rg.Plane to match each planar face's fitted plane against.
+        point_tol: max allowed origin-to-plane distance (mm), and the tolerance passed to
+            BrepFace.IsPlanar / TryGetPlane.
+
+    Returns:
+        FaceMatch on exactly one match, or None if zero or more than one face matches within
+        tolerance. An ambiguous (>1) match is a construction problem worth surfacing rather than
+        silently guessing which one is right - use nearest_planar_face to diagnose either case.
+    """
+    candidates = []
+    for i in range(brep.Faces.Count):
+        face = brep.Faces[i]
+        if not face.IsPlanar(point_tol):
+            continue
+        ok, face_plane = face.TryGetPlane(point_tol)
+        if not ok:
+            continue
+        origin_gap = abs(plane.DistanceTo(face_plane.Origin))
+        normal_alignment = abs(rg.Vector3d.Multiply(plane.Normal, face_plane.Normal))
+        if origin_gap > point_tol or normal_alignment < 0.999:
+            continue
+        candidates.append(FaceMatch(i, origin_gap))
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
+
+
+def nearest_planar_face(brep, plane):
+    """Diagnostic helper for find_planar_face_by_plane failures: return
+    (face_index, origin_gap_mm, normal_alignment) for the PLANAR face whose fitted plane is
+    closest to `plane`, or None if the brep has no planar faces at all. Explains a 'no match'
+    failure - is the nearest planar face off by 0.2mm (bump tolerance) or 40mm / nearly
+    perpendicular (wrong brep, or the curve used to derive `plane` was never actually built
+    coplanar with any face)?"""
+    best = None  # (face_index, origin_gap, normal_alignment)
+    for i in range(brep.Faces.Count):
+        face = brep.Faces[i]
+        if not face.IsPlanar(DEFAULT_POINT_TOL_MM):
+            continue
+        ok, face_plane = face.TryGetPlane(DEFAULT_POINT_TOL_MM)
+        if not ok:
+            continue
+        origin_gap = abs(plane.DistanceTo(face_plane.Origin))
+        normal_alignment = abs(rg.Vector3d.Multiply(plane.Normal, face_plane.Normal))
+        if best is None or origin_gap < best[1]:
+            best = (i, origin_gap, normal_alignment)
     return best

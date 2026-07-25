@@ -4,6 +4,7 @@
   "all_splint_finger_circ": 148.0,
   "relative_elevation_angle": 20.0,
   "longitudinal_band_width_mm": 9.0,
+  "enable_support_path_ramp": true,
   "finger_data": [
     {
       "finger_abbr": "if",

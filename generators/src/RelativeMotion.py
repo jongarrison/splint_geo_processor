@@ -38,6 +38,9 @@ import RingSlit
 reload(RingSlit)
 from RingSlit import cut_ring_slit, RingSlitError
 
+import BrepUnion2
+reload(BrepUnion2)
+
 import SupportPathRamp
 reload(SupportPathRamp)
 from SupportPathRamp import build_support_path_ramp, SupportPathRampError
@@ -56,9 +59,6 @@ from SplintMeshes2 import mesh_brep, inspect_mesh, export_mesh_with_metadata
 # Elevation angle clamp (degrees). Provisional range pending review with hand therapist Liz.
 MIN_ELEVATION_ANGLE = -120.0
 MAX_ELEVATION_ANGLE = 45.0
-
-# Total angular width (deg) of a supported finger's preserved support arc. Provisional.
-DEFAULT_SUPPORT_ARC_DEG = 60.0 #120
 
 # Tolerance (document units, mm) for plane/curve intersection and trim operations.
 _INTERSECT_TOL = 1e-6
@@ -394,7 +394,7 @@ def _orient_start_plus_y(curve, center, h):
 
 def extract_finger_cross_sections(raw_data, profile_plane, p1_cylinders_oriented,
                                   p1_lines_oriented, support_prong_arc_deg,
-                                  support_arc_deg=DEFAULT_SUPPORT_ARC_DEG):
+                                  support_arc_deg):
     """Intersect the profile plane with each oriented finger cylinder and keep the full
     section for anchors or a support arc for supported fingers.
 
@@ -695,6 +695,21 @@ def _build_cradle_curve(arc, anchor_center, plane, thickness):
     return cradle
 
 
+def _end_support_neighbor_anchor_center(i, exterior_anchor_rings):
+    """Centre of the anchor ring adjacent to end-support finger i - the only anchor its cradle
+    bridges to (see _is_end_support / build_end_support_cradles). Returns None if that
+    neighbor's ring wasn't built. Shared by build_end_support_cradles (near/free arc-endpoint
+    classification) and Phase 9's Support Path Ramp (per-end rail trim classification), so both
+    use the exact same "which anchor is this cantilever prong rooted against" definition."""
+    neighbor = i + 1 if i == 0 else i - 1
+    if neighbor < 0 or neighbor >= len(exterior_anchor_rings):
+        return None
+    neighbor_ring = exterior_anchor_rings[neighbor]
+    if neighbor_ring is None:
+        return None
+    return neighbor_ring.GetBoundingBox(True).Center
+
+
 def build_end_support_cradles(raw_data, profile_plane, preserved_intersection_curves,
                               exterior_anchor_rings, single_sided_support_thickness_mm):
     """Build a closed-end cradle for each end-support finger (Path A companion for supports).
@@ -716,14 +731,12 @@ def build_end_support_cradles(raw_data, profile_plane, preserved_intersection_cu
         if arc is None or not _is_end_support(included, i):
             cradles.append(None)
             continue
-        neighbor = i + 1 if i == 0 else i - 1
-        neighbor_ring = exterior_anchor_rings[neighbor]
-        if neighbor_ring is None:
+        anchor_center = _end_support_neighbor_anchor_center(i, exterior_anchor_rings)
+        if anchor_center is None:
             log("build_end_support_cradles: finger {0} has no adjacent anchor ring; "
                 "skipping cradle".format(i))
             cradles.append(None)
             continue
-        anchor_center = neighbor_ring.GetBoundingBox(True).Center
         cradle = _build_cradle_curve(arc, anchor_center, profile_plane,
                                      single_sided_support_thickness_mm)
         if cradle is None:
@@ -768,8 +781,15 @@ def plan_perimeter_walk(raw_data, exterior_ring_pos_hemispheres,
             segments.append({"kind": "anchor_support_side", "finger_index": i,
                              "curve": support_hemis[i]})
         elif end_support_cradles[i] is not None:
+            # support_touch_curve is the plain pre-cap/return arc (same object used to build the
+            # cradle in build_end_support_cradles) - the cradle's 'curve' is the full there-and-
+            # back U-shape (arc + tip cap + return edge) welded into one perimeter piece, but
+            # anything rooting a feature on just the support-touching side (extract_support_path_
+            # rails, e.g. the Support Path Ramp) must use this instead, or it grabs the return
+            # side and tip cap too.
             segments.append({"kind": "end_support_cradle", "finger_index": i,
-                             "curve": end_support_cradles[i]})
+                             "curve": end_support_cradles[i],
+                             "support_touch_curve": preserved_intersection_curves[i]})
         else:
             segments.append({"kind": "support_arc", "finger_index": i,
                              "curve": preserved_intersection_curves[i]})
@@ -1313,22 +1333,31 @@ def _build_perimeter_chain(walk_segments, work, bridge_after, included):
     stretches of the outer edge (support arcs, cradles, their connecting bridges, and the return
     spine) while leaving the anchor-ring stretches untouched. Curves are the final trimmed pieces,
     so the chain lies exactly on the finished perimeter.
+
+    Slot entries also carry 'kind' and 'finger_index' (bridge entries carry None for both) - this
+    lets a later pass (extract_support_path_rails) recognise which finger an 'end_support_cradle'
+    slot belongs to, and in particular whether it's a cantilevered end-support (finger_index 0 or
+    len(included)-1, per _is_end_support) needing asymmetric ramp-rail trim.
     """
     chain = []
     count = len(walk_segments)
     for k in range(count):
         seg = walk_segments[k]
         if work[k] is not None:
-            chain.append({"role": _slot_role(seg["kind"]), "curve": work[k]})
+            chain.append({"role": _slot_role(seg["kind"]), "curve": work[k],
+                          "support_touch_curve": seg.get("support_touch_curve"),
+                          "kind": seg["kind"], "finger_index": seg["finger_index"]})
         if bridge_after[k] is not None:
             nxt = walk_segments[(k + 1) % count]
             role = _bridge_role(seg["kind"], nxt["kind"], seg["finger_index"],
                                 nxt["finger_index"], included)
-            chain.append({"role": role, "curve": bridge_after[k]})
+            chain.append({"role": role, "curve": bridge_after[k], "support_touch_curve": None,
+                          "kind": None, "finger_index": None})
     return chain
 
 
-def _extract_rails_by_role(perimeter_chain, roles, tolerance=None):
+def _extract_rails_by_role(perimeter_chain, roles, tolerance=None,
+                            use_support_touch_curve=False, include_cantilever_info=False):
     """Shared implementation for extract_support_rails / extract_support_path_rails: join each
     maximal contiguous run of chain entries whose role is in `roles` into one open rail curve.
 
@@ -1340,8 +1369,26 @@ def _extract_rails_by_role(perimeter_chain, roles, tolerance=None):
         spine - used by features that must root specifically on the support arc (e.g. the
         Support Path Ramp, Phase 7.4).
 
+    use_support_touch_curve: if True, substitute each entry's 'support_touch_curve' (when set)
+    for its 'curve' when assembling runs. End-support cradle entries carry the plain pre-cap
+    support arc here instead of the welded cradle's full there-and-back loop (arc + tip cap +
+    return edge) - callers that must root on just the support-touching side (e.g.
+    extract_support_path_rails) need this; extract_support_rails does not, since chamfering
+    legitimately needs the whole boundary edge.
+
+    include_cantilever_info: if True, return {"curve", "cantilever_finger_index"} dicts instead
+    of plain Curves. A run's cantilever_finger_index is the finger_index of any chain entry in
+    that run with kind == "end_support_cradle" (None if the run contains no such entry). Every
+    'end_support_cradle' entry is BY CONSTRUCTION a cantilevered end-support finger (plan_
+    perimeter_walk only assigns that kind via _is_end_support), so no separate finger-index
+    range check is needed here. Used by extract_support_path_rails so Phase 9's Support Path
+    Ramp can tell which rail end is the splint's own free/cantilever tip (no adjacent anchor)
+    vs. the anchor-bridged near end, and trim each end independently.
+
     Anchor-ring pieces always delimit runs and are excluded.
-    Returns a list of open Curves (empty if there is no matching geometry).
+    Returns a list of open Curves, or (if include_cantilever_info) a list of
+    {"curve": Curve, "cantilever_finger_index": int or None} dicts. Empty if no matching
+    geometry.
     """
     tol = tolerance or _JOIN_TOL
     n = len(perimeter_chain)
@@ -1357,22 +1404,33 @@ def _extract_rails_by_role(perimeter_chain, roles, tolerance=None):
 
     runs = []
     run = []
+    run_cantilever_idx = None
     for entry in ordered:
         if entry["role"] in roles:
-            if entry["curve"] is not None:
-                run.append(entry["curve"])
+            piece = entry["curve"]
+            if use_support_touch_curve and entry.get("support_touch_curve") is not None:
+                piece = entry["support_touch_curve"]
+            if entry.get("kind") == "end_support_cradle":
+                run_cantilever_idx = entry.get("finger_index")
+            if piece is not None:
+                run.append(piece)
         elif run:
-            runs.append(run)
+            runs.append((run, run_cantilever_idx))
             run = []
+            run_cantilever_idx = None
     if run:
-        runs.append(run)
+        runs.append((run, run_cantilever_idx))
 
     rails = []
-    for pieces in runs:
+    for pieces, cantilever_idx in runs:
         joined = Curve.JoinCurves(pieces, tol)
         if joined is not None and len(joined) > 0:
             # A clean run joins into one open curve; if it fragments, keep the longest piece.
-            rails.append(max(joined, key=lambda c: c.GetLength()))
+            rail_curve = max(joined, key=lambda c: c.GetLength())
+            if include_cantilever_info:
+                rails.append({"curve": rail_curve, "cantilever_finger_index": cantilever_idx})
+            else:
+                rails.append(rail_curve)
     return rails
 
 
@@ -1396,9 +1454,20 @@ def extract_support_path_rails(perimeter_chain, tolerance=None):
     perimeter. Use this (not extract_support_rails) for features that must root specifically
     on the support-arc side, e.g. the Support Path Ramp (Phase 7.4).
 
-    Returns a list of open Curves (empty if there is no support-arc-side geometry).
+    For end-support cradles, uses the plain pre-cap support arc (support_touch_curve), not the
+    cradle's full welded there-and-back loop (arc + tip cap + return edge) - otherwise the rail
+    wraps around the free end and into the return side, which is not the true support-touching
+    boundary and breaks features (like the ramp) that assume a simple one-sided rail.
+
+    Returns a list of {"curve": Curve, "cantilever_finger_index": int or None} dicts (empty if
+    there is no support-arc-side geometry). cantilever_finger_index is set when the rail
+    includes a cantilevered end-support cradle (a support finger at the very start/end of the
+    included run, with an anchor on only one side) - callers use it to trim that rail's
+    free/tip end differently from its anchor-bridged end (see build_support_path_ramp's
+    trim_start_mm/trim_end_mm).
     """
-    return _extract_rails_by_role(perimeter_chain, (_ROLE_SUPPORT_PATH,), tolerance)
+    return _extract_rails_by_role(perimeter_chain, (_ROLE_SUPPORT_PATH,), tolerance,
+                                  use_support_touch_curve=True, include_cantilever_info=True)
 
 
 def _build_perimeter_chamfer_handles(edge, rail, target_mm,
@@ -1932,6 +2001,13 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
     support_arc_deg = 40.0                  # MID-support arc width
 
     radial_band_thickness_mm = 1.65
+    # 2026-07-24: briefly bumped 1.5x -> 3.0x while diagnosing AASX_20.json, on the theory that
+    # the ramp's end-cap bulge was colliding with the cradle's tip cap. REVERTED: the actual bug
+    # was that extract_support_path_rails was rooting the ramp on the cradle's FULL there-and-back
+    # loop (arc + tip cap + return edge) instead of just the support-touching arc - see
+    # support_touch_curve in plan_perimeter_walk/_build_perimeter_chain/_extract_rails_by_role.
+    # With the ramp correctly rooted on just the touching arc, it never gets near the tip cap, so
+    # the thickness bump was solving a symptom, not the cause.
     single_sided_support_thickness_mm = radial_band_thickness_mm * 1.5
     min_center_gap = radial_band_thickness_mm
     anchor_bridge_radius_mm = 3.0
@@ -2290,23 +2366,52 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
             ramp_bend_z_sign = -1.0 if clamped_elevation >= 0 else 1.0
 
             h_axis = _plane_horizontal_axis(distal_profile_plane)
-            rails_to_ramp = [r for r in (d_support_path_rails or []) if r is not None]
+            rails_to_ramp = [r for r in (d_support_path_rails or [])
+                             if r is not None and r.get("curve") is not None]
             log("Phase 9: {0} distal support-path rail(s), ramp thickness={1:.2f}mm "
                 "length={2:.2f}mm arc_radius={3:.2f}mm".format(
                     len(rails_to_ramp), support_path_ramp_thickness, support_path_ramp_length,
                     support_path_ramp_arc_radius))
             ramp_successes = 0
             support_path_ramp_debugs = []
-            for ri, rail in enumerate(rails_to_ramp):
-                oriented_rail = rail.DuplicateCurve()
+            for ri, rail_info in enumerate(rails_to_ramp):
+                oriented_rail = rail_info["curve"].DuplicateCurve()
                 _orient_start_plus_y(oriented_rail, distal_profile_plane.Origin, h_axis)
+
+                # Default: trim both ends the same (normal mid-splint rail, flanked by an
+                # anchor-bridge corner on each side). A cantilevered end-support rail (this
+                # finger's cradle has no anchor beyond one end - it's the splint's own tip) is
+                # different: that far end isn't a tight anchor-bridge corner at all, so trimming
+                # it the same as the near end just wastes ramp footprint for no clearance
+                # benefit. Detect it via cantilever_finger_index (set by extract_support_path_
+                # rails whenever the rail includes an end_support_cradle chain entry - which by
+                # construction is always a true end-support finger, see _is_end_support) and
+                # zero the trim on whichever physical end is farther from the one anchor this
+                # cradle is rooted against (the near end stays trimmed as normal).
+                trim_start_mm = support_path_ramp_trim_mm
+                trim_end_mm = support_path_ramp_trim_mm
+                cantilever_finger = rail_info.get("cantilever_finger_index")
+                if cantilever_finger is not None:
+                    anchor_center = _end_support_neighbor_anchor_center(cantilever_finger, d_rings)
+                    if anchor_center is not None:
+                        d_start = oriented_rail.PointAtStart.DistanceTo(anchor_center)
+                        d_end = oriented_rail.PointAtEnd.DistanceTo(anchor_center)
+                        if d_start >= d_end:
+                            trim_start_mm = 0.0
+                        else:
+                            trim_end_mm = 0.0
+                        log("Phase 9: rail {0} is a cantilevered end-support (finger {1}); "
+                            "free-end trim set to 0mm (rail's {2})".format(
+                                ri, cantilever_finger,
+                                "start" if trim_start_mm == 0.0 else "end"))
+
                 ramp_debug = {}
                 try:
                     splint_solid = build_support_path_ramp(
                         splint_solid, oriented_rail, ramp_start_tangent,
                         support_path_ramp_thickness, support_path_ramp_length,
                         support_path_ramp_arc_radius, bend_z_sign=ramp_bend_z_sign,
-                        rail_trim_mm=support_path_ramp_trim_mm,
+                        trim_start_mm=trim_start_mm, trim_end_mm=trim_end_mm,
                         debug=ramp_debug)
                     log("Phase 9: rail {0} ramp OK".format(ri))
                     ramp_successes += 1

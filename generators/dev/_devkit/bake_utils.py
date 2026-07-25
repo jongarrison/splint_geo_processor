@@ -7,6 +7,7 @@ algorithm - splint-specific logic (input list, calling the algorithm, which debu
 stays in the per-splint harness.py.
 """
 
+import Rhino
 import scriptcontext as sc
 import rhinoscriptsyntax as rs
 import Rhino.Geometry as rg
@@ -37,10 +38,15 @@ def ensure_layer(name, color):
 
 def clear_doc():
     """Wipe every baked object so each run starts from a clean doc. Only touches real document
-    objects (Grasshopper preview geometry is not a doc object, so live GH work is untouched)."""
+    objects (Grasshopper preview geometry is not a doc object, so live GH work is untouched).
+    Also clears Rhino's command history window (each run's log lines otherwise pile up behind
+    old runs') and redraws the viewport immediately so the clear is visible right away rather
+    than waiting for the harness's final Redraw() call at the end of a (possibly long) run."""
     objs = rs.AllObjects()
     if objs:
         rs.DeleteObjects(objs)
+    Rhino.RhinoApp.ClearCommandHistoryWindow()
+    sc.doc.Views.Redraw()
 
 
 def _bake_one(geom, layer, offset=None):

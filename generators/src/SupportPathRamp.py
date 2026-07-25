@@ -21,11 +21,20 @@ Construction summary (see cited dev-notes for the worked-out math):
      is derived via Gram-Schmidt from start_tangent and world Z, so this works whether or not
      start_tangent happens to be perpendicular to world Z (true whenever the caller's
      elevation angle is nonzero).
-  3. Brep.CreateFromSweep(ramp_rail, ramp_profile) -> an open tube; CapPlanarHoles closes it
-     into a solid. Nudge that solid by a tiny distance opposite start_tangent (into the
-     splint body) so its flush starting face isn't exactly coplanar with the splint's own
-     face - coincident faces are a classic boolean-union failure mode - then boolean-union
-     it in via BrepUnion.robust_brep_union.
+  3. ramp_profile is planar by construction, and (per the dev-notes derivation) exactly
+     coplanar with the splint's flat distal-cap face - rail_bottom's -Z shift IS that face's
+     own plane's in-plane axis. Crucially, rail_top itself is not just coplanar but literally
+     ON that face's own outer boundary edge (the support rail IS a piece of the splint's
+     perimeter), so grafting the ramp in is a NOTCH splice into the face's boundary, not a
+     hole punched in its interior: the face's outer loop is split where rail_top touches it,
+     that segment is discarded, and the "U" remainder of ramp_profile (cap_end + rail_bottom +
+     cap_start) is spliced in instead. Sample points along ramp_rail to loft translated copies
+     of ramp_profile into an open duct (capped only at the FAR end; the near end/mouth stays
+     an exact duplicate of ramp_profile), then BrepUnion2.graft_open_brep_into_face rebuilds
+     the cap face with the spliced boundary and Brep.JoinBreps zippers the known-coincident
+     naked edges together - a topological stitch, not a boolean regularization, which
+     sidesteps the coincident-face / insufficient-overlap failure modes that occasionally
+     trip up general boolean union.
 
 Failure model: raises SupportPathRampError on any problem. Debug observability follows the
 RingSlit.py out-parameter pattern: pass debug={} to receive every intermediate construction
@@ -36,23 +45,23 @@ import math
 import Rhino
 import Rhino.Geometry as rg
 from splintcommon import log
-from BrepUnion2 import robust_brep_union, BrepUnionError
+from BrepUnion2 import graft_open_brep_into_face, BrepUnionError
+from BrepEdgeLocator import find_planar_face_by_plane, nearest_planar_face
+
+# Minimum tolerance for the final brep-level JoinBreps in graft_open_brep_into_face. By Phase 9,
+# splint_solid's cap face boundary near rail_top has already been reshaped a few microns by
+# Phase 7.5's variable-radius perimeter chamfer (RelativeMotion.py), so the actual current edge
+# no longer matches the pristine rail_top/rail_bottom curves to document tolerance - see the
+# call site below for the full explanation.
+_GRAFT_JOIN_TOL_MM = 0.05
 
 
 class SupportPathRampError(Exception):
-    """Raised when the support-path-ramp construction or union fails cleanly for any reason.
+    """Raised when the support-path-ramp construction or graft fails cleanly for any reason.
     No debug payload is attached; construction geometry is exposed via the optional `debug`
     dict parameter to build_support_path_ramp, which survives whether the call succeeds or
     raises."""
     pass
-
-
-# Nudge distance (mm) the swept ramp solid is shifted opposite its own starting tangent before
-# unioning, so its flush starting face never sits exactly coplanar with the splint's distal
-# face - coincident faces are a classic boolean-union failure mode. 10 microns: far below
-# print resolution, comfortably above float noise (matches RingSlit._INTERSECTION_JOIN_TOL_MM's
-# reasoning).
-_DEFAULT_UNION_EPSILON_MM = 0.1
 
 
 def _dput(debug, key, value):
@@ -65,9 +74,9 @@ def _dput(debug, key, value):
 
 def build_support_path_ramp(splint_solid, support_rail, start_tangent,
                             ramp_thickness, ramp_length, ramp_arc_radius,
-                            bend_z_sign=-1.0, rail_trim_mm=2.5,
-                            tolerance=None, union_epsilon_mm=None, debug=None):
-    """Grow a ramp off one end of support_rail and union it into splint_solid.
+                            bend_z_sign=-1.0, trim_start_mm=2.5, trim_end_mm=2.5,
+                            tolerance=None, debug=None):
+    """Grow a ramp off one end of support_rail and graft it into splint_solid's distal cap face.
 
     Args:
         splint_solid (rg.Brep): the solid to attach the ramp to. Not mutated; a new Brep is
@@ -89,26 +98,30 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
             toward +Z (dorsal). Caller picks the sign from relative_elevation_angle (-1.0 when
             angle >= 0, +1.0 when negative), matching the codebase's usual elevation-sign
             convention (e.g. RingSlit's interior-anchor slit side, Phase 4/5's support side).
-        rail_trim_mm (float, mm): distance to trim off EACH end of support_rail before
-            building the ramp profile. Keeps the ramp's footprint inboard of the rail's
-            endpoints (which sit at anchor-ring intersections), avoiding geometry that would
-            collide with the ring walls. Default 2.5mm.
-        tolerance (float or None): document unit tolerance for joins / sweep / union. None
+        trim_start_mm (float, mm): distance to trim off support_rail.PointAtStart before
+            building the ramp profile. Keeps the ramp's footprint inboard of that endpoint
+            (which normally sits at an anchor-ring intersection), avoiding geometry that would
+            collide with the ring wall. Default 2.5mm.
+        trim_end_mm (float, mm): same as trim_start_mm but for support_rail.PointAtEnd.
+            trim_start_mm and trim_end_mm are independent so a caller can pass 0 on whichever
+            end is a cantilevered end-support rail's free/tip end (the splint's own edge, with
+            no adjacent anchor to clear) while keeping the normal margin on the other,
+            anchor-bridged end - see RelativeMotion.py's Phase 9 call site.
+        tolerance (float or None): document unit tolerance for joins / loft / graft. None
             (default) uses RhinoDoc.ModelAbsoluteTolerance.
-        union_epsilon_mm (float or None): nudge distance (see module docstring). None uses
-            _DEFAULT_UNION_EPSILON_MM.
         debug (dict or None): optional out-parameter dict populated progressively during
             construction (RingSlit.py-style). Survives a raise - whatever got built before the
             failure is still here to inspect. Keys: "trimmed_rail", "rail_top", "rail_bottom",
-            "cap_start", "cap_end", "ramp_profile", "ramp_rail_plane", "ramp_rail",
-            "ramp_tube" (pre-cap), "ramp_solid" (capped, pre-nudge), "ramp_solid_nudged",
+            "cap_start", "cap_end", "ramp_profile", "ramp_profile_plane", "target_face_index",
+            "ramp_u", "outer_loop_curve", "boundary_long_way", "new_outer_curve",
+            "ramp_rail_plane", "ramp_rail", "ramp_tube" (pre-cap), "far_cap", "open_duct",
             "result_brep" (only on success).
 
     Returns:
-        rg.Brep: splint_solid with the ramp unioned in.
+        rg.Brep: splint_solid with the ramp grafted in.
 
     Raises:
-        SupportPathRampError: any construction or union step fails cleanly.
+        SupportPathRampError: any construction or graft step fails cleanly.
         ValueError: numeric inputs are invalid (non-positive thickness/length/radius).
     """
     if splint_solid is None or not isinstance(splint_solid, rg.Brep):
@@ -131,28 +144,28 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
     tol = tolerance
     if tol is None or tol <= 0.0:
         tol = Rhino.RhinoDoc.ActiveDoc.ModelAbsoluteTolerance
-    epsilon = union_epsilon_mm
-    if epsilon is None or epsilon <= 0.0:
-        epsilon = _DEFAULT_UNION_EPSILON_MM
 
     tangent = rg.Vector3d(start_tangent)
     if not tangent.Unitize():
         raise SupportPathRampError("start_tangent is zero-length; cannot normalise")
 
     # --- Step 1: ramp_profile (closed "stadium" curve) --------------------------------
-    # Trim rail_trim_mm off each end so the ramp footprint sits inboard of the anchor-ring
-    # intersections (the rail's raw endpoints are exactly where it meets the ring edges).
+    # Trim trim_start_mm/trim_end_mm off the rail's respective ends so the ramp footprint sits
+    # inboard of the anchor-ring intersections (the rail's raw endpoints normally sit exactly
+    # where it meets the ring edges) - except on a cantilevered end-support rail's free/tip end,
+    # where the caller passes 0 since there's no adjacent ring to clear there.
     rail_length = support_rail.GetLength()
-    if rail_trim_mm > 0.0 and rail_length > rail_trim_mm * 2.0 + 1.0:
-        ok_s, t_s = support_rail.LengthParameter(rail_trim_mm)
-        ok_e, t_e = support_rail.LengthParameter(rail_length - rail_trim_mm)
+    total_trim = trim_start_mm + trim_end_mm
+    if total_trim > 0.0 and rail_length > total_trim + 1.0:
+        ok_s, t_s = support_rail.LengthParameter(trim_start_mm)
+        ok_e, t_e = support_rail.LengthParameter(rail_length - trim_end_mm)
         if ok_s and ok_e and t_s < t_e:
             trimmed = support_rail.Trim(t_s, t_e)
             if trimmed is not None:
                 support_rail = trimmed
-                log("build_support_path_ramp: trimmed {0:.2f}mm off each end of rail "
-                    "(original {1:.2f}mm -> {2:.2f}mm)".format(
-                        rail_trim_mm, rail_length, support_rail.GetLength()))
+                log("build_support_path_ramp: trimmed {0:.2f}mm off start / {1:.2f}mm off end "
+                    "of rail (original {2:.2f}mm -> {3:.2f}mm)".format(
+                        trim_start_mm, trim_end_mm, rail_length, support_rail.GetLength()))
     _dput(debug, "trimmed_rail", support_rail)
 
     rail_top = support_rail.DuplicateCurve()
@@ -177,6 +190,117 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
             "(got {0} piece(s))".format(n))
     ramp_profile = joined[0]
     _dput(debug, "ramp_profile", ramp_profile)
+
+    # ramp_profile is planar by construction (rail_top lies on the splint's flat distal-cap
+    # face's own boundary edge; rail_bottom is rail_top shifted by a pure world-Z translation,
+    # which is that SAME plane's own in-plane axis - see the module docstring). Fit its plane
+    # directly rather than requiring the caller to pass distal_profile_plane in: this keeps
+    # the function's signature general-purpose (nothing RelativeMotion-specific) while still
+    # letting us find the exact cap face to graft into, by plane match rather than by index
+    # (indices shift across the earlier chamfer/slit/emboss phases).
+    ok_plane, profile_plane = ramp_profile.TryGetPlane(tol)
+    if not ok_plane:
+        raise SupportPathRampError(
+            "ramp_profile is not planar (unexpected - it is built entirely from a world-Z "
+            "shift of a planar rail); cannot locate the splint's cap face to graft into")
+    _dput(debug, "ramp_profile_plane", profile_plane)
+
+    face_match = find_planar_face_by_plane(splint_solid, profile_plane, point_tol=tol)
+    if face_match is None:
+        nearest = nearest_planar_face(splint_solid, profile_plane)
+        raise SupportPathRampError(
+            "could not find a single planar face on splint_solid coplanar with ramp_profile "
+            "(nearest planar face: {0})".format(nearest))
+    _dput(debug, "target_face_index", face_match.face_index)
+    log("build_support_path_ramp: ramp_profile plane matches splint_solid face {0} "
+        "(gap={1:.4f}mm)".format(face_match.face_index, face_match.gap))
+
+    # ramp_profile's rail_top segment sits exactly ON that face's own outer boundary edge (it
+    # IS a piece of the splint's perimeter, not an interior curve) - so grafting the ramp is NOT
+    # a hole punched into the face's interior; it is a NOTCH that bulges the face's own outer
+    # boundary outward. Build the replacement boundary directly: the "U" portion of
+    # ramp_profile (cap_end + rail_bottom + cap_start, i.e. everything except rail_top) splices
+    # in wherever the old boundary ran under rail_top.
+    ramp_u_joined = rg.Curve.JoinCurves([cap_end, rail_bottom, cap_start], tol)
+    if ramp_u_joined is None or len(ramp_u_joined) != 1:
+        raise SupportPathRampError(
+            "failed to join cap_end/rail_bottom/cap_start into the ramp's open 'U' notch "
+            "curve (got {0} piece(s))".format(0 if ramp_u_joined is None else len(ramp_u_joined)))
+    ramp_u = ramp_u_joined[0]
+    _dput(debug, "ramp_u", ramp_u)
+
+    target_face = splint_solid.Faces[face_match.face_index]
+    outer_loop_curve = target_face.OuterLoop.To3dCurve()
+    if outer_loop_curve is None:
+        raise SupportPathRampError(
+            "could not extract face {0}'s outer loop as a 3D curve".format(
+                face_match.face_index))
+    _dput(debug, "outer_loop_curve", outer_loop_curve)
+
+    ok_s, t_s = outer_loop_curve.ClosestPoint(rail_top.PointAtStart)
+    ok_e, t_e = outer_loop_curve.ClosestPoint(rail_top.PointAtEnd)
+    if not ok_s or not ok_e:
+        raise SupportPathRampError(
+            "could not project rail_top's endpoints onto face {0}'s outer boundary".format(
+                face_match.face_index))
+    boundary_pieces = outer_loop_curve.Split([t_s, t_e])
+    if boundary_pieces is None or len(boundary_pieces) != 2:
+        raise SupportPathRampError(
+            "splitting face {0}'s outer boundary at rail_top's endpoints did not yield 2 "
+            "pieces (got {1}) - rail_top may not lie on this face's boundary".format(
+                face_match.face_index, 0 if boundary_pieces is None else len(boundary_pieces)))
+    # Keep the "long way round" piece (the rest of the perimeter); drop the short piece that
+    # coincides with rail_top itself, identified by which midpoint is farther from rail_top's.
+    rail_top_mid = rail_top.PointAtNormalizedLength(0.5)
+    boundary_long_way = max(
+        boundary_pieces, key=lambda p: p.PointAtNormalizedLength(0.5).DistanceTo(rail_top_mid))
+    _dput(debug, "boundary_long_way", boundary_long_way)
+
+    new_outer_joined = rg.Curve.JoinCurves([boundary_long_way, ramp_u], tol)
+    if new_outer_joined is None or len(new_outer_joined) != 1 or not new_outer_joined[0].IsClosed:
+        raise SupportPathRampError(
+            "failed to splice the ramp's 'U' notch into face {0}'s outer boundary into a "
+            "single closed curve (got {1} piece(s))".format(
+                face_match.face_index, 0 if new_outer_joined is None else len(new_outer_joined)))
+    new_outer_curve = new_outer_joined[0]
+    _dput(debug, "new_outer_curve", new_outer_curve)
+
+    # IsClosed above only confirms the splice forms a closed loop - it says nothing about
+    # whether that loop is SIMPLE. For a tight mid-support rail (short arc, flanked closely by
+    # anchor-bridge corners on both sides), the ramp's inward ramp_thickness offset can push
+    # rail_bottom/the end caps back across boundary_long_way, which downstream only surfaced as
+    # a cryptic "CreatePlanarBreps got 2 pieces" failure deep inside graft_open_brep_into_face.
+    # Catch it here instead, right where new_outer_curve was actually built, so the error names
+    # the actual self-crossing location(s).
+    self_ix = rg.Intersect.Intersection.CurveSelf(new_outer_curve, tol)
+    if self_ix is not None and self_ix.Count > 0:
+        locations = ", ".join(
+            "({0:.2f},{1:.2f},{2:.2f})".format(ev.PointA.X, ev.PointA.Y, ev.PointA.Z)
+            for ev in self_ix)
+        # Identify which named sub-curve each crossing point sits on, to pin down exactly which
+        # pieces of the splice are colliding (e.g. the ramp's own end-cap vs. the cradle's tip
+        # turnaround on a narrow end-support prong) - this is what actually let us diagnose the
+        # AASX_20.json cantilevered-prong failure in one shot, so it stays a permanent aid.
+        named_curves = {
+            "rail_top": rail_top, "rail_bottom": rail_bottom, "cap_start": cap_start,
+            "cap_end": cap_end, "boundary_long_way": boundary_long_way}
+        for ev in self_ix:
+            pt = ev.PointA
+            dists = []
+            for name, crv in named_curves.items():
+                ok_cp, t_cp = crv.ClosestPoint(pt)
+                if ok_cp:
+                    dists.append((crv.PointAt(t_cp).DistanceTo(pt), name))
+            dists.sort()
+            log("build_support_path_ramp: DIAG self-ix at ({0:.2f},{1:.2f},{2:.2f}) nearest: "
+                "{3}".format(pt.X, pt.Y, pt.Z,
+                             ", ".join("{0}={1:.3f}mm".format(n, d) for d, n in dists)))
+        raise SupportPathRampError(
+            "new_outer_curve self-intersects at {0} location(s) after splicing the ramp's "
+            "'U' notch into face {1}'s outer boundary: {2} - the ramp footprint (thickness="
+            "{3:.2f}mm) does not fit cleanly on this rail (try a shorter/thinner ramp, or "
+            "larger trim_start_mm/trim_end_mm)".format(
+                self_ix.Count, face_match.face_index, locations, ramp_thickness))
 
     # --- Step 2: ramp_rail (planar arc, tangent-anchored at ramp_profile's start) -----
     start_point = rail_top.PointAtStart
@@ -222,7 +346,7 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
             ramp_arc_radius, ramp_length, math.degrees(sweep_angle_rad),
             start_point.X, start_point.Y, start_point.Z))
 
-    # --- Step 3: extrude along curve, cap, nudge, union ---------------------------------
+    # --- Step 3: loft an OPEN duct (capped only at the far end), then graft it in ------------
     # Use Brep.CreateFromSweep with the simple overload. The profile is a CLOSED planar curve
     # sitting at the rail's start point. Rhino's simple Sweep1 uses the Frenet frame by default
     # which tilts the profile, BUT for a planar closed profile whose plane normal is aligned
@@ -258,65 +382,59 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
         ramp_tube.Append(extra)
     _dput(debug, "ramp_tube", ramp_tube)
 
-    ramp_solid = ramp_tube.CapPlanarHoles(tol)
-    if ramp_solid is None or not ramp_solid.IsSolid:
+    # Cap ONLY the far end (loft_curves[-1]) - the near end stays open. loft_curves[0] is a
+    # zero-offset duplicate of ramp_profile, so open_duct's mouth is geometrically identical
+    # (not just close) to the curve we are about to cut into splint_solid's cap face, which is
+    # exactly what lets the final JoinBreps below zipper them together with no boolean solver.
+    far_cap_pieces = rg.Brep.CreatePlanarBreps([loft_curves[-1]], tol)
+    if far_cap_pieces is None or len(far_cap_pieces) != 1:
+        n = 0 if far_cap_pieces is None else len(far_cap_pieces)
         raise SupportPathRampError(
-            "failed to cap the swept ramp tube into a closed solid (capped={0}, "
-            "IsSolid={1})".format(
-                ramp_solid is not None,
-                ramp_solid.IsSolid if ramp_solid is not None else None))
-    _dput(debug, "ramp_solid", ramp_solid)
-    log("build_support_path_ramp: ramp_solid built and capped, faces={0}".format(
-        ramp_solid.Faces.Count))
+            "failed to build the ramp duct's far-end cap (got {0} planar piece(s))".format(n))
+    far_cap = far_cap_pieces[0]
+    _dput(debug, "far_cap", far_cap)
 
-    # Ensure outward-facing normals - the loft+cap can produce an inward-oriented solid,
-    # which CreateBooleanUnion would treat as a subtraction rather than an addition.
-    if ramp_solid.SolidOrientation == rg.BrepSolidOrientation.Inward:
-        ramp_solid.Flip()
-        log("build_support_path_ramp: flipped ramp_solid normals to outward")
+    duct_pieces = rg.Brep.JoinBreps([ramp_tube, far_cap], tol)
+    if duct_pieces is None or len(duct_pieces) != 1:
+        n = 0 if duct_pieces is None else len(duct_pieces)
+        raise SupportPathRampError(
+            "failed to join the ramp tube and its far cap into a single open duct (got {0} "
+            "piece(s))".format(n))
+    open_duct = duct_pieces[0]
+    _dput(debug, "open_duct", open_duct)
+    log("build_support_path_ramp: open_duct built (far end capped, mouth open), "
+        "faces={0}".format(open_duct.Faces.Count))
 
-    ramp_solid_nudged = ramp_solid.DuplicateBrep()
-    nudge = rg.Vector3d(-tangent.X * epsilon, -tangent.Y * epsilon, -tangent.Z * epsilon)
-    if not ramp_solid_nudged.Translate(nudge):
-        raise SupportPathRampError("failed to nudge ramp_solid before union")
-    _dput(debug, "ramp_solid_nudged", ramp_solid_nudged)
-    log("build_support_path_ramp: nudged {0:.4f}mm opposite start_tangent before union".format(
-        epsilon))
+    # Note: no orientation flip here - open_duct is NOT a closed solid (its mouth is open), so
+    # Brep.SolidOrientation is meaningless on it (always "None"/unknown). The final grafted
+    # result IS a closed solid, and graft_open_brep_into_face flips that if needed.
 
-    # Diagnostic: the nudge above only guards against EXACT face-coincidence - it assumes
-    # substantial volumetric overlap already exists between ramp_solid and splint_solid at
-    # the sweep's start. If that assumption is wrong (e.g. the profile's footprint mostly
-    # lies outside splint_solid to begin with), no nudge will fix it and the union will fail
-    # regardless of epsilon. Log the two bounding boxes' actual separation/overlap so a
-    # "insufficient overlap" union failure can be diagnosed without guessing.
-    bbox_splint = splint_solid.GetBoundingBox(True)
-    bbox_ramp = ramp_solid_nudged.GetBoundingBox(True)
-    bbox_gap_x = max(bbox_splint.Min.X - bbox_ramp.Max.X, bbox_ramp.Min.X - bbox_splint.Max.X, 0.0)
-    bbox_gap_y = max(bbox_splint.Min.Y - bbox_ramp.Max.Y, bbox_ramp.Min.Y - bbox_splint.Max.Y, 0.0)
-    bbox_gap_z = max(bbox_splint.Min.Z - bbox_ramp.Max.Z, bbox_ramp.Min.Z - bbox_splint.Max.Z, 0.0)
-    bbox_overlap = (bbox_gap_x == 0.0 and bbox_gap_y == 0.0 and bbox_gap_z == 0.0)
-    log("build_support_path_ramp: bbox check splint=[{0:.2f}..{1:.2f}, {2:.2f}..{3:.2f}, "
-        "{4:.2f}..{5:.2f}] ramp=[{6:.2f}..{7:.2f}, {8:.2f}..{9:.2f}, {10:.2f}..{11:.2f}] "
-        "bboxes_overlap={12} gap(x,y,z)=({13:.3f},{14:.3f},{15:.3f})".format(
-            bbox_splint.Min.X, bbox_splint.Max.X, bbox_splint.Min.Y, bbox_splint.Max.Y,
-            bbox_splint.Min.Z, bbox_splint.Max.Z,
-            bbox_ramp.Min.X, bbox_ramp.Max.X, bbox_ramp.Min.Y, bbox_ramp.Max.Y,
-            bbox_ramp.Min.Z, bbox_ramp.Max.Z,
-            bbox_overlap, bbox_gap_x, bbox_gap_y, bbox_gap_z))
-
+    # The final brep-level JoinBreps needs a looser tolerance than the rest of this function:
+    # by Phase 9, splint_solid has already been through Phase 7.5's variable-radius perimeter
+    # chamfer, which reshapes the cap face's boundary right where rail_top sits (tapering to a
+    # small but nonzero distance at the rail's own ends - see _CHAMFER_PERIMETER_ENDPOINT_MM in
+    # RelativeMotion.py). So the ACTUAL current boundary edge is offset by a few microns from
+    # the pristine rail_top/rail_bottom curves used to build ramp_profile/new_outer_curve - too
+    # small to matter for the curve-level joins above, but enough to leave a naked edge if
+    # JoinBreps is held to document tolerance. Crucially, this looseness must be confined to
+    # that one JoinBreps call: passing it to the CreatePlanarBreps face rebuild too would risk
+    # misreading a nearby-but-genuinely-separate pre-existing inner loop (e.g. an anchor bore a
+    # few hundredths of a mm from a tight mid-support rail's notch) as touching the new outer
+    # boundary, splitting the rebuilt face into multiple pieces instead of one.
+    graft_tol = max(tol, _GRAFT_JOIN_TOL_MM)
     try:
-        result_brep, success, method = robust_brep_union(
-            [splint_solid, ramp_solid_nudged], tol)
+        result_brep = graft_open_brep_into_face(
+            splint_solid, face_match.face_index, new_outer_curve, open_duct,
+            tolerance=tol, join_tolerance=graft_tol)
     except BrepUnionError as exc:
         raise SupportPathRampError(
-            "union of ramp_solid into splint_solid failed: {0}".format(exc))
+            "graft of ramp duct into splint_solid failed: {0}".format(exc))
     except Exception as exc:
         raise SupportPathRampError(
-            "union of ramp_solid into splint_solid raised: {0}: {1}".format(
+            "graft of ramp duct into splint_solid raised: {0}: {1}".format(
                 type(exc).__name__, exc))
     _dput(debug, "result_brep", result_brep)
-    log("build_support_path_ramp: ramp unioned OK via '{0}', faces={1}".format(
-        method, result_brep.Faces.Count))
+    log("build_support_path_ramp: ramp grafted OK, faces={0}".format(result_brep.Faces.Count))
     return result_brep
 
 

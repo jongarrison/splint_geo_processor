@@ -40,5 +40,6 @@
   ],
   "all_splint_finger_circ": 145,
   "relative_elevation_angle": 25,
-  "longitudinal_band_width_mm": 10
+  "longitudinal_band_width_mm": 10,
+  "enable_support_path_ramp": true
 }

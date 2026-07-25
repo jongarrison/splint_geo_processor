@@ -1,15 +1,16 @@
 === RelativeMotion dev harness ===
 inputs available in /Users/jon/work_3d/splint_work/splint_geo_processor/generators/dev/RelativeMotion/inputs:
-  - 2QY6_prod_exact.json
-  - AASA_20.json
-  - ASAA_BTR8_prod.json
-  - ASAX_20deg.json
-  - ASSA_20.json
-  - ASSA_2QY6.json
+  - 2QY6_prod_exact.json  <== running
+  - AASA_20.json  <== running
+  - AASX_20.json  <== running
+  - ASAA_BTR8_prod.json  <== running
+  - ASAX_20deg.json  <== running
+  - ASSA_20.json  <== running
+  - ASSA_2QY6.json  <== running
   - MX2E.json  <== running
-  - XASA_ZM1Q_prod.json
+  - XASA_ZM1Q_prod.json  <== running
 
-=== row 0 at +Y 0mm: MX2E.json ===
+=== row 0 at +Y 0mm: AASA_20.json ===
 running generate_relative_motion_splint (objectID DV00)...
   preview slot 0 at (+X 0, +Y 0) mm: pre-ramp splint body (chamfer+slit+emboss)
   preview slot 1 at (+X 90, +Y 0) mm: slit debug
@@ -20,5 +21,101 @@ running generate_relative_motion_splint (objectID DV00)...
   baked 1 ramp debug set(s) on DEV_ramp_* layers
   preview slot 3 at (+X 270, +Y 0) mm: ramp union result (final splint_solid)
   preview slot 4 at (+X 360, +Y 0) mm: splint_oriented (print-ready mesh)
+
+=== row 1 at +Y 150mm: ASAA_BTR8_prod.json ===
+running generate_relative_motion_splint (objectID DV01)...
+  preview slot 0 at (+X 0, +Y 150) mm: pre-ramp splint body (chamfer+slit+emboss)
+  preview slot 1 at (+X 90, +Y 150) mm: slit debug
+  baked 3 slit cutter brep(s) on DEV_slit_cutters
+  baked 3 slit wall cross-section curve(s) on DEV_slit_cross_sections
+  baked 3 slit panel brep(s) on DEV_slit_panels
+  preview slot 2 at (+X 180, +Y 150) mm: ramp construction (separate bodies)
+  baked 1 ramp debug set(s) on DEV_ramp_* layers
+  preview slot 3 at (+X 270, +Y 150) mm: ramp union result (final splint_solid)
+  preview slot 4 at (+X 360, +Y 150) mm: splint_oriented (print-ready mesh)
+
+=== row 2 at +Y 300mm: ASAX_20deg.json ===
+running generate_relative_motion_splint (objectID DV02)...
+  preview slot 0 at (+X 0, +Y 300) mm: pre-ramp splint body (chamfer+slit+emboss)
+  preview slot 1 at (+X 90, +Y 300) mm: slit debug
+  baked 2 slit cutter brep(s) on DEV_slit_cutters
+  baked 2 slit wall cross-section curve(s) on DEV_slit_cross_sections
+  baked 2 slit panel brep(s) on DEV_slit_panels
+  preview slot 2 at (+X 180, +Y 300) mm: ramp construction (separate bodies)
+  baked 1 ramp debug set(s) on DEV_ramp_* layers
+  preview slot 3 at (+X 270, +Y 300) mm: ramp union result (final splint_solid)
+  preview slot 4 at (+X 360, +Y 300) mm: splint_oriented (print-ready mesh)
+
+=== row 3 at +Y 450mm: ASSA_20.json ===
+running generate_relative_motion_splint (objectID DV03)...
+  preview slot 0 at (+X 0, +Y 450) mm: pre-ramp splint body (chamfer+slit+emboss)
+  preview slot 1 at (+X 90, +Y 450) mm: slit debug
+  baked 2 slit cutter brep(s) on DEV_slit_cutters
+  baked 2 slit wall cross-section curve(s) on DEV_slit_cross_sections
+  baked 2 slit panel brep(s) on DEV_slit_panels
+  preview slot 2 at (+X 180, +Y 450) mm: ramp construction (separate bodies)
+  baked 1 ramp debug set(s) on DEV_ramp_* layers
+  preview slot 3 at (+X 270, +Y 450) mm: ramp union result (final splint_solid)
+  preview slot 4 at (+X 360, +Y 450) mm: splint_oriented (print-ready mesh)
+
+=== row 4 at +Y 600mm: XASA_ZM1Q_prod.json ===
+running generate_relative_motion_splint (objectID DV04)...
+  preview slot 0 at (+X 0, +Y 600) mm: pre-ramp splint body (chamfer+slit+emboss)
+  preview slot 1 at (+X 90, +Y 600) mm: slit debug
+  baked 2 slit cutter brep(s) on DEV_slit_cutters
+  baked 2 slit wall cross-section curve(s) on DEV_slit_cross_sections
+  baked 2 slit panel brep(s) on DEV_slit_panels
+  preview slot 2 at (+X 180, +Y 600) mm: ramp construction (separate bodies)
+  baked 1 ramp debug set(s) on DEV_ramp_* layers
+  preview slot 3 at (+X 270, +Y 600) mm: ramp union result (final splint_solid)
+  preview slot 4 at (+X 360, +Y 600) mm: splint_oriented (print-ready mesh)
+
+=== row 5 at +Y 750mm: ASSA_2QY6.json ===
+running generate_relative_motion_splint (objectID DV05)...
+  preview slot 0 at (+X 0, +Y 750) mm: pre-ramp splint body (chamfer+slit+emboss)
+  preview slot 1 at (+X 90, +Y 750) mm: slit debug
+  baked 2 slit cutter brep(s) on DEV_slit_cutters
+  baked 2 slit wall cross-section curve(s) on DEV_slit_cross_sections
+  baked 2 slit panel brep(s) on DEV_slit_panels
+  preview slot 2 at (+X 180, +Y 750) mm: ramp construction (separate bodies)
+  baked 1 ramp debug set(s) on DEV_ramp_* layers
+  preview slot 3 at (+X 270, +Y 750) mm: ramp union result (final splint_solid)
+  preview slot 4 at (+X 360, +Y 750) mm: splint_oriented (print-ready mesh)
+
+=== row 6 at +Y 900mm: 2QY6_prod_exact.json ===
+running generate_relative_motion_splint (objectID DV06)...
+  preview slot 0 at (+X 0, +Y 900) mm: pre-ramp splint body (chamfer+slit+emboss)
+  preview slot 1 at (+X 90, +Y 900) mm: slit debug
+  baked 1 slit cutter brep(s) on DEV_slit_cutters
+  baked 1 slit wall cross-section curve(s) on DEV_slit_cross_sections
+  baked 1 slit panel brep(s) on DEV_slit_panels
+  preview slot 2 at (+X 180, +Y 900) mm: ramp construction (separate bodies)
+  baked 1 ramp debug set(s) on DEV_ramp_* layers
+  preview slot 3 at (+X 270, +Y 900) mm: ramp union result (final splint_solid)
+  preview slot 4 at (+X 360, +Y 900) mm: splint_oriented (print-ready mesh)
+
+=== row 7 at +Y 1050mm: MX2E.json ===
+running generate_relative_motion_splint (objectID DV07)...
+  preview slot 0 at (+X 0, +Y 1050) mm: pre-ramp splint body (chamfer+slit+emboss)
+  preview slot 1 at (+X 90, +Y 1050) mm: slit debug
+  baked 2 slit cutter brep(s) on DEV_slit_cutters
+  baked 2 slit wall cross-section curve(s) on DEV_slit_cross_sections
+  baked 2 slit panel brep(s) on DEV_slit_panels
+  preview slot 2 at (+X 180, +Y 1050) mm: ramp construction (separate bodies)
+  baked 1 ramp debug set(s) on DEV_ramp_* layers
+  preview slot 3 at (+X 270, +Y 1050) mm: ramp union result (final splint_solid)
+  preview slot 4 at (+X 360, +Y 1050) mm: splint_oriented (print-ready mesh)
+
+=== row 8 at +Y 1200mm: AASX_20.json ===
+running generate_relative_motion_splint (objectID DV08)...
+  preview slot 0 at (+X 0, +Y 1200) mm: pre-ramp splint body (chamfer+slit+emboss)
+  preview slot 1 at (+X 90, +Y 1200) mm: slit debug
+  baked 2 slit cutter brep(s) on DEV_slit_cutters
+  baked 2 slit wall cross-section curve(s) on DEV_slit_cross_sections
+  baked 2 slit panel brep(s) on DEV_slit_panels
+  preview slot 2 at (+X 180, +Y 1200) mm: ramp construction (separate bodies)
+  baked 1 ramp debug set(s) on DEV_ramp_* layers
+  preview slot 3 at (+X 270, +Y 1200) mm: ramp union result (final splint_solid)
+  preview slot 4 at (+X 360, +Y 1200) mm: splint_oriented (print-ready mesh)
 
 done. report written to /Users/jon/work_3d/splint_work/splint_geo_processor/generators/dev/RelativeMotion/last_run_report.txt
