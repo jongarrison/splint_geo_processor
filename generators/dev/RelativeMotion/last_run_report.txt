@@ -74,9 +74,9 @@ running generate_relative_motion_splint (objectID DV04)...
 running generate_relative_motion_splint (objectID DV05)...
   preview slot 0 at (+X 0, +Y 750) mm: pre-ramp splint body (chamfer+slit+emboss)
   preview slot 1 at (+X 90, +Y 750) mm: slit debug
-  baked 2 slit cutter brep(s) on DEV_slit_cutters
-  baked 2 slit wall cross-section curve(s) on DEV_slit_cross_sections
-  baked 2 slit panel brep(s) on DEV_slit_panels
+  baked 1 slit cutter brep(s) on DEV_slit_cutters
+  baked 1 slit wall cross-section curve(s) on DEV_slit_cross_sections
+  baked 1 slit panel brep(s) on DEV_slit_panels
   preview slot 2 at (+X 180, +Y 750) mm: ramp construction (separate bodies)
   baked 1 ramp debug set(s) on DEV_ramp_* layers
   preview slot 3 at (+X 270, +Y 750) mm: ramp union result (final splint_solid)
@@ -98,9 +98,9 @@ running generate_relative_motion_splint (objectID DV06)...
 running generate_relative_motion_splint (objectID DV07)...
   preview slot 0 at (+X 0, +Y 1050) mm: pre-ramp splint body (chamfer+slit+emboss)
   preview slot 1 at (+X 90, +Y 1050) mm: slit debug
-  baked 2 slit cutter brep(s) on DEV_slit_cutters
-  baked 2 slit wall cross-section curve(s) on DEV_slit_cross_sections
-  baked 2 slit panel brep(s) on DEV_slit_panels
+  baked 1 slit cutter brep(s) on DEV_slit_cutters
+  baked 1 slit wall cross-section curve(s) on DEV_slit_cross_sections
+  baked 1 slit panel brep(s) on DEV_slit_panels
   preview slot 2 at (+X 180, +Y 1050) mm: ramp construction (separate bodies)
   baked 1 ramp debug set(s) on DEV_ramp_* layers
   preview slot 3 at (+X 270, +Y 1050) mm: ramp union result (final splint_solid)

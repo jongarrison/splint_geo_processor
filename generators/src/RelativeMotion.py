@@ -1970,8 +1970,7 @@ def _log_splint_health(brep, label):
 
 
 def generate_relative_motion_splint(raw_data_dev, is_production,
-                                    should_save_mesh, object_id="TEST",
-                                    stop_after_bores=False):
+                                    should_save_mesh, object_id="TEST"):
     """Full RelativeMotion pipeline: raw_data -> print-ready splint mesh, with every intermediate.
 
     This is the single orchestration entry point (moved out of the GhPython component so the
@@ -1998,7 +1997,7 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
     """
     # --- Tuning coefficients (design constants) -------------------------------------------
     support_prong_arc_deg = 55.0            # END-support cradle prong arc width (wider contact)
-    support_arc_deg = 40.0                  # MID-support arc width
+    support_arc_deg = 30.0                  # MID-support arc width
 
     radial_band_thickness_mm = 1.65
     # 2026-07-24: briefly bumped 1.5x -> 3.0x while diagnosing AASX_20.json, on the theory that
@@ -2150,12 +2149,6 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
         d_support_path_rails = extract_support_path_rails(d_perimeter_chain, _JOIN_TOL)
         out.update({"p_support_rails": p_support_rails, "d_support_rails": d_support_rails,
                     "d_support_path_rails": d_support_path_rails})
-
-        # Dev-harness early exit: skip chamfer + emboss + mesh + save (all expensive, and the
-        # harness runs its own chamfer probes against the sharp solid). Production never sets this.
-        if stop_after_bores:
-            log("generate_relative_motion_splint: stop_after_bores=True; skipping chamfer + emboss + mesh.")
-            return out
 
         # --- Phase 7.5: chamfer anchor rims then outer perimeter ------------------------------
         # Rims first (skin-contact priority), then the support-perimeter runs with a VARIABLE-

@@ -127,18 +127,27 @@ def main():
             report("PARTIAL RUN for '{0}': {1}".format(name, r["error"]))
 
         splint_solid = r.get("splint_solid")
+        splint_solid_blank = r.get("splint_solid_blank")
+
         splint_solid_pre_ramp = r.get("splint_solid_pre_ramp")
         splint_oriented = r.get("splint_oriented")
 
         # Slot 0: "Finished body" = post-chamfer + post-slit + post-emboss, BEFORE ramp.
         # This is the stable splint body that all subtractive finishing has been applied to.
         offset0 = _layout.next_offset("pre-ramp splint body (chamfer+slit+emboss)")
-        bake_preview("pre-ramp splint body", splint_solid_pre_ramp,
-                     "DEV_splint_pre_ramp", (150, 220, 150), offset=offset0)
+        #JG: Baking preliminary solids
+        bake_preview("splint_solid_blank", splint_solid_blank,
+                     "DEV_splint_solid_blank", (150, 220, 100), offset=offset0)
+        bake_preview("splint_solid_bores", r.get("splint_solid_bores"),
+                     "DEV_splint_solid_blank", (180, 220, 80), offset=offset0)
+
+        # out.update({"splint_solid_blank": splint_solid_blank, "finger_bores": finger_bores,
+        #             "splint_solid": splint_solid, "splint_solid_bores": splint_solid_bores})
+
 
         # Filename text-dot sitting well above slot 0's splint so each row is instantly
         # identifiable by the source input at a glance from the top-down view.
-        ref_brep = splint_solid_pre_ramp or splint_solid
+        ref_brep = splint_solid_blank # splint_solid_pre_ramp or splint_solid
         if ref_brep is not None:
             try:
                 bbox = ref_brep.GetBoundingBox(True)
