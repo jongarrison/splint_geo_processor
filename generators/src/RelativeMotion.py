@@ -2,8 +2,9 @@
 RelativeMotion.py
 Central point of contact for the RelativeMotion finger splint Design Definition.
 
-Keeps the geometry logic here in Python (observable/testable in Rhino) so the bound
-RelativeMotion.gh stays as thin as possible. Functions return RhinoCommon geometry types.
+All geometry logic lives here in Python (observable/testable in Rhino). The production
+runner (generators/RelativeMotion.py) and dev harness (generators/dev/RelativeMotion/
+harness.py) both call RelativeMotionGenerator.generate() with the same signature.
 
 See dev-notes/260702_Dev_Process_RelativeMotion_splint.md for the construction rationale.
 """
@@ -15,7 +16,7 @@ from Rhino.Geometry import (Point3d, Vector3d, Line, Plane, Circle, Cylinder, Tr
                             Brep, LoftType, BrepSolidOrientation, AreaMassProperties,
                             PointContainment)
 from Rhino.Geometry.Intersect import Intersection
-from splintcommon import log, mark_generation_start, load_job_data, splint_outbox_dir
+from splintcommon import log
 
 import TwoDCirclePositioning
 reload(TwoDCirclePositioning)
@@ -53,7 +54,11 @@ from TextGun import emboss_text
 
 import SplintMeshes2
 reload(SplintMeshes2)
-from SplintMeshes2 import mesh_brep, inspect_mesh, export_mesh_with_metadata
+from SplintMeshes2 import mesh_brep, inspect_mesh
+
+import splint_generator
+reload(splint_generator)
+from splint_generator import SplintGenerator, SplintResult, PhaseTracker, StopAfterPhase
 
 
 # Elevation angle clamp (degrees). Provisional range pending review with hand therapist Liz.
@@ -1734,30 +1739,20 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
     return closed, bridges, perimeter_chain
 
 
-def build_splint_solid(proximal_profile, distal_profile):
+def build_splint_solid(proximal_profile, distal_profile, seam_reference_point=None,
+                       diagnostics=None):
     """Loft the two profile perimeters into one closed, watertight solid slab (Phase 6).
 
-    The proximal (-X, toward the hand) and distal (+X, toward the fingertip) perimeters from
-    Phase 5 are the band's two faces. They are congruent wherever the section is an anchor (an
-    anchor cylinder is uniform along X, so any X cuts the same ring) and differ only across the
-    elevated-support regions, so a straight (ruled) loft between them, capped at both planar ends,
-    yields the tapered band. Both faces are always lofted - never extrude one - so the
-    proximal/distal difference (the support taper) is preserved.
+    Preconditions for a reliable ruled loft:
+      1. Both perimeters must be closed.
+      2. Re-seam both to the same geometric feature (anchor +Y apex via ClosestPoint).
+      3. Reparameterize both to [0,1] so the ruled loft maps proportionally.
+      4. Match curve directions (reverse if opposed).
+      5. Straight loft -> one open tube wall.
+      6. CapPlanarHoles -> closed solid; validate and orient outward.
 
-    No fallbacks: any failure raises ValueError so the process limits stay visible. The loft is
-    preconditioned to make it reliable:
-      1. Require both perimeters closed.
-      2. Re-seam both to their world +Y extreme so the loft's section correspondence starts at the
-         same feature on each curve (an exact match on the congruent anchors), avoiding the
-         twisted wall a mismatched seam produces.
-      3. Match curve directions (reverse the distal curve if opposed) so the ruled wall does not
-         self-cross.
-      4. Straight loft -> one open tube wall.
-      5. CapPlanarHoles -> fill both planar ends into a closed solid.
-      6. Validate IsSolid; flip an inward-oriented solid so its normals face out.
-
-    The finger bores are cut later by boolean-subtracting the uncapped cylinders, so this
-    perimeter carries no inner holes - it is a single outer silhouette.
+    When diagnostics dict is provided, populates it with pre-loft curves and seam points
+    for visual inspection in the dev harness.
 
     Returns a single closed, outward-oriented Brep.
     """
@@ -1771,16 +1766,59 @@ def build_splint_solid(proximal_profile, distal_profile):
             "build_splint_solid: both profile perimeters must be closed (proximal closed={0}, "
             "distal closed={1}).".format(prox.IsClosed, dist.IsClosed))
 
-    # Re-seam both to the same feature (world +Y extreme). On the congruent anchor regions this is
-    # an exact point correspondence, so the lofted sections align instead of shearing.
-    if not prox.ChangeClosedCurveSeam(_extreme_point_param(prox, Vector3d.YAxis)):
-        log("build_splint_solid: proximal re-seam had no effect (already at +Y extreme)")
-    if not dist.ChangeClosedCurveSeam(_extreme_point_param(dist, Vector3d.YAxis)):
-        log("build_splint_solid: distal re-seam had no effect (already at +Y extreme)")
+    # Re-seam both to the same geometric feature for correct loft correspondence.
+    if seam_reference_point is not None:
+        ok_p, t_p = prox.ClosestPoint(seam_reference_point)
+        ok_d, t_d = dist.ClosestPoint(seam_reference_point)
+        if ok_p and ok_d:
+            prox.ChangeClosedCurveSeam(t_p)
+            dist.ChangeClosedCurveSeam(t_d)
+            log("build_splint_solid: seamed to reference point")
+        else:
+            log("build_splint_solid: ClosestPoint failed; falling back to +Y extreme")
+            prox.ChangeClosedCurveSeam(_extreme_point_param(prox, Vector3d.YAxis))
+            dist.ChangeClosedCurveSeam(_extreme_point_param(dist, Vector3d.YAxis))
+    else:
+        prox.ChangeClosedCurveSeam(_extreme_point_param(prox, Vector3d.YAxis))
+        dist.ChangeClosedCurveSeam(_extreme_point_param(dist, Vector3d.YAxis))
 
     # Align directions so the ruled surface does not twist into a self-intersection.
-    if not Curve.DoDirectionsMatch(prox, dist):
+    dirs_matched = Curve.DoDirectionsMatch(prox, dist)
+    if not dirs_matched:
         dist.Reverse()
+        log("build_splint_solid: reversed distal curve to match proximal direction")
+
+    # Rebuild both curves to NurbsCurves with matching control point structure.
+    # Polycurves have mismatched segment counts; Rebuild normalizes them so the
+    # loft maps corresponding features correctly instead of twisting.
+    # ~1 control point per mm of the longer curve, floor of 100.
+    max_len = max(prox.GetLength(), dist.GetLength())
+    rebuild_pts = max(100, int(max_len))
+    prox_rebuilt = prox.Rebuild(rebuild_pts, 3, False)
+    dist_rebuilt = dist.Rebuild(rebuild_pts, 3, False)
+    if prox_rebuilt is None or dist_rebuilt is None:
+        raise ValueError("build_splint_solid: Curve.Rebuild failed (prox={0}, dist={1})".format(
+            prox_rebuilt is not None, dist_rebuilt is not None))
+    prox = prox_rebuilt
+    dist = dist_rebuilt
+    log("build_splint_solid: rebuilt both curves with {0} pts (curve len ~{1:.0f}mm)".format(
+        rebuild_pts, max_len))
+
+    # Log seam diagnostics.
+    p_start = prox.PointAtStart
+    d_start = dist.PointAtStart
+    log("build_splint_solid: prox seam ({0:.2f}, {1:.2f}, {2:.2f}), "
+        "dist seam ({3:.2f}, {4:.2f}, {5:.2f}), dirs_matched={6}".format(
+            p_start.X, p_start.Y, p_start.Z,
+            d_start.X, d_start.Y, d_start.Z, dirs_matched))
+
+    # Expose pre-loft curves and seam markers for visual inspection.
+    if diagnostics is not None:
+        diagnostics["loft_prox_seamed"] = prox.DuplicateCurve()
+        diagnostics["loft_dist_seamed"] = dist.DuplicateCurve()
+        diagnostics["loft_seam_pts"] = [p_start, d_start]
+        if seam_reference_point is not None:
+            diagnostics["loft_ref_pt"] = seam_reference_point
 
     lofts = Brep.CreateFromLoft([prox, dist], Point3d.Unset, Point3d.Unset,
                                 LoftType.Straight, False)
@@ -1969,118 +2007,83 @@ def _log_splint_health(brep, label):
                 log("  invalid: {0}".format(line))
 
 
-def generate_relative_motion_splint(raw_data_dev, is_production,
-                                    should_save_mesh, object_id="TEST"):
-    """Full RelativeMotion pipeline: raw_data -> print-ready splint mesh, with every intermediate.
+class RelativeMotionGenerator(SplintGenerator):
+    """Python-based geometry generator for the RelativeMotion finger splint."""
+    GEO_ALGORITHM_NAME = "RelativeMotion"
 
-    This is the single orchestration entry point (moved out of the GhPython component so the
-    algorithm lives in git, is diffable/testable, and can run headless in the geo processor).
-    The GH component becomes a thin shim: pass its inputs, call this, and fan the returned dict
-    out to output wires. GH-host plumbing (ghenv, sys.path, splintcommon init, gh_decode of the
-    dev input, the try/except) stays in that shim, not here.
+    def generate(self, raw_data, object_id, debug=None, stop_after=None):
+        """Full RelativeMotion pipeline: raw_data -> print-ready SplintResult.
 
-    Data source (mirrors the first-component dev/production pattern used elsewhere):
-      - is_production=False (dev): use the caller-supplied raw_data_dev - fast for design sweeps.
-      - is_production=True: ignore raw_data_dev and pull the next job from the geo processor
-        inbox (raw_data, objectID, and the outbox path/filename to save under).
+        Args:
+            raw_data: patient measurements dict (the relative_motion_data payload).
+            object_id: short ID for embossing/tracing.
+            debug: optional dict; populated with phase geometry via PhaseTracker.
+            stop_after: optional float phase number; raises StopAfterPhase after
+                completing that phase (e.g. 7.5 stops after chamfer).
 
-    should_save_mesh gates writing the print-ready mesh (splint_oriented) so large permutation
-    sweeps can run without producing files. When True the mesh is written for the geo processor
-    to pick up: production saves under the job's outbox path/name, dev writes a DEV_-prefixed file
-    to the outbox (see RelativeMotion_prod_mesh_saver.py).
+        Returns:
+            SplintResult with .mesh (oriented rg.Mesh), .metadata (dict), .solid (rg.Brep).
+        """
+        tracker = PhaseTracker(debug=debug, stop_after=stop_after, log_fn=log)
 
-    The tuning coefficients (design constants, not per-patient measurements) live here as locals;
-    raw_data carries only the patient measurements + config the web form will collect.
+        # --- Tuning coefficients (design constants) -------------------------------------------
+        support_prong_arc_deg = 55.0            # END-support cradle prong arc width (wider contact)
+        support_arc_deg = 30.0                  # MID-support arc width
 
-    Returns a dict of every phase's geometry so the component can still preview each stage; the
-    final bored solid is result["splint_solid"] and the print-ready mesh is result["splint_oriented"].
-    """
-    # --- Tuning coefficients (design constants) -------------------------------------------
-    support_prong_arc_deg = 55.0            # END-support cradle prong arc width (wider contact)
-    support_arc_deg = 30.0                  # MID-support arc width
+        radial_band_thickness_mm = 1.65
+        # 2026-07-24: briefly bumped 1.5x -> 3.0x while diagnosing AASX_20.json, on the theory that
+        # the ramp's end-cap bulge was colliding with the cradle's tip cap. REVERTED: the actual bug
+        # was that extract_support_path_rails was rooting the ramp on the cradle's FULL there-and-back
+        # loop (arc + tip cap + return edge) instead of just the support-touching arc - see
+        # support_touch_curve in plan_perimeter_walk/_build_perimeter_chain/_extract_rails_by_role.
+        # With the ramp correctly rooted on just the touching arc, it never gets near the tip cap, so
+        # the thickness bump was solving a symptom, not the cause.
+        single_sided_support_thickness_mm = radial_band_thickness_mm * 1.5
+        min_center_gap = radial_band_thickness_mm
+        anchor_bridge_radius_mm = 3.0
+        support_bridge_radius_mm = 10.0
+        return_spine_thickness_mm = 5.0 #JG edited 7/10 5:31pm
+        return_spine_end_reach = 0.2
+        return_spine_touchdown_fraction = 0.35
+        objectid_text_size_factor = 0.4         # objectID text height as a fraction of the band length
+        objectid_extrusion_depth_factor = 0.5   # emboss depth as a fraction of the ring wall thickness
 
-    radial_band_thickness_mm = 1.65
-    # 2026-07-24: briefly bumped 1.5x -> 3.0x while diagnosing AASX_20.json, on the theory that
-    # the ramp's end-cap bulge was colliding with the cradle's tip cap. REVERTED: the actual bug
-    # was that extract_support_path_rails was rooting the ramp on the cradle's FULL there-and-back
-    # loop (arc + tip cap + return edge) instead of just the support-touching arc - see
-    # support_touch_curve in plan_perimeter_walk/_build_perimeter_chain/_extract_rails_by_role.
-    # With the ramp correctly rooted on just the touching arc, it never gets near the tip cap, so
-    # the thickness bump was solving a symptom, not the cause.
-    single_sided_support_thickness_mm = radial_band_thickness_mm * 1.5
-    min_center_gap = radial_band_thickness_mm
-    anchor_bridge_radius_mm = 3.0
-    support_bridge_radius_mm = 10.0
-    return_spine_thickness_mm = 5.0 #JG edited 7/10 5:31pm
-    return_spine_end_reach = 0.2
-    return_spine_touchdown_fraction = 0.35
-    objectid_text_size_factor = 0.4         # objectID text height as a fraction of the band length
-    objectid_extrusion_depth_factor = 0.5   # emboss depth as a fraction of the ring wall thickness
+        # Band width along the finger axis (patient/config input from the web form; mm).
+        longitudinal_band_width_mm = raw_data.get("longitudinal_band_width_mm", 10.0)
 
-    # --- Data source + job context (dev vs production) ------------------------------------
-    # geo_algorithm_name links the processing stages (web design -> job file -> this generator).
-    geo_algorithm_name = "RelativeMotion"
-    mark_generation_start()
-    if is_production:
-        # Pull the next job from the inbox; raises if the inbox has no matching job.
-        job_data, object_id, root_filename, output_dir, _ = load_job_data(
-            True, geo_algorithm_name)
-        raw_data = job_data["relative_motion_data"]
-        log("generate_relative_motion_splint: PROD job '{0}' (objectID {1})".format(
-            root_filename, object_id))
-    else:
-        # Dev sweep: use the caller-supplied data; save (if requested) to a DEV_ outbox file.
-        raw_data = raw_data_dev
-        root_filename = "DEV_{0}_{1}".format(geo_algorithm_name, object_id)
-        output_dir = splint_outbox_dir
+        # Support Path Ramp (Phase 9 feature - see dev-notes/260702_..._splint.md).
+        # Controlled by the web form's enable_support_path_ramp checkbox (defaults True when not
+        # present in older payloads). Starting placeholder dimension values derived from existing
+        # splint dimensions rather than new magic numbers (no clinical guidance yet).
+        enable_support_path_ramp = raw_data.get("enable_support_path_ramp", False)
+        support_path_ramp_thickness = radial_band_thickness_mm
+        support_path_ramp_length = longitudinal_band_width_mm * 0.4
+        support_path_ramp_arc_radius = longitudinal_band_width_mm * 0.3
+        support_path_ramp_trim_mm = 2.5  # trim off each end of the rail before building ramp profile
 
-    # Band width along the finger axis (patient/config input from the web form; mm).
-    longitudinal_band_width_mm = raw_data.get("longitudinal_band_width_mm", 10.0)
-
-    # Support Path Ramp (Phase 9 feature - see dev-notes/260702_..._splint.md).
-    # Controlled by the web form's enable_support_path_ramp checkbox (defaults True when not
-    # present in older payloads). Starting placeholder dimension values derived from existing
-    # splint dimensions rather than new magic numbers (no clinical guidance yet).
-    enable_support_path_ramp = raw_data.get("enable_support_path_ramp", False)
-    support_path_ramp_thickness = radial_band_thickness_mm
-    support_path_ramp_length = longitudinal_band_width_mm * 0.4
-    support_path_ramp_arc_radius = longitudinal_band_width_mm * 0.3
-    support_path_ramp_trim_mm = 2.5  # trim off each end of the rail before building ramp profile
-
-    # Every intermediate is written into `out` as it is produced, so the GH component can preview
-    # each phase. In dev the pipeline runs inside a try/except: on failure we log the traceback and
-    # return whatever geometry made it that far (a partial preview), rather than dying with nothing
-    # on the output wires. Production still raises so bad jobs fail loudly.
-    out = {
-        "object_id": object_id,
-        "is_production": is_production,
-        "output_dir": output_dir,
-        "root_filename": root_filename,
-        "saved": False,
-        "error": None,
-    }
-
-    try:
         # --- Phase 1: finger positions --------------------------------------------------------
         mcp_points, p1_lines, p1_circles, p1_cylinders = setup_finger_positions(
             raw_data, min_center_gap=min_center_gap)
-        out.update({"mcp_points": mcp_points, "p1_lines": p1_lines,
-                    "p1_circles": p1_circles, "p1_cylinders": p1_cylinders})
+        tracker.log_phase(1.0, "finger positions",
+            mcp_points=mcp_points, p1_lines=p1_lines,
+            p1_circles=p1_circles, p1_cylinders=p1_cylinders)
 
         # --- Phase 2: elevate supported fingers -----------------------------------------------
         (mcp_points_oriented, p1_lines_oriented, p1_circles_oriented,
          p1_cylinders_oriented, transforms) = elevate_supported_fingers(
             raw_data, mcp_points, p1_lines, p1_circles, p1_cylinders)
-        out.update({"mcp_points_oriented": mcp_points_oriented,
-                    "p1_lines_oriented": p1_lines_oriented,
-                    "p1_circles_oriented": p1_circles_oriented,
-                    "p1_cylinders_oriented": p1_cylinders_oriented, "transforms": transforms})
+        tracker.log_phase(2.0, "elevate supported fingers",
+            mcp_points_oriented=mcp_points_oriented,
+            p1_lines_oriented=p1_lines_oriented,
+            p1_circles_oriented=p1_circles_oriented,
+            p1_cylinders_oriented=p1_cylinders_oriented, transforms=transforms)
 
         # --- Phase 3: proximal + distal profile planes ----------------------------------------
         proximal_profile_plane, distal_profile_plane = build_profile_planes(
             raw_data, p1_lines_oriented, longitudinal_band_width_mm)
-        out.update({"proximal_profile_plane": proximal_profile_plane,
-                    "distal_profile_plane": distal_profile_plane})
+        tracker.log_phase(3.0, "profile planes",
+            proximal_profile_plane=proximal_profile_plane,
+            distal_profile_plane=distal_profile_plane)
 
         # --- Phase 4: finger cross-sections on each plane -------------------------------------
         p_full_curves, p_preserved = extract_finger_cross_sections(
@@ -2089,8 +2092,9 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
         d_full_curves, d_preserved = extract_finger_cross_sections(
             raw_data, distal_profile_plane, p1_cylinders_oriented, p1_lines_oriented,
             support_prong_arc_deg=support_prong_arc_deg, support_arc_deg=support_arc_deg)
-        out.update({"p_full_curves": p_full_curves, "p_preserved": p_preserved,
-                    "d_full_curves": d_full_curves, "d_preserved": d_preserved})
+        tracker.log_phase(4.0, "finger cross-sections",
+            p_full_curves=p_full_curves, p_preserved=p_preserved,
+            d_full_curves=d_full_curves, d_preserved=d_preserved)
 
         # --- Phase 5: walk each profile perimeter ---------------------------------------------
         # Proximal face.
@@ -2106,10 +2110,11 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
             raw_data, p_walk_segments, proximal_profile_plane, p_rings,
             anchor_bridge_radius_mm, support_bridge_radius_mm, return_spine_thickness_mm,
             return_spine_end_reach, return_spine_touchdown_fraction)
-        out.update({"p_rings": p_rings, "p_pos_hemis": p_pos_hemis, "p_neg_hemis": p_neg_hemis,
-                    "p_cradles": p_cradles, "p_walk_segments": p_walk_segments,
-                    "p_walk_preview": p_walk_preview, "p_closed_profile": p_closed_profile,
-                    "p_bridge_curves": p_bridge_curves})
+        tracker.log_phase(5.0, "proximal perimeter walk",
+            p_rings=p_rings, p_pos_hemis=p_pos_hemis, p_neg_hemis=p_neg_hemis,
+            p_cradles=p_cradles, p_walk_segments=p_walk_segments,
+            p_walk_preview=p_walk_preview, p_closed_profile=p_closed_profile,
+            p_bridge_curves=p_bridge_curves)
 
         # Distal face.
         d_rings, d_pos_hemis, d_neg_hemis = build_exterior_anchor_rings(
@@ -2124,18 +2129,35 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
             raw_data, d_walk_segments, distal_profile_plane, d_rings,
             anchor_bridge_radius_mm, support_bridge_radius_mm, return_spine_thickness_mm,
             return_spine_end_reach, return_spine_touchdown_fraction)
-        out.update({"d_rings": d_rings, "d_pos_hemis": d_pos_hemis, "d_neg_hemis": d_neg_hemis,
-                    "d_cradles": d_cradles, "d_walk_segments": d_walk_segments,
-                    "d_walk_preview": d_walk_preview, "d_closed_profile": d_closed_profile,
-                    "d_bridge_curves": d_bridge_curves})
+        tracker.log_phase(5.5, "distal perimeter walk",
+            d_rings=d_rings, d_pos_hemis=d_pos_hemis, d_neg_hemis=d_neg_hemis,
+            d_cradles=d_cradles, d_walk_segments=d_walk_segments,
+            d_walk_preview=d_walk_preview, d_closed_profile=d_closed_profile,
+            d_bridge_curves=d_bridge_curves)
 
         # --- Phase 6: loft the two faces, then bore the fingers -------------------------------
-        splint_solid_blank = build_splint_solid(p_closed_profile, d_closed_profile)
+        # Compute a seam reference point from the first anchor ring's +Y apex. This point is
+        # geometrically identical on both proximal and distal curves (anchor rings are cut from
+        # uniform cylinders) so ClosestPoint gives matched seam params, avoiding twisted lofts.
+        seam_ref = None
+        for ring in p_rings:
+            if ring is not None:
+                t_apex = _extreme_point_param(ring, Vector3d.YAxis)
+                seam_ref = ring.PointAt(t_apex)
+                log("Phase 6 seam reference: anchor +Y apex at ({0:.2f}, {1:.2f}, {2:.2f})".format(
+                    seam_ref.X, seam_ref.Y, seam_ref.Z))
+                break
+        loft_diag = {}
+        splint_solid_blank = build_splint_solid(p_closed_profile, d_closed_profile,
+                                                seam_reference_point=seam_ref,
+                                                diagnostics=loft_diag)
         finger_bores = build_finger_bores(p1_lines_oriented, p1_circles_oriented)
         splint_solid = subtract_finger_bores(splint_solid_blank, finger_bores)
         splint_solid_bores = splint_solid.Duplicate()
-        out.update({"splint_solid_blank": splint_solid_blank, "finger_bores": finger_bores,
-                    "splint_solid": splint_solid, "splint_solid_bores": splint_solid_bores})
+        tracker.log_phase(6.0, "loft and bore",
+            splint_solid_blank=splint_solid_blank, finger_bores=finger_bores,
+            splint_solid=splint_solid, splint_solid_bores=splint_solid_bores,
+            **loft_diag)
 
         # --- Phase 7: extract support-perimeter rails --------------------------------------
         # Open rail curves marking the support-path and return-path stretches on each face.
@@ -2147,8 +2169,9 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
         # Ramp must root on the true support-arc side, not the return-path stretch that
         # extract_support_rails also (correctly, for chamfering) lumps in.
         d_support_path_rails = extract_support_path_rails(d_perimeter_chain, _JOIN_TOL)
-        out.update({"p_support_rails": p_support_rails, "d_support_rails": d_support_rails,
-                    "d_support_path_rails": d_support_path_rails})
+        tracker.log_phase(7.0, "extract support rails",
+            p_support_rails=p_support_rails, d_support_rails=d_support_rails,
+            d_support_path_rails=d_support_path_rails)
 
         # --- Phase 7.5: chamfer anchor rims then outer perimeter ------------------------------
         # Rims first (skin-contact priority), then the support-perimeter runs with a VARIABLE-
@@ -2207,7 +2230,7 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
         # stay active - those are independent of the perimeter shape.
         # TODO: re-enable once Phase 7.4 ramp unions are landing successfully.
         log("Phase 7.5b: SKIPPED (perimeter chamfer temporarily disabled for ramp dev)")
-        out["splint_solid"] = splint_solid
+        tracker.log_phase(7.5, "chamfer", splint_solid=splint_solid)
 
         # --- Phase 7.6: cut anchor slits ------------------------------------------------------
         # For every anchor finger flagged is_slitted, punch a small through-slit across its ring
@@ -2221,8 +2244,8 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
         #     the support connections so the split ring can spread on the free side.
         #     elevation >= 0 -> slit on +Z (dorsal); elevation < 0 -> slit on -Z (volar).
         # Log-and-continue: a failed slit leaves that ring un-slit rather than aborting the
-        # print. The Phase 7.6 cutter breps, panels, and cross-section curves are surfaced on
-        # `out` for harness debugging.
+        # print. The Phase 7.6 cutter breps, panels, and cross-section curves are surfaced via
+        # the debug dict for harness previewing.
         elevation_angle_deg = raw_data["relative_elevation_angle"]
         is_right_hand = raw_data["is_right_hand"]
         n_included = len(included)
@@ -2314,32 +2337,34 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
                     failed_slit_cutters.append(slit_debug["cutter_brep"])
         log("Phase 7.6: anchor slitting finished, {0}/{1} slit(s) applied".format(
             slit_successes, len(slit_targets)))
-        out.update({"splint_solid": splint_solid,
-                    "slit_cutter_breps": slit_cutter_breps,
-                    "slit_panels": slit_panels,
-                    "slit_cross_sections": slit_cross_sections,
-                    "failed_slit_panels": failed_slit_panels,
-                    "failed_slit_raw_intersections": failed_slit_raw_intersections,
-                    "failed_slit_joined_intersections": failed_slit_joined_intersections,
-                    "failed_slit_cutters": failed_slit_cutters})
+        tracker.log_phase(7.6, "anchor slitting",
+            splint_solid=splint_solid,
+            slit_cutter_breps=slit_cutter_breps,
+            slit_panels=slit_panels,
+            slit_cross_sections=slit_cross_sections,
+            failed_slit_panels=failed_slit_panels,
+            failed_slit_raw_intersections=failed_slit_raw_intersections,
+            failed_slit_joined_intersections=failed_slit_joined_intersections,
+            failed_slit_cutters=failed_slit_cutters)
 
         # --- Phase 8: emboss the objectID into the if-side anchor bore ------------------------
         if proximal_profile_plane is None or distal_profile_plane is None:
             raise ValueError(
-                "generate_relative_motion_splint: profile plane missing before Phase 8.")
+                "RelativeMotionGenerator: profile plane missing before Phase 8.")
         objectid_text_size = objectid_text_size_factor * longitudinal_band_width_mm
         splint_solid, id_letter_breps, id_projected_letters, id_text_plane = emboss_object_id(
             splint_solid, raw_data, object_id, p_full_curves, d_full_curves,
             proximal_profile_plane.Normal, radial_band_thickness_mm, objectid_text_size,
             extrusion_depth_factor=objectid_extrusion_depth_factor)
-        out.update({"id_letter_breps": id_letter_breps,
-                    "id_projected_letters": id_projected_letters,
-                    "id_text_plane": id_text_plane, "splint_solid": splint_solid})
+        tracker.log_phase(8.0, "emboss objectID",
+            id_letter_breps=id_letter_breps,
+            id_projected_letters=id_projected_letters,
+            id_text_plane=id_text_plane, splint_solid=splint_solid)
 
         # Capture the "finished body" (post-chamfer, post-slit, post-emboss) BEFORE the ramp
         # attaches, so the harness can preview it regardless of whether the ramp succeeds.
         splint_solid_pre_ramp = splint_solid.DuplicateBrep()
-        out["splint_solid_pre_ramp"] = splint_solid_pre_ramp
+        tracker.add(splint_solid_pre_ramp=splint_solid_pre_ramp)
 
         # --- Phase 9: Support Path Ramp (additive feature off the distal face) ----------------
         # Grows a solid protuberance off the distal support-path rail(s) for a future feature.
@@ -2348,7 +2373,7 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
         if enable_support_path_ramp:
             if distal_profile_plane is None:
                 raise ValueError(
-                    "generate_relative_motion_splint: distal_profile_plane missing before "
+                    "RelativeMotionGenerator: distal_profile_plane missing before "
                     "Phase 9 ramp.")
             clamped_elevation = max(MIN_ELEVATION_ANGLE, min(
                 MAX_ELEVATION_ANGLE, raw_data["relative_elevation_angle"]))
@@ -2414,44 +2439,30 @@ def generate_relative_motion_splint(raw_data_dev, is_production,
                 support_path_ramp_debugs.append(ramp_debug)
             log("Phase 9: support path ramp finished, {0}/{1} ramp(s) applied".format(
                 ramp_successes, len(rails_to_ramp)))
-            out.update({"splint_solid": splint_solid,
-                        "support_path_ramp_debugs": support_path_ramp_debugs})
+            tracker.log_phase(9.0, "support path ramp",
+                splint_solid=splint_solid,
+                support_path_ramp_debugs=support_path_ramp_debugs)
 
         # Mesh the finished solid, then lay it proximal-face-down on the build plate.
         proximal_outward_normal = proximal_profile_plane.Normal * -1.0
         splint_mesh = mesh_brep(splint_solid)
         mesh_quality = inspect_mesh(splint_mesh, "final splint")
-        out["mesh_quality"] = mesh_quality
         splint_oriented = splint_mesh.DuplicateMesh()
         splint_oriented.Transform(Transform.Rotation(
             proximal_outward_normal, Vector3d(0.0, 0.0, -1.0), proximal_profile_plane.Origin))
         splint_oriented.Translate(Vector3d(0.0, 0.0, -splint_oriented.GetBoundingBox(True).Min.Z))
-        out.update({"splint_mesh": splint_mesh, "splint_oriented": splint_oriented})
+        tracker.log_phase(10.0, "mesh and orient",
+            splint_mesh=splint_mesh, splint_oriented=splint_oriented,
+            mesh_quality=mesh_quality)
 
-        # Save the print-ready mesh for the geo processor to pick up (skipped during design sweeps).
-        if should_save_mesh:
-            saved = export_mesh_with_metadata(
-                splint_oriented, output_dir, root_filename, "3mf",
-                custom_metadata={
-                    "geo_algorithm": geo_algorithm_name,
-                    "object_id": object_id,
-                    "is_production": is_production,
-                    "relative_elevation_angle": raw_data.get("relative_elevation_angle"),
-                    "radial_band_thickness_mm": radial_band_thickness_mm,
-                    "longitudinal_band_width_mm": longitudinal_band_width_mm,
-                })
-            out["saved"] = True
-            log("generate_relative_motion_splint: mesh saved ({0}/{1}.3mf)".format(
-                output_dir, root_filename))
+        metadata = {
+            "geo_algorithm": self.GEO_ALGORITHM_NAME,
+            "object_id": object_id,
+            "relative_elevation_angle": raw_data.get("relative_elevation_angle"),
+            "radial_band_thickness_mm": radial_band_thickness_mm,
+            "longitudinal_band_width_mm": longitudinal_band_width_mm,
+        }
 
-        log("generate_relative_motion_splint: pipeline complete (objectID {0})".format(object_id))
-    except Exception as exc:
-        # Production must fail loudly; dev keeps the partial `out` so GH can still show what built.
-        if is_production:
-            raise
-        import traceback
-        out["error"] = "{0}: {1}".format(type(exc).__name__, exc)
-        log("generate_relative_motion_splint: DEV pipeline error (returning partial results):\n"
-            + traceback.format_exc())
-
-    return out
+        log("RelativeMotionGenerator.generate: pipeline complete (objectID {0})".format(
+            object_id))
+        return SplintResult(mesh=splint_oriented, metadata=metadata, solid=splint_solid)

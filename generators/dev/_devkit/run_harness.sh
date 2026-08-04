@@ -49,24 +49,44 @@ if [ -z "$INSTANCE" ]; then
 fi
 echo "Targeting Rhino 8 instance: $INSTANCE"
 
-# --- clear the stale report so its reappearance means THIS run finished ---
-rm -f "$REPORT"
+# --- clear stale files ---
+DONE="${REPORT%.txt}.done"
+rm -f "$REPORT" "$DONE"
 
 # --- dispatch (returns immediately; Rhino runs async) ---
 echo "Dispatching $(basename "$HARNESS") (Rhino may be busy ~20s+)..."
 "$RC8" -r "$INSTANCE" script "$HARNESS" || true
 
-# --- block until the harness rewrites the report, or time out ---
+# --- wait for the report file to appear (Rhino has started executing) ---
 waited=0
 while [ ! -f "$REPORT" ]; do
     if [ "$waited" -ge "$TIMEOUT" ]; then
-        echo "TIMEOUT after ${TIMEOUT}s waiting for $REPORT (Rhino may still be running)." >&2
+        echo "TIMEOUT after ${TIMEOUT}s waiting for Rhino to start." >&2
         exit 2
     fi
     sleep 1
     waited=$((waited + 1))
 done
 
-echo "Rhino finished in ~${waited}s. Report:"
-echo "------------------------------------------------------------"
-cat "$REPORT"
+# --- stream report output in real time ---
+echo '------------------------------------------------------------'
+tail -f "$REPORT" &
+TAIL_PID=$!
+trap 'kill $TAIL_PID 2>/dev/null || true' EXIT
+
+# --- wait for done marker (Rhino has finished) ---
+while [ ! -f "$DONE" ]; do
+    if [ "$waited" -ge "$TIMEOUT" ]; then
+        echo "TIMEOUT after ${TIMEOUT}s waiting for Rhino to finish." >&2
+        exit 2
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+
+# Let tail catch the final lines, then clean up.
+sleep 1
+kill $TAIL_PID 2>/dev/null || true
+wait $TAIL_PID 2>/dev/null || true
+echo '------------------------------------------------------------'
+echo "Rhino finished in ~${waited}s."

@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 from pathlib import Path
@@ -52,10 +53,14 @@ def get_log_filepath():
 def get_generator_filepath():
     return Path(__file__).parent.parent.resolve()
 
+_log_t0 = time.time()
+
 def log(message):
-    print(f"log:{message}")
+    elapsed = time.time() - _log_t0
+    print("[{:.1f}s] log:{}".format(elapsed, message))
+    sys.stdout.flush()
     with open(get_log_filepath(), "a", encoding='utf-8') as f:
-        f.write(f"{message}\n")
+        f.write("{}\n".format(message))
 
 def log_clear(message=""):
     print(f"log_clear:{message}")

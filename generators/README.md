@@ -39,7 +39,7 @@ or comparing legacy vs Python behavior. Slow to iterate; not what production run
 [dev/_devkit/run_harness.sh](dev/_devkit/run_harness.sh) dispatcher, which dispatches
 [dev/RelativeMotion/harness.py](dev/RelativeMotion/harness.py) into an already-running Rhino 8
 session via `rhinocode script`, waits for the report file to reappear, and prints it. Calls the
-same `generate_relative_motion_splint()` entrypoint production uses, with input pulled from
+same `RelativeMotionGenerator.generate()` entrypoint production uses, with input pulled from
 `dev/RelativeMotion/inputs/*.json` (edit `INPUT_FILES` in the harness to switch cases). Bakes all
 intermediate breps / edges / rails into the live Rhino doc for hand inspection (via
 `dev/_devkit/bake_utils.py`), and drops per-step diagnostic output into
@@ -56,7 +56,7 @@ Start the factory dev server (`splint_factory`) and the processor (`splint_geo_p
 locally, then submit a job through the factory UI. The processor dispatches
 [RelativeMotion.py](RelativeMotion.py) via `rhinocode script`; that runner shim adds `src/` to
 `sys.path`, force-reloads the algorithm module (defeats the `keepRhinoAlive` `sys.modules`
-cache), and calls `generate_relative_motion_splint(..., is_production=True)`.
+cache), and calls `RelativeMotionGenerator.generate()` via `prod_runner.run_production_job()`.
 
 **Use when:** validating the end-to-end pipeline — real inbox JSON, cleaned outbox, log
 archiving, mesh delivery to the factory. Cycle time 30-90+ s (Rhino warmup + full pipeline +

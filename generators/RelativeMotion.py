@@ -3,8 +3,8 @@ RelativeMotion.py (runner)
 
 Production entrypoint invoked by splint_geo_processor via `rhinocode script`. Discovered by
 splint_geo_processor/src/processors/pipeline.ts, which prefers this .py over RelativeMotion.gh.
-Thin shim: adds generators/src to sys.path, imports the algorithm module, and runs it in
-production mode. All geometry lives in generators/src/RelativeMotion.py.
+Thin shim: adds generators/src to sys.path, imports the algorithm module, loads the job from
+the inbox, and delegates to prod_runner for the common generate->export->sentinel flow.
 
 IMPORTANT: keepRhinoAlive=true keeps a single Python interpreter alive across jobs, so
 sys.modules caches RelativeMotion after the first job and subsequent jobs would run pre-edit
@@ -41,20 +41,25 @@ sys.modules.pop("RelativeMotion", None)
 _trace("runner: popped RelativeMotion cached=" + str(_had_cached))
 
 try:
-    _trace("runner: importing RelativeMotion")
-    from RelativeMotion import generate_relative_motion_splint
-    # Also grab splintcommon.log directly so we can emit the pipeline-completion sentinel
-    # even in the failure path (log goes to ~/SplintFactoryFiles/outbox/log.txt, which is
-    # exactly where splint_geo_processor/src/processors/pipeline.ts scans for
-    # [PIPELINE_RESULT:SUCCESS] / [PIPELINE_RESULT:FAILURE] substrings to unblock its poll).
-    from splintcommon import log as _pipeline_log
+    _trace("runner: importing RelativeMotion + prod_runner")
+    from RelativeMotion import RelativeMotionGenerator
+    from splintcommon import log as _pipeline_log, load_job_data
+    from prod_runner import run_production_job
 
-    _trace("runner: import ok, calling generate_relative_motion_splint")
-    generate_relative_motion_splint(
-        raw_data_dev=None, is_production=True, should_save_mesh=True)
-    _trace("runner: generate_relative_motion_splint returned")
-    # Fast-completion sentinel: pipeline.ts scans log.txt for this exact substring and stops
-    # polling immediately, avoiding a ~90s inactivity timeout waiting for the mesh file.
+    # Load job from inbox (RelativeMotion-specific data extraction stays here).
+    _trace("runner: loading job data")
+    job_data, object_id, root_filename, output_dir, _ = load_job_data(
+        True, "RelativeMotion")
+    raw_data = job_data["relative_motion_data"]
+    _pipeline_log("RelativeMotion runner: PROD job '{0}' (objectID {1})".format(
+        root_filename, object_id))
+
+    # Generate geometry and export mesh via the shared production flow.
+    _trace("runner: calling run_production_job")
+    generator = RelativeMotionGenerator()
+    run_production_job(generator, raw_data, object_id, root_filename, output_dir)
+    _trace("runner: run_production_job returned")
+
     _pipeline_log("[PIPELINE_RESULT:SUCCESS] RelativeMotion runner completed")
     _trace("runner: emitted [PIPELINE_RESULT:SUCCESS]")
 except Exception as _exc:

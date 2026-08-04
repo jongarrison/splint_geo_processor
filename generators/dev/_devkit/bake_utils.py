@@ -7,6 +7,7 @@ algorithm - splint-specific logic (input list, calling the algorithm, which debu
 stays in the per-splint harness.py.
 """
 
+import time as _time
 import Rhino
 import scriptcontext as sc
 import rhinoscriptsyntax as rs
@@ -14,20 +15,30 @@ import Rhino.Geometry as rg
 
 
 class ReportBuffer:
-    """Buffers report lines, echoing each to the Rhino console, and writes them to `path` on
-    flush(). run_harness.sh deletes `path` before dispatching and waits for it to reappear as
-    the "Rhino finished" signal, so flush() must be the harness's last action."""
+    """Streams report lines to `path` in real time, with elapsed-time prefixes.
+
+    run_harness.sh tails `path` for live output and watches for a `.done` marker
+    (written by flush()) as the completion signal."""
 
     def __init__(self, path):
         self.path = path
-        self.lines = []
+        self._done_path = path.with_suffix(".done")
+        self._t0 = _time.time()
+        # Create/truncate the report file immediately (signals "started" to run_harness.sh).
+        self.path.write_text("", encoding="utf-8")
 
     def write(self, msg=""):
-        print(msg)
-        self.lines.append(str(msg))
+        elapsed = _time.time() - self._t0
+        line = "[{:.1f}s] {}".format(elapsed, msg)
+        print(line)
+        import sys
+        sys.stdout.flush()
+        with open(str(self.path), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
     def flush(self):
-        self.path.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
+        # Write done marker so run_harness.sh knows the run is complete.
+        self._done_path.write_text("done\n", encoding="utf-8")
 
 
 def ensure_layer(name, color):
@@ -49,10 +60,11 @@ def clear_doc():
     sc.doc.Views.Redraw()
 
 
-def _bake_one(geom, layer, offset=None):
+def _bake_one(geom, layer, offset=None, name=None):
     """Add a single RhinoCommon geometry object to the doc on the given layer. If offset is
     provided, the geometry is DUPLICATED first and the copy is translated - the caller's
-    original is never mutated. Returns guid or None."""
+    original is never mutated. Sets the object's Name property when name is given.
+    Returns guid or None."""
     if offset is not None:
         if isinstance(geom, rg.Brep):
             geom = geom.DuplicateBrep()
@@ -77,10 +89,12 @@ def _bake_one(geom, layer, offset=None):
         guid = sc.doc.Objects.AddPoint(geom)
     if guid:
         rs.ObjectLayer(guid, layer)
+        if name:
+            rs.ObjectName(guid, name)
     return guid
 
 
-def bake(geom, layer, color, offset=None):
+def bake(geom, layer, color, offset=None, name=None):
     """Bake one geometry or a (possibly nested) list of geometries onto a layer. Returns count.
     Pass offset (Vector3d, e.g. from PreviewLayout.next_offset()) to shift the preview copy
     along +X without touching the working geometry."""
@@ -90,9 +104,9 @@ def bake(geom, layer, color, offset=None):
         return 0
     if isinstance(geom, (list, tuple)):
         for g in geom:
-            count += bake(g, layer, color, offset=offset)
+            count += bake(g, layer, color, offset=offset, name=name)
         return count
-    if _bake_one(geom, layer, offset=offset) is not None:
+    if _bake_one(geom, layer, offset=offset, name=name) is not None:
         count += 1
     return count
 
@@ -106,7 +120,7 @@ def bake_preview(label, geom, layer, color, offset=None, report=None):
         if report:
             report("preview '{0}': geometry missing (None); skipping bake".format(label))
         return 0
-    count = bake(geom, layer, color, offset=offset)
+    count = bake(geom, layer, color, offset=offset, name=label)
     if count == 0:
         return 0
     # Position the label above the bounding box. Compute on the original geom (bake already
