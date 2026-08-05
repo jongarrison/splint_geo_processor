@@ -48,22 +48,18 @@ def ensure_layer(name, color):
 
 
 def clear_doc():
-    """Wipe every baked object so each run starts from a clean doc. Only touches real document
-    objects (Grasshopper preview geometry is not a doc object, so live GH work is untouched).
-    Also clears Rhino's command history window (each run's log lines otherwise pile up behind
-    old runs') and redraws the viewport immediately so the clear is visible right away rather
-    than waiting for the harness's final Redraw() call at the end of a (possibly long) run."""
+    """Wipe every baked object so each run starts from a clean doc. Also clears Rhino's
+    command history window."""
     objs = rs.AllObjects()
     if objs:
         rs.DeleteObjects(objs)
     Rhino.RhinoApp.ClearCommandHistoryWindow()
-    sc.doc.Views.Redraw()
 
 
-def _bake_one(geom, layer, offset=None, name=None):
+def _bake_one(geom, layer, offset=None, name=None, color=None):
     """Add a single RhinoCommon geometry object to the doc on the given layer. If offset is
     provided, the geometry is DUPLICATED first and the copy is translated - the caller's
-    original is never mutated. Sets the object's Name property when name is given.
+    original is never mutated. Sets the object's Name and per-object color when given.
     Returns guid or None."""
     if offset is not None:
         if isinstance(geom, rg.Brep):
@@ -91,6 +87,8 @@ def _bake_one(geom, layer, offset=None, name=None):
         rs.ObjectLayer(guid, layer)
         if name:
             rs.ObjectName(guid, name)
+        if color:
+            rs.ObjectColor(guid, color)
     return guid
 
 
@@ -106,16 +104,15 @@ def bake(geom, layer, color, offset=None, name=None):
         for g in geom:
             count += bake(g, layer, color, offset=offset, name=name)
         return count
-    if _bake_one(geom, layer, offset=offset, name=name) is not None:
+    if _bake_one(geom, layer, offset=offset, name=name, color=color) is not None:
         count += 1
     return count
 
 
-def bake_preview(label, geom, layer, color, offset=None, report=None):
-    """Bake `geom` to `layer` at `offset`, then drop a text-dot label above its bounding box so
-    the preview is self-identifying in the viewport. Handles Brep + Mesh + Curve + lists.
-    Returns the count of baked objects, or 0 when geom is None. `report` is an optional
-    callable(msg) used to log a "geometry missing" line (pass a ReportBuffer.write)."""
+def bake_preview(label, geom, layer, color, offset=None, report=None, label_z=None):
+    """Bake `geom` to `layer` at `offset`, then drop a text-dot label above it.
+    When label_z is given, the label is placed at that absolute Z (pre-offset) instead of
+    computing from the bounding box. Returns baked object count."""
     if geom is None:
         if report:
             report("preview '{0}': geometry missing (None); skipping bake".format(label))
@@ -123,8 +120,7 @@ def bake_preview(label, geom, layer, color, offset=None, report=None):
     count = bake(geom, layer, color, offset=offset, name=label)
     if count == 0:
         return 0
-    # Position the label above the bounding box. Compute on the original geom (bake already
-    # applied offset internally on a duplicate), then shift the label point by the same offset.
+    # Label position: use explicit label_z when provided, otherwise bbox top + margin.
     ref = geom[0] if isinstance(geom, (list, tuple)) and len(geom) > 0 else geom
     try:
         bbox = ref.GetBoundingBox(True)
@@ -132,16 +128,16 @@ def bake_preview(label, geom, layer, color, offset=None, report=None):
         bbox = None
     if bbox is None:
         return count
-    top = rg.Point3d(0.5 * (bbox.Min.X + bbox.Max.X),
-                     0.5 * (bbox.Min.Y + bbox.Max.Y),
-                     bbox.Max.Z + 10.0)
+    cx = 0.5 * (bbox.Min.X + bbox.Max.X)
+    cy = 0.5 * (bbox.Min.Y + bbox.Max.Y)
+    z = label_z if label_z is not None else (bbox.Max.Z + 10.0)
+    top = rg.Point3d(cx, cy, z)
     if offset is not None:
         top = rg.Point3d(top.X + offset.X, top.Y + offset.Y, top.Z + offset.Z)
-    lbl_layer = layer + "_labels"
-    ensure_layer(lbl_layer, (255, 255, 100))
+    ensure_layer("labels", (255, 255, 100))
     dot = rs.AddTextDot(label, (top.X, top.Y, top.Z))
     if dot:
-        rs.ObjectLayer(dot, lbl_layer)
+        rs.ObjectLayer(dot, "labels")
     return count
 
 

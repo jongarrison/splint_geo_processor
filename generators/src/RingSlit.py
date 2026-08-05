@@ -58,7 +58,7 @@ class RingSlitError(Exception):
 # 1.15 (15% overshoot) is enough to punch cleanly through the wall even with small
 # measurement noise. Increase if a splint's wall thickness measurement is noisier;
 # decrease only if the extra overshoot is causing unwanted trim into adjacent geometry.
-_WALL_MARGIN = 1.15
+_WALL_MARGIN = 1.22
 
 # Distance to shoot the wall-thickness ray (mm). Splint ring bores are <=~50mm across,
 # so 500mm is 10x safety without wasting time on absurd hits.

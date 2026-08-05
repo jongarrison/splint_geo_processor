@@ -355,8 +355,25 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
     # stays perpendicular to the rail tangent at every point). For our use case where we want
     # the profile to keep its INITIAL orientation (no rotation), we instead sample points along
     # the rail and loft translated copies of the profile.
-    # Approach: translate the profile to N evenly-spaced points along the rail, then loft them.
-    n_sections = 12  # enough for a smooth ~30deg arc
+    # --- Tip taper (smooth rounding of the ramp's outer +Y/+X and -Y/+X corners) --------
+    # The last few loft sections are built as progressively smaller stadiums (same topology
+    # as the original profile: 2 lines + 2 arcs) so the loft tapers inward and the tip
+    # corners come out rounded instead of sharp.
+    #
+    # Tuning knobs:
+    #   n_sections       - total loft sections (0..n_sections inclusive)
+    #   taper_start_idx  - sections 0..taper_start_idx are full-size; after that, taper
+    #   max_offset       - maximum inset (mm) at the final section (controls how aggressively
+    #                      the corners round; larger = more rounding, smaller = subtler)
+    #   progression      - quarter-circle (smooth ease-in): d = max_offset * (1 - sqrt(1 - t^2))
+    #                      where t = (si - taper_start_idx) / n_tapered, t in (0, 1]
+    n_sections = 12
+    taper_start_idx = 8
+    max_offset = ramp_thickness * 0.3
+    n_tapered = n_sections - taper_start_idx  # 4
+    log("build_support_path_ramp: tip taper last {0} sections, max_offset={1:.2f}mm".format(
+        n_tapered, max_offset))
+
     loft_curves = []
     for si in range(n_sections + 1):
         frac = float(si) / n_sections
@@ -365,9 +382,20 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
             continue
         pt = ramp_rail.PointAt(t_param)
         offset = pt - start_point  # translation from profile's original position
-        section = ramp_profile.DuplicateCurve()
-        section.Translate(rg.Vector3d(offset))
+
+        if si > taper_start_idx:
+            # Build a smaller stadium from scratch (quarter-circle inward progression)
+            t = float(si - taper_start_idx) / n_tapered
+            d = max_offset * (1.0 - math.sqrt(1.0 - t * t))
+            section = _build_offset_stadium(rail_top, ramp_thickness, d, tol)
+            if section is None:
+                section = ramp_profile.DuplicateCurve()
+            section.Translate(rg.Vector3d(offset))
+        else:
+            section = ramp_profile.DuplicateCurve()
+            section.Translate(rg.Vector3d(offset))
         loft_curves.append(section)
+    _dput(debug, "loft_curves", list(loft_curves))
     if len(loft_curves) < 2:
         raise SupportPathRampError(
             "could not sample enough points along ramp_rail for loft ({0} sections)".format(
@@ -465,3 +493,38 @@ def _stadium_end_cap(rail_top, rail_bottom, at_start, thickness):
     if not arc.IsValid:
         return None
     return arc.ToNurbsCurve()
+
+
+def _build_offset_stadium(rail_top, thickness, d, tol):
+    """Build a stadium profile inset by `d` from the original. Same construction as the
+    original (2 lines + 2 arcs) so all loft sections have identical curve structure.
+    Returns None if d is too large for a valid result."""
+    rail_len = rail_top.GetLength()
+    if d <= 0.0 or 2.0 * d >= thickness or 2.0 * d >= rail_len:
+        return None
+    # Trim the rail by d from each end
+    ok_s, t_s = rail_top.LengthParameter(d)
+    ok_e, t_e = rail_top.LengthParameter(rail_len - d)
+    if not ok_s or not ok_e or t_s >= t_e:
+        return None
+    inner_rail_top = rail_top.Trim(t_s, t_e)
+    if inner_rail_top is None:
+        return None
+    # Shift rail_top down by d (inward from the top edge)
+    inner_rail_top.Translate(rg.Vector3d(0.0, 0.0, -d))
+    # Build rail_bottom shifted further down by the reduced thickness
+    new_thickness = thickness - 2.0 * d
+    inner_rail_bottom = inner_rail_top.DuplicateCurve()
+    inner_rail_bottom.Translate(rg.Vector3d(0.0, 0.0, -new_thickness))
+    # End caps with the reduced thickness
+    cap_s = _stadium_end_cap(inner_rail_top, inner_rail_bottom,
+                             at_start=True, thickness=new_thickness)
+    cap_e = _stadium_end_cap(inner_rail_top, inner_rail_bottom,
+                             at_start=False, thickness=new_thickness)
+    if cap_s is None or cap_e is None:
+        return None
+    joined = rg.Curve.JoinCurves(
+        [inner_rail_top, cap_e, inner_rail_bottom, cap_s], tol)
+    if joined is None or len(joined) != 1 or not joined[0].IsClosed:
+        return None
+    return joined[0]

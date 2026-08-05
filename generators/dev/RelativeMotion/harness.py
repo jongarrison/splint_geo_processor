@@ -30,15 +30,15 @@ SWITCHING INPUTS
 # One or more inputs to run in the same session. Each row is offset in +Y so results sit
 # side-by-side without overlapping. Add / remove entries freely.
 INPUT_FILES = [
-    "AASA_20.json",
+    # "AASA_20.json",
     "ASAA_BTR8_prod.json",
     "ASAX_20deg.json",
-    "ASSA_20.json",
+    # "ASSA_20.json",
     "XASA_ZM1Q_prod.json",
-    "ASSA_2QY6.json",
-    "2QY6_prod_exact.json",
+    # "ASSA_2QY6.json",
+    # "2QY6_prod_exact.json",
     "MX2E.json",
-    "AASX_20.json",
+    # "AASX_20.json",
 ]
 
 import sys
@@ -85,20 +85,22 @@ _layout = bk.PreviewLayout(preview_spacing_mm=90.0, row_spacing_mm=150.0, report
 ensure_layer = bk.ensure_layer
 
 
-def bake_preview(label, geom, layer, color, offset=None):
-    return bk.bake_preview(label, geom, layer, color, offset=offset, report=report)
+def bake_preview(label, geom, layer, color, offset=None, label_z=None):
+    return bk.bake_preview(label, geom, layer, color, offset=offset, report=report,
+                           label_z=label_z)
 
 
 # ------------------------------------------------------------------ stop_after config --------
 # Set to a phase number to stop the pipeline early for focused dev work.
 # None = run full pipeline. Examples: 7.0 stops after rail extraction, 6.0 after loft+bore.
-STOP_AFTER = 7.0
+STOP_AFTER = None #7.0
 
-# Whitelist of phase numbers and/or item keys to bake. Empty = bake everything.
-# Phase numbers match all items in that phase; item keys match individual geometry entries.
-# Examples: {7.0} = only phase 7, {6.0, 7.0} = phases 6 and 7,
-#           {"splint_solid"} = just that key from any phase, {7.0, "p_closed_profile"} = mixed.
-PREVIEW_FILTER = {6.0, 7.0}
+# Whitelist of phase numbers and/or item keys to bake. Empty set = bake everything.
+# Exact phases:   {6.0, 7.0}
+# Minimum phase:  {"7.0+"}          (all phases >= 7.0)
+# Specific keys:  {"splint_solid"}
+# Mixed:          {"5.0+", "splint_solid"}
+PREVIEW_FILTER = {"7.0+"} #{6.0, 7.0}
 
 
 def _phase_color(index, total):
@@ -116,16 +118,28 @@ def _bake_phase_geometry(debug, row_y, report_fn):
         report_fn("  (no phase data to preview)")
         return
 
-    # Filter: extract phase numbers and item keys from PREVIEW_FILTER.
-    filter_phases = {x for x in PREVIEW_FILTER if isinstance(x, (int, float))}
-    filter_keys = {x for x in PREVIEW_FILTER if isinstance(x, str)}
+    # Parse PREVIEW_FILTER: numbers = exact phases, "X.X+" = minimum threshold, strings = keys.
+    filter_phases = set()
+    filter_keys = set()
+    filter_min = None
+    for x in PREVIEW_FILTER:
+        if isinstance(x, (int, float)):
+            filter_phases.add(x)
+        elif isinstance(x, str) and x.endswith("+"):
+            filter_min = float(x[:-1])
+        elif isinstance(x, str):
+            filter_keys.add(x)
     has_filter = bool(PREVIEW_FILTER)
 
     phase_spacing = 100.0
+    _LABEL_STEP = 8.0
+    render_index = 0
+    color_index = 0
     for i, phase in enumerate(phases):
-        phase_match = (not has_filter) or (phase["number"] in filter_phases)
-        offset = rg.Vector3d(i * phase_spacing, row_y, 0.0)
-        color = _phase_color(i, len(phases))
+        phase_match = ((not has_filter)
+                       or (phase["number"] in filter_phases)
+                       or (filter_min is not None and phase["number"] >= filter_min))
+        offset = rg.Vector3d(render_index * phase_spacing, row_y, 0.0)
         layer_name = "P{0}_{1}".format(phase["number"], phase["title"].replace(" ", "_"))
         keys_baked = 0
         for key in phase["keys"]:
@@ -134,26 +148,27 @@ def _bake_phase_geometry(debug, row_y, report_fn):
             geo = debug.get(key)
             if geo is None:
                 continue
-            bake_preview(key, geo, layer_name, color, offset=offset)
+            color = _phase_color(color_index, 0)
+            label_z = 20.0 + keys_baked * _LABEL_STEP
+            bake_preview(key, geo, layer_name, color, offset=offset, label_z=label_z)
             keys_baked += 1
+            color_index += 1
         if keys_baked:
-            # Phase title annotation floating above the phase geometry.
-            title_pt = (offset.X + phase_spacing * 0.5, offset.Y, 80.0)
+            title_z = 20.0 + keys_baked * _LABEL_STEP + 15.0
+            title_pt = (render_index * phase_spacing, row_y, title_z)
             title_text = "Phase {0}: {1}".format(phase["number"], phase["title"])
-            title_layer = layer_name + "_labels"
-            ensure_layer(title_layer, (255, 255, 100))
+            ensure_layer("labels", (255, 255, 100))
             title_dot = rs.AddTextDot(title_text, title_pt)
             if title_dot:
-                rs.ObjectLayer(title_dot, title_layer)
+                rs.ObjectLayer(title_dot, "labels")
+            render_index += 1
             report_fn("  Phase {0} ({1}): baked {2} item(s) on layer {3}".format(
                 phase["number"], phase["title"], keys_baked, layer_name))
-            sc.doc.Views.Redraw()
 
 
 def main():
     report("=== RelativeMotion dev harness ===")
     bk.clear_doc()
-    sc.doc.Views.Redraw()
 
     if STOP_AFTER is not None:
         report("STOP_AFTER = {0} (pipeline will halt after this phase)".format(STOP_AFTER))

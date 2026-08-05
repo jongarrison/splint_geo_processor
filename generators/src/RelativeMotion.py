@@ -77,7 +77,7 @@ _CAP_TOL = 1e-2
 # Chamfer distances (mm). Harness-validated 2026-07-10 (dev/RelativeMotion/harness.py PROD
 # CANDIDATE): native Brep.CreateFilletEdges + BlendType.Chamfer + RailType.DistanceFromEdge.
 # Uniform per pass.
-_CHAMFER_RIM_MM = 0.5          # anchor bore rims (both proximal and distal, skin-contact points)
+_CHAMFER_RIM_MM = 1.2          # anchor bore rims (both proximal and distal, skin-contact points)
 _CHAMFER_PERIMETER_MM = 0.25   # outer perimeter over support spans (anchor stretches stay sharp)
 
 # Perimeter chamfer is applied variable-radius: taper to ~zero at both ends of each support
@@ -2030,7 +2030,7 @@ class RelativeMotionGenerator(SplintGenerator):
         support_prong_arc_deg = 55.0            # END-support cradle prong arc width (wider contact)
         support_arc_deg = 30.0                  # MID-support arc width
 
-        radial_band_thickness_mm = 1.65
+        radial_band_thickness_mm = 2.45
         # 2026-07-24: briefly bumped 1.5x -> 3.0x while diagnosing AASX_20.json, on the theory that
         # the ramp's end-cap bulge was colliding with the cradle's tip cap. REVERTED: the actual bug
         # was that extract_support_path_rails was rooting the ramp on the cradle's FULL there-and-back
@@ -2439,9 +2439,20 @@ class RelativeMotionGenerator(SplintGenerator):
                 support_path_ramp_debugs.append(ramp_debug)
             log("Phase 9: support path ramp finished, {0}/{1} ramp(s) applied".format(
                 ramp_successes, len(rails_to_ramp)))
+            # Extract previewable geometry from per-rail debug dicts
+            ramp_loft_curves = []
+            ramp_open_ducts = []
+            for rd in support_path_ramp_debugs:
+                lc = rd.get("loft_curves")
+                if lc:
+                    ramp_loft_curves.extend(lc)
+                od = rd.get("open_duct")
+                if od:
+                    ramp_open_ducts.append(od)
             tracker.log_phase(9.0, "support path ramp",
                 splint_solid=splint_solid,
-                support_path_ramp_debugs=support_path_ramp_debugs)
+                ramp_loft_curves=ramp_loft_curves,
+                ramp_open_ducts=ramp_open_ducts)
 
         # Mesh the finished solid, then lay it proximal-face-down on the build plate.
         proximal_outward_normal = proximal_profile_plane.Normal * -1.0
