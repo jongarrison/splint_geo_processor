@@ -37,11 +37,13 @@ class MeshExportError(Exception):
 
 
 def mesh_brep(brep):
-    """Mesh a brep using Rhino's 'Smooth and slower' quality preset.
+    """Mesh a brep using Rhino's 'Smooth and slower' quality preset, with tightened
+    angle and edge-length limits.
 
-    This matches the settings from Rhino's Mesh command with the 'Smooth and slower' preset:
-    Density=0.8, MaxAngle=20, MinEdgeLength=0.0001, SimplePlanes=True, RefineGrid=True,
-    MinInitialGridQuads=16, ClosedObjectPostProcess=True.
+    Base preset: Density=0.8, SimplePlanes=True, RefineGrid=True, MinInitialGridQuads=16,
+    ClosedObjectPostProcess=True. Overrides from preset: MaxAngle=15 (was 20, tighter to
+    reduce angular facets on gently-curved surfaces), MaxEdgeLength=3mm (was unlimited,
+    caps triangle size on low-curvature faces like the splint underside).
 
     No quality gating - the caller decides what to do with the result. Use inspect_mesh()
     to log diagnostics if needed.
@@ -58,12 +60,13 @@ def mesh_brep(brep):
     if brep is None:
         raise ValueError("mesh_brep: brep is None")
 
-    # Rhino's "Smooth and slower" preset parameters
+    # Rhino's "Smooth and slower" preset parameters, with tightened angle and edge-length
+    # limits to prevent large coarse triangles on gently-curved surfaces (e.g. splint underside).
     params = rg.MeshingParameters()
     params.RelativeTolerance = 0.8       # Density
-    params.MaximumAngle = 20.0           # degrees (Rhino converts internally)
+    params.MaximumAngle = 15.0           # degrees; was 20 - tighter to reduce angular facets
     params.MinimumEdgeLength = 0.0001
-    params.MaximumEdgeLength = 0.0       # 0 = no limit
+    params.MaximumEdgeLength = 3.0       # mm cap; prevents large triangles on low-curvature faces
     params.SimplePlanes = True
     params.RefineGrid = True
     params.GridMinCount = 16             # MinInitialGridQuads

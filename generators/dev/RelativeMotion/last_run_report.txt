@@ -12,42 +12,46 @@
 [0.0s] 
 [0.0s] === row 0 at +Y 0mm: ASAA_BTR8_prod.json ===
 [0.0s] running RelativeMotionGenerator.generate (objectID DV00)...
-[4.8s]   Phase 7.0 (extract support rails): baked 3 item(s) on layer P7.0_extract_support_rails
-[4.8s]   Phase 7.5 (chamfer): baked 1 item(s) on layer P7.5_chamfer
-[4.8s]   Phase 7.6 (anchor slitting): baked 8 item(s) on layer P7.6_anchor_slitting
-[4.8s]   Phase 8.0 (emboss objectID): baked 5 item(s) on layer P8.0_emboss_objectID
-[4.8s]   Phase 9.0 (support path ramp): baked 3 item(s) on layer P9.0_support_path_ramp
-[4.8s]   Phase 10.0 (mesh and orient): baked 3 item(s) on layer P10.0_mesh_and_orient
-[4.8s]   pipeline complete for 'ASAA_BTR8_prod.json'
-[4.8s] 
-[4.8s] === row 1 at +Y 150mm: ASAX_20deg.json ===
-[4.8s] running RelativeMotionGenerator.generate (objectID DV01)...
-[7.4s]   Phase 7.0 (extract support rails): baked 3 item(s) on layer P7.0_extract_support_rails
-[7.4s]   Phase 7.5 (chamfer): baked 1 item(s) on layer P7.5_chamfer
-[7.4s]   Phase 7.6 (anchor slitting): baked 8 item(s) on layer P7.6_anchor_slitting
-[7.4s]   Phase 8.0 (emboss objectID): baked 5 item(s) on layer P8.0_emboss_objectID
-[7.4s]   Phase 9.0 (support path ramp): baked 3 item(s) on layer P9.0_support_path_ramp
-[7.4s]   Phase 10.0 (mesh and orient): baked 3 item(s) on layer P10.0_mesh_and_orient
-[7.4s]   pipeline complete for 'ASAX_20deg.json'
-[7.4s] 
-[7.4s] === row 2 at +Y 300mm: XASA_ZM1Q_prod.json ===
-[7.4s] running RelativeMotionGenerator.generate (objectID DV02)...
-[10.5s]   Phase 7.0 (extract support rails): baked 3 item(s) on layer P7.0_extract_support_rails
-[10.5s]   Phase 7.5 (chamfer): baked 1 item(s) on layer P7.5_chamfer
-[10.5s]   Phase 7.6 (anchor slitting): baked 8 item(s) on layer P7.6_anchor_slitting
-[10.5s]   Phase 8.0 (emboss objectID): baked 5 item(s) on layer P8.0_emboss_objectID
-[10.5s]   Phase 9.0 (support path ramp): baked 3 item(s) on layer P9.0_support_path_ramp
-[10.5s]   Phase 10.0 (mesh and orient): baked 3 item(s) on layer P10.0_mesh_and_orient
-[10.5s]   pipeline complete for 'XASA_ZM1Q_prod.json'
-[10.5s] 
-[10.5s] === row 3 at +Y 450mm: MX2E.json ===
-[10.5s] running RelativeMotionGenerator.generate (objectID DV03)...
-[15.2s]   Phase 7.0 (extract support rails): baked 3 item(s) on layer P7.0_extract_support_rails
-[15.2s]   Phase 7.5 (chamfer): baked 1 item(s) on layer P7.5_chamfer
-[15.2s]   Phase 7.6 (anchor slitting): baked 8 item(s) on layer P7.6_anchor_slitting
-[15.2s]   Phase 8.0 (emboss objectID): baked 5 item(s) on layer P8.0_emboss_objectID
-[15.2s]   Phase 9.0 (support path ramp): baked 3 item(s) on layer P9.0_support_path_ramp
-[15.2s]   Phase 10.0 (mesh and orient): baked 3 item(s) on layer P10.0_mesh_and_orient
-[15.2s]   pipeline complete for 'MX2E.json'
-[15.2s] 
-[15.2s] done. report written to /Users/jon/work_3d/splint_work/splint_geo_processor/generators/dev/RelativeMotion/last_run_report.txt
+[4.9s]   Phase 7.0 (extract support rails): baked 3 item(s) on layer P7.0_extract_support_rails
+[4.9s]   Phase 7.5 (chamfer): baked 1 item(s) on layer P7.5_chamfer
+[4.9s]   Phase 7.6 (anchor slitting): baked 8 item(s) on layer P7.6_anchor_slitting
+[5.0s]   Phase 8.0 (emboss objectID): baked 5 item(s) on layer P8.0_emboss_objectID
+[5.0s]   Phase 9.0 (support path ramp): baked 3 item(s) on layer P9.0_support_path_ramp
+[5.0s]   Phase 10.0 (mesh and orient): baked 3 item(s) on layer P10.0_mesh_and_orient
+[5.0s]   pipeline complete for 'ASAA_BTR8_prod.json'
+[6.3s]   exported: ASAA_BTR8_prod.3mf (444.6 KB)
+[6.3s] 
+[6.3s] === row 1 at +Y 150mm: ASAX_20deg.json ===
+[6.3s] running RelativeMotionGenerator.generate (objectID DV01)...
+[8.9s]   Phase 7.0 (extract support rails): baked 3 item(s) on layer P7.0_extract_support_rails
+[8.9s]   Phase 7.5 (chamfer): baked 1 item(s) on layer P7.5_chamfer
+[9.0s]   Phase 7.6 (anchor slitting): baked 8 item(s) on layer P7.6_anchor_slitting
+[9.0s]   Phase 8.0 (emboss objectID): baked 5 item(s) on layer P8.0_emboss_objectID
+[9.0s]   Phase 9.0 (support path ramp): baked 3 item(s) on layer P9.0_support_path_ramp
+[9.0s]   Phase 10.0 (mesh and orient): baked 3 item(s) on layer P10.0_mesh_and_orient
+[9.0s]   pipeline complete for 'ASAX_20deg.json'
+[10.1s]   exported: ASAX_20deg.3mf (314.5 KB)
+[10.1s] 
+[10.1s] === row 2 at +Y 300mm: XASA_ZM1Q_prod.json ===
+[10.1s] running RelativeMotionGenerator.generate (objectID DV02)...
+[13.2s]   Phase 7.0 (extract support rails): baked 3 item(s) on layer P7.0_extract_support_rails
+[13.2s]   Phase 7.5 (chamfer): baked 1 item(s) on layer P7.5_chamfer
+[13.2s]   Phase 7.6 (anchor slitting): baked 8 item(s) on layer P7.6_anchor_slitting
+[13.2s]   Phase 8.0 (emboss objectID): baked 5 item(s) on layer P8.0_emboss_objectID
+[13.2s]   Phase 9.0 (support path ramp): baked 3 item(s) on layer P9.0_support_path_ramp
+[13.2s]   Phase 10.0 (mesh and orient): baked 3 item(s) on layer P10.0_mesh_and_orient
+[13.2s]   pipeline complete for 'XASA_ZM1Q_prod.json'
+[14.5s]   exported: XASA_ZM1Q_prod.3mf (400.7 KB)
+[14.5s] 
+[14.5s] === row 3 at +Y 450mm: MX2E.json ===
+[14.5s] running RelativeMotionGenerator.generate (objectID DV03)...
+[19.3s]   Phase 7.0 (extract support rails): baked 3 item(s) on layer P7.0_extract_support_rails
+[19.3s]   Phase 7.5 (chamfer): baked 1 item(s) on layer P7.5_chamfer
+[19.3s]   Phase 7.6 (anchor slitting): baked 8 item(s) on layer P7.6_anchor_slitting
+[19.4s]   Phase 8.0 (emboss objectID): baked 5 item(s) on layer P8.0_emboss_objectID
+[19.4s]   Phase 9.0 (support path ramp): baked 3 item(s) on layer P9.0_support_path_ramp
+[19.4s]   Phase 10.0 (mesh and orient): baked 3 item(s) on layer P10.0_mesh_and_orient
+[19.4s]   pipeline complete for 'MX2E.json'
+[20.5s]   exported: MX2E.3mf (677.2 KB)
+[20.5s] 
+[20.5s] done. report written to /Users/jon/work_3d/splint_work/splint_geo_processor/generators/dev/RelativeMotion/last_run_report.txt

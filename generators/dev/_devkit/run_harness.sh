@@ -24,7 +24,7 @@ set -euo pipefail
 
 HARNESS="${1:?usage: run_harness.sh <path-to-harness.py>}"
 HARNESS="$(cd "$(dirname "$HARNESS")" && pwd)/$(basename "$HARNESS")"
-REPORT="$(dirname "$HARNESS")/last_run_report.txt"
+REPORT="$(dirname "$HARNESS")/outputs/last_run_report.txt"
 RC8="/Applications/Rhino 8.app/Contents/Resources/bin/rhinocode"
 TIMEOUT="${TIMEOUT:-180}"   # seconds to wait for Rhino to finish
 

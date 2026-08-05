@@ -15,3 +15,8 @@ stubs/*
 
 # Test fixture results (ephemeral, regenerated on each run)
 test-fixtures/*.result.json
+
+# Dev harness outputs (mesh files, reports - all regenerated each run)
+generators/dev/**/outputs/
+# Stale report files left at harness root from before outputs/ migration
+generators/dev/**/last_run_report*

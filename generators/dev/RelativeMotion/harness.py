@@ -41,6 +41,8 @@ INPUT_FILES = [
     # "AASX_20.json",
 ]
 
+ENABLE_MESH_EXPORT = True  # when True, export 3mf to outputs/ (same path prod uses)
+
 import sys
 import json
 import traceback
@@ -55,7 +57,10 @@ _HERE = Path(__file__).resolve().parent               # .../generators/dev/Relat
 _SRC = _HERE.parent.parent / "src"                     # .../generators/src
 _DEVKIT = _HERE.parent / "_devkit"                     # .../generators/dev/_devkit
 _INPUTS = _HERE / "inputs"
-_REPORT = _HERE / "last_run_report.txt"
+_OUTPUTS = _HERE / "outputs"
+if not _OUTPUTS.exists():
+    _OUTPUTS.mkdir(parents=True)
+_REPORT = _OUTPUTS / "last_run_report.txt"
 for _p in (_SRC, _DEVKIT):
     if str(_p) not in sys.path:
         sys.path.append(str(_p))
@@ -72,6 +77,10 @@ from RelativeMotion import RelativeMotionGenerator
 import splint_generator
 reload(splint_generator)
 from splint_generator import StopAfterPhase
+
+import SplintMeshes2
+reload(SplintMeshes2)
+from SplintMeshes2 import export_mesh
 
 import bake_utils as bk
 reload(bk)
@@ -234,11 +243,24 @@ def main():
             except Exception:
                 pass
 
-        if result is not None:
+        if ENABLE_MESH_EXPORT and result is not None:
             report("  pipeline complete for '{0}'".format(name))
+            # Export 3mf using the same production path
+            try:
+                root_name = name.replace(".json", "")
+                export_result = export_mesh(
+                    result.mesh, str(_OUTPUTS), root_name, "3mf",
+                    emit_pipeline_signal=False)
+                size_kb = export_result["file_size_bytes"] / 1024.0
+                report("  exported: {0}.3mf ({1:.1f} KB)".format(root_name, size_kb))
+            except Exception as exc:
+                report("  mesh export FAILED: {0}".format(exc))
         elif stopped_early:
             report("  early stop - {0} phase(s) previewed".format(
                 len(debug.get("_phases", []))))
+
+        if not ENABLE_MESH_EXPORT:
+            report("  mesh export disabled (ENABLE_MESH_EXPORT = False)")
 
     # Timestamp text-dot at the origin so there's a freshness indicator in the viewport.
     import datetime
