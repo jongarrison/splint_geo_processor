@@ -919,9 +919,7 @@ export class Processor {
 
     // Python-only splints (generators/{algorithm}.py exists) keep their dev-harness inputs
     // under generators/dev/{algorithm}/inputs/ - capture this job's params there too.
-    if (saveFixture) {
-      this.saveDevHarnessInput(algoPart, objectId, job.inputParameters);
-    }
+    this.saveDevHarnessInput(algoPart, objectId, job.inputParameters);
 
     // Offer to save as test fixture
     const fixtureName = `${algoPart}_${objectId}`.replace(/[^a-zA-Z0-9._-]/g, '_');

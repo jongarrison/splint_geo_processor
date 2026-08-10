@@ -53,9 +53,23 @@ echo "Targeting Rhino 8 instance: $INSTANCE"
 DONE="${REPORT%.txt}.done"
 rm -f "$REPORT" "$DONE"
 
+# --- record Rhino log position before dispatch so we capture only new lines ---
+RHINO_LOG="$HOME/SplintFactoryFiles/outbox/log.txt"
+RHINO_LOG_START=0
+if [ -f "$RHINO_LOG" ]; then
+    RHINO_LOG_START=$(wc -l < "$RHINO_LOG" 2>/dev/null | tr -d ' ')
+fi
+
 # --- dispatch (returns immediately; Rhino runs async) ---
 echo "Dispatching $(basename "$HARNESS") (Rhino may be busy ~20s+)..."
 "$RC8" -r "$INSTANCE" script "$HARNESS" || true
+
+# --- tail Rhino's own log to the console with [rhino] prefix ---
+RHINO_TAIL_PID=""
+if [ -f "$RHINO_LOG" ]; then
+    tail -f -n 0 "$RHINO_LOG" 2>/dev/null | sed 's/^/[rhino] /' &
+    RHINO_TAIL_PID=$!
+fi
 
 # --- wait for the report file to appear (Rhino has started executing) ---
 waited=0
@@ -88,5 +102,15 @@ done
 sleep 1
 kill $TAIL_PID 2>/dev/null || true
 wait $TAIL_PID 2>/dev/null || true
+[ -n "$RHINO_TAIL_PID" ] && { kill $RHINO_TAIL_PID 2>/dev/null || true; wait $RHINO_TAIL_PID 2>/dev/null || true; }
 echo '------------------------------------------------------------'
 echo "Rhino finished in ~${waited}s."
+
+# --- append new Rhino log lines to the report (with [rhino] prefix) ---
+if [ -f "$RHINO_LOG" ] && [ -f "$REPORT" ]; then
+    NEW_LINE_COUNT=$(tail -n "+$((RHINO_LOG_START + 1))" "$RHINO_LOG" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$NEW_LINE_COUNT" -gt 0 ]; then
+        printf '\n=== [rhino] log (%s lines) ===\n' "$NEW_LINE_COUNT" >> "$REPORT"
+        tail -n "+$((RHINO_LOG_START + 1))" "$RHINO_LOG" 2>/dev/null | sed 's/^/[rhino] /' >> "$REPORT"
+    fi
+fi

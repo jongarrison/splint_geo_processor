@@ -11,8 +11,8 @@ full design rationale and coordinate-frame reasoning this module implements.
 
 Construction summary (see cited dev-notes for the worked-out math):
   1. ramp_profile: a closed, planar "stadium" curve built from the caller-oriented support
-     rail, a parallel copy shifted -Z by ramp_thickness, and two semicircular end caps
-     (diameter = ramp_thickness) closing the two open ends.
+     rail, a parallel copy shifted -Z by ramp_thickness, and two G1 blend-curve end caps
+     (tangent to both rails) closing the two open ends.
   2. ramp_rail: a planar arc starting at ramp_profile's reference point (the rail's
      PointAtStart), tangent to a caller-supplied start_tangent direction (typically the same
      elevation-angle direction a supported finger's phalanx already travels), sweeping toward
@@ -175,8 +175,8 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
     _dput(debug, "rail_top", rail_top)
     _dput(debug, "rail_bottom", rail_bottom)
 
-    cap_start = _stadium_end_cap(rail_top, rail_bottom, at_start=True, thickness=ramp_thickness)
-    cap_end = _stadium_end_cap(rail_top, rail_bottom, at_start=False, thickness=ramp_thickness)
+    cap_start = _stadium_end_cap(rail_top, rail_bottom, at_start=True)
+    cap_end = _stadium_end_cap(rail_top, rail_bottom, at_start=False)
     if cap_start is None or cap_end is None:
         raise SupportPathRampError("failed to build one or both stadium end-cap arcs")
     _dput(debug, "cap_start", cap_start)
@@ -256,7 +256,10 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
         boundary_pieces, key=lambda p: p.PointAtNormalizedLength(0.5).DistanceTo(rail_top_mid))
     _dput(debug, "boundary_long_way", boundary_long_way)
 
-    new_outer_joined = rg.Curve.JoinCurves([boundary_long_way, ramp_u], tol)
+    # Use a loose join tolerance here: booleans/chamfers/slits shift the face's outer loop
+    # by small amounts from the original perimeter endpoints, causing exact-tol joins to fail.
+    splice_tol = max(tol, 0.1)
+    new_outer_joined = rg.Curve.JoinCurves([boundary_long_way, ramp_u], splice_tol)
     if new_outer_joined is None or len(new_outer_joined) != 1 or not new_outer_joined[0].IsClosed:
         raise SupportPathRampError(
             "failed to splice the ramp's 'U' notch into face {0}'s outer boundary into a "
@@ -466,33 +469,23 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
     return result_brep
 
 
-def _stadium_end_cap(rail_top, rail_bottom, at_start, thickness):
-    """Build a semicircular cap curve (diameter = thickness) joining rail_top's and
-    rail_bottom's corresponding endpoint (start or end), bulging OUTWARD (away from the rest
-    of the curve) so the resulting stadium shape closes cleanly. Returns None if the
-    resulting arc is invalid."""
+def _stadium_end_cap(rail_top, rail_bottom, at_start):
+    """G1 blend curve joining rail_top and rail_bottom at their shared end, tangent to both
+    rails. More compact than a semicircle - doesn't bulge perpendicular to the rail direction
+    so the stadium footprint stays closer to the perimeter. Returns None on failure."""
     if at_start:
-        p_top = rail_top.PointAtStart
-        p_bottom = rail_bottom.PointAtStart
-        tangent = rail_top.TangentAtStart
-        tangent.Reverse()  # bulge away from the curve body at the START end
+        t_top = rail_top.Domain.T0
+        t_bot = rail_bottom.Domain.T0
+        rev_top = True   # at T0: reverse natural direction to depart backward (away from body)
+        rev_bot = True  # at T0: natural direction (into curve) = arrive from outside
     else:
-        p_top = rail_top.PointAtEnd
-        p_bottom = rail_bottom.PointAtEnd
-        tangent = rail_top.TangentAtEnd
-    if not tangent.Unitize():
-        return None
-    mid = rg.Point3d(
-        (p_top.X + p_bottom.X) / 2.0,
-        (p_top.Y + p_bottom.Y) / 2.0,
-        (p_top.Z + p_bottom.Z) / 2.0)
-    r = thickness / 2.0
-    through = rg.Point3d(
-        mid.X + tangent.X * r, mid.Y + tangent.Y * r, mid.Z + tangent.Z * r)
-    arc = rg.Arc(p_top, through, p_bottom)
-    if not arc.IsValid:
-        return None
-    return arc.ToNurbsCurve()
+        t_top = rail_top.Domain.T1
+        t_bot = rail_bottom.Domain.T1
+        rev_top = False  # at T1: natural direction = depart forward (away from body)
+        rev_bot = False   # at T1: reverse = depart backward = arrive from outside
+    return rg.Curve.CreateBlendCurve(
+        rail_top, t_top, rev_top, rg.BlendContinuity.Tangency,
+        rail_bottom, t_bot, rev_bot, rg.BlendContinuity.Tangency)
 
 
 def _build_offset_stadium(rail_top, thickness, d, tol):
@@ -517,10 +510,8 @@ def _build_offset_stadium(rail_top, thickness, d, tol):
     inner_rail_bottom = inner_rail_top.DuplicateCurve()
     inner_rail_bottom.Translate(rg.Vector3d(0.0, 0.0, -new_thickness))
     # End caps with the reduced thickness
-    cap_s = _stadium_end_cap(inner_rail_top, inner_rail_bottom,
-                             at_start=True, thickness=new_thickness)
-    cap_e = _stadium_end_cap(inner_rail_top, inner_rail_bottom,
-                             at_start=False, thickness=new_thickness)
+    cap_s = _stadium_end_cap(inner_rail_top, inner_rail_bottom, at_start=True)
+    cap_e = _stadium_end_cap(inner_rail_top, inner_rail_bottom, at_start=False)
     if cap_s is None or cap_e is None:
         return None
     joined = rg.Curve.JoinCurves(

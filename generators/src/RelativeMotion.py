@@ -1272,15 +1272,88 @@ def create_return_leap_bridge(hemi_a, ring_a, hemi_b, ring_b, profile_plane, ele
             "common-tangent leap")
         return _common_tangent_leap(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0)
 
-    hemi_a_trim, hemi_b_trim = ((hemi_hi_trim, hemi_lo_trim) if lat(apex_a) >= lat(apex_b)
-                                else (hemi_lo_trim, hemi_hi_trim))
-
     joined = Curve.JoinCurves([blend_hi, spine, blend_lo], _JOIN_TOL)
     if joined is None or len(joined) != 1:
         log("create_return_leap_bridge: spine + end blends did not join cleanly; using "
             "common-tangent leap")
         return _common_tangent_leap(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0)
-    return joined[0], hemi_a_trim, hemi_b_trim
+
+    ring_hi, ring_lo = (ring_a, ring_b) if lat(apex_a) >= lat(apex_b) else (ring_b, ring_a)
+    bridge_curve = joined[0]
+    bridge_curve, hemi_hi_trim = _clip_bridge_from_ring_invasion(bridge_curve, ring_hi, hemi_hi_trim)
+    bridge_curve, hemi_lo_trim = _clip_bridge_from_ring_invasion(bridge_curve, ring_lo, hemi_lo_trim)
+
+    hemi_a_trim, hemi_b_trim = ((hemi_hi_trim, hemi_lo_trim) if lat(apex_a) >= lat(apex_b)
+                                else (hemi_lo_trim, hemi_hi_trim))
+    return bridge_curve, hemi_a_trim, hemi_b_trim
+
+
+def _clip_bridge_from_ring_invasion(bridge, ring, hemi_trim):
+    """Clip any invasion of bridge into ring at its near end (adjacent to hemi_trim).
+
+    hemi_trim is a sub-arc of ring. If bridge crosses ring more than once at the hemi_trim end
+    (legitimate touchdown graze + invasion), trims bridge back to the last ring crossing and
+    extends hemi_trim along ring to close the resulting gap. Returns (bridge, hemi_trim) unchanged
+    when no invasion is detected (0 or 1 intersections).
+    """
+    events = Intersection.CurveCurve(bridge, ring, _INTERSECT_TOL, _INTERSECT_TOL)
+    if events is None or events.Count <= 1:
+        return bridge, hemi_trim
+
+    # Near end: bridge endpoint closest to hemi_trim (the end adjacent to this ring).
+    d_start = min(bridge.PointAtStart.DistanceTo(hemi_trim.PointAtStart),
+                  bridge.PointAtStart.DistanceTo(hemi_trim.PointAtEnd))
+    d_end = min(bridge.PointAtEnd.DistanceTo(hemi_trim.PointAtStart),
+                bridge.PointAtEnd.DistanceTo(hemi_trim.PointAtEnd))
+    near_end_t = bridge.Domain.T0 if d_start <= d_end else bridge.Domain.T1
+    near_pt = bridge.PointAt(near_end_t)
+    far_pt = bridge.PointAt(bridge.Domain.T1 if near_end_t == bridge.Domain.T0
+                            else bridge.Domain.T0)
+
+    # Invasion params: intersections beyond the legitimate touchdown graze.
+    invasion_params = [ev.ParameterA for ev in events
+                       if ev.PointA.DistanceTo(near_pt) > _ATTACH_GRAZE_TOL]
+    if not invasion_params:
+        return bridge, hemi_trim
+
+    # Trim at the last ring crossing when traveling from the near end (farthest from near_end_t);
+    # the kept piece [clip_t .. far_end] is guaranteed clear of this ring.
+    clip_t = max(invasion_params, key=lambda t: abs(t - near_end_t))
+    pieces = bridge.Split([clip_t])
+    if pieces is None or len(pieces) == 0:
+        return bridge, hemi_trim
+    clipped = (pieces[0] if len(pieces) == 1 else
+               min(pieces, key=lambda p: p.PointAtNormalizedLength(0.5).DistanceTo(far_pt)))
+
+    # New near endpoint of clipped bridge (on ring boundary).
+    new_near_pt = (clipped.PointAtStart if clipped.PointAtStart.DistanceTo(near_pt) <=
+                   clipped.PointAtEnd.DistanceTo(near_pt) else clipped.PointAtEnd)
+    if new_near_pt.DistanceTo(near_pt) < _JOIN_TOL:
+        return clipped, hemi_trim
+
+    # Extend hemi_trim along ring from its original near endpoint to the new bridge near endpoint.
+    hemi_near_pt = (hemi_trim.PointAtStart if hemi_trim.PointAtStart.DistanceTo(near_pt) <=
+                    hemi_trim.PointAtEnd.DistanceTo(near_pt) else hemi_trim.PointAtEnd)
+    ok_h, t_h = ring.ClosestPoint(hemi_near_pt)
+    ok_n, t_n = ring.ClosestPoint(new_near_pt)
+    if not ok_h or not ok_n:
+        return clipped, hemi_trim
+
+    arc_fwd = ring.Trim(t_h, t_n)
+    arc_rev = ring.Trim(t_n, t_h)
+    if arc_fwd is None and arc_rev is None:
+        return clipped, hemi_trim
+    extension = (arc_fwd if arc_rev is None or
+                 (arc_fwd is not None and arc_fwd.GetLength() <= arc_rev.GetLength())
+                 else arc_rev)
+
+    joined_ext = Curve.JoinCurves([hemi_trim, extension], _JOIN_TOL)
+    if joined_ext is None or len(joined_ext) != 1:
+        return clipped, hemi_trim
+
+    log("_clip_bridge_from_ring_invasion: trimmed {0:.2f}mm, extended hemi {1:.2f}mm".format(
+        bridge.GetLength() - clipped.GetLength(), extension.GetLength()))
+    return clipped, joined_ext[0]
 
 
 def _support_between(included, i, j):
@@ -2043,7 +2116,7 @@ class RelativeMotionGenerator(SplintGenerator):
         anchor_bridge_radius_mm = 3.0
         support_bridge_radius_mm = 10.0
         return_spine_thickness_mm = 5.0 #JG edited 7/10 5:31pm
-        return_spine_end_reach = 0.2
+        return_spine_end_reach = 0.1 #JG edited 8/10 10:19am
         return_spine_touchdown_fraction = 0.35
         objectid_text_size_factor = 0.4         # objectID text height as a fraction of the band length
         objectid_extrusion_depth_factor = 0.5   # emboss depth as a fraction of the ring wall thickness
@@ -2059,7 +2132,7 @@ class RelativeMotionGenerator(SplintGenerator):
         support_path_ramp_thickness = radial_band_thickness_mm
         support_path_ramp_length = longitudinal_band_width_mm * 0.4
         support_path_ramp_arc_radius = longitudinal_band_width_mm * 0.3
-        support_path_ramp_trim_mm = 2.5  # trim off each end of the rail before building ramp profile
+        support_path_ramp_trim_mm = 5.5  # trim off each end of the rail before building ramp profile
 
         # --- Phase 1: finger positions --------------------------------------------------------
         mcp_points, p1_lines, p1_circles, p1_cylinders = setup_finger_positions(
@@ -2151,12 +2224,13 @@ class RelativeMotionGenerator(SplintGenerator):
         splint_solid_blank = build_splint_solid(p_closed_profile, d_closed_profile,
                                                 seam_reference_point=seam_ref,
                                                 diagnostics=loft_diag)
+        splint_solid_blank_copy = splint_solid_blank.Duplicate()
         finger_bores = build_finger_bores(p1_lines_oriented, p1_circles_oriented)
         splint_solid = subtract_finger_bores(splint_solid_blank, finger_bores)
         splint_solid_bores = splint_solid.Duplicate()
         tracker.log_phase(6.0, "loft and bore",
-            splint_solid_blank=splint_solid_blank, finger_bores=finger_bores,
-            splint_solid=splint_solid, splint_solid_bores=splint_solid_bores,
+            splint_solid_blank=splint_solid_blank_copy, finger_bores=finger_bores,
+            splint_solid_bores=splint_solid_bores,
             **loft_diag)
 
         # --- Phase 7: extract support-perimeter rails --------------------------------------
@@ -2223,6 +2297,7 @@ class RelativeMotionGenerator(SplintGenerator):
                     label, edge_ids, _CHAMFER_RIM_MM, exc))
         log("Phase 7.5a: rim chamfer finished, {0}/{1} rim(s) chamfered".format(
             rim_successes, len(rim_targets)))
+        splint_solid_chamfered_copy = splint_solid.Duplicate()
 
         # Perimeter chamfer (Phase 7.5b) TEMPORARILY DISABLED while developing Support Path Ramp.
         # The ramp changes perimeter topology in a way that makes the rail-based edge lookup
@@ -2230,7 +2305,7 @@ class RelativeMotionGenerator(SplintGenerator):
         # stay active - those are independent of the perimeter shape.
         # TODO: re-enable once Phase 7.4 ramp unions are landing successfully.
         log("Phase 7.5b: SKIPPED (perimeter chamfer temporarily disabled for ramp dev)")
-        tracker.log_phase(7.5, "chamfer", splint_solid=splint_solid)
+        tracker.log_phase(7.5, "chamfer", splint_solid_chamfered=splint_solid_chamfered_copy)
 
         # --- Phase 7.6: cut anchor slits ------------------------------------------------------
         # For every anchor finger flagged is_slitted, punch a small through-slit across its ring
@@ -2337,8 +2412,8 @@ class RelativeMotionGenerator(SplintGenerator):
                     failed_slit_cutters.append(slit_debug["cutter_brep"])
         log("Phase 7.6: anchor slitting finished, {0}/{1} slit(s) applied".format(
             slit_successes, len(slit_targets)))
+        splint_solid_slitted_copy = splint_solid.DuplicateBrep()
         tracker.log_phase(7.6, "anchor slitting",
-            splint_solid=splint_solid,
             slit_cutter_breps=slit_cutter_breps,
             slit_panels=slit_panels,
             slit_cross_sections=slit_cross_sections,
@@ -2356,10 +2431,12 @@ class RelativeMotionGenerator(SplintGenerator):
             splint_solid, raw_data, object_id, p_full_curves, d_full_curves,
             proximal_profile_plane.Normal, radial_band_thickness_mm, objectid_text_size,
             extrusion_depth_factor=objectid_extrusion_depth_factor)
+        splint_solid_embossed_copy = splint_solid.DuplicateBrep()
         tracker.log_phase(8.0, "emboss objectID",
             id_letter_breps=id_letter_breps,
             id_projected_letters=id_projected_letters,
-            id_text_plane=id_text_plane, splint_solid=splint_solid)
+            id_text_plane=id_text_plane, 
+            splint_solid_embossed=splint_solid_embossed_copy)
 
         # Capture the "finished body" (post-chamfer, post-slit, post-emboss) BEFORE the ramp
         # attaches, so the harness can preview it regardless of whether the ramp succeeds.
@@ -2439,20 +2516,29 @@ class RelativeMotionGenerator(SplintGenerator):
                 support_path_ramp_debugs.append(ramp_debug)
             log("Phase 9: support path ramp finished, {0}/{1} ramp(s) applied".format(
                 ramp_successes, len(rails_to_ramp)))
-            # Extract previewable geometry from per-rail debug dicts
+            # Extract previewable geometry from per-rail debug dicts.
+            # Single-item keys are prefixed rN_ (r0_, r1_, ...) for multi-rail clarity.
+            # Construction curves are always extracted so failure cases are visible too.
             ramp_loft_curves = []
             ramp_open_ducts = []
-            for rd in support_path_ramp_debugs:
+            ramp_phase_kwargs = {"splint_solid": splint_solid}
+            for ri, rd in enumerate(support_path_ramp_debugs):
                 lc = rd.get("loft_curves")
                 if lc:
                     ramp_loft_curves.extend(lc)
                 od = rd.get("open_duct")
                 if od:
                     ramp_open_ducts.append(od)
-            tracker.log_phase(9.0, "support path ramp",
-                splint_solid=splint_solid,
-                ramp_loft_curves=ramp_loft_curves,
-                ramp_open_ducts=ramp_open_ducts)
+                pfx = "r{0}_".format(ri)
+                for key in ("trimmed_rail", "rail_top", "rail_bottom", "cap_start", "cap_end",
+                            "ramp_profile", "ramp_u", "outer_loop_curve",
+                            "boundary_long_way", "new_outer_curve"):
+                    val = rd.get(key)
+                    if val is not None:
+                        ramp_phase_kwargs[pfx + key] = val
+            ramp_phase_kwargs["ramp_loft_curves"] = ramp_loft_curves
+            ramp_phase_kwargs["ramp_open_ducts"] = ramp_open_ducts
+            tracker.log_phase(9.0, "support path ramp", **ramp_phase_kwargs)
 
         # Mesh the finished solid, then lay it proximal-face-down on the build plate.
         proximal_outward_normal = proximal_profile_plane.Normal * -1.0
@@ -2463,7 +2549,7 @@ class RelativeMotionGenerator(SplintGenerator):
             proximal_outward_normal, Vector3d(0.0, 0.0, -1.0), proximal_profile_plane.Origin))
         splint_oriented.Translate(Vector3d(0.0, 0.0, -splint_oriented.GetBoundingBox(True).Min.Z))
         tracker.log_phase(10.0, "mesh and orient",
-            splint_mesh=splint_mesh, splint_oriented=splint_oriented,
+            splint_oriented=splint_oriented,
             mesh_quality=mesh_quality)
 
         metadata = {

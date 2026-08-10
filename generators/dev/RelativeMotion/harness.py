@@ -31,17 +31,30 @@ SWITCHING INPUTS
 # side-by-side without overlapping. Add / remove entries freely.
 INPUT_FILES = [
     # "AASA_20.json",
-    "ASAA_BTR8_prod.json",
-    "ASAX_20deg.json",
+    # "ASAA_BTR8_prod.json",
+    # "ASAX_20deg.json",
     # "ASSA_20.json",
-    "XASA_ZM1Q_prod.json",
+    # "XASA_ZM1Q_prod.json",
     # "ASSA_2QY6.json",
     # "2QY6_prod_exact.json",
-    "MX2E.json",
+    # "MX2E.json",
     # "AASX_20.json",
+    "RVN0.json"
 ]
 
-ENABLE_MESH_EXPORT = True  # when True, export 3mf to outputs/ (same path prod uses)
+ENABLE_MESH_EXPORT = False  # when True, export 3mf to outputs/ (same path prod uses)
+
+# ------------------------------------------------------------------ stop_after config --------
+# Set to a phase number to stop the pipeline early for focused dev work.
+# None = run full pipeline. Examples: 7.0 stops after rail extraction, 6.0 after loft+bore.
+STOP_AFTER = None #7.0
+
+# Whitelist of phase numbers and/or item keys to bake. Empty set = bake everything.
+# Exact phases:   {6.0, 7.0}
+# Minimum phase:  {"7.0+"}          (all phases >= 7.0)
+# Specific keys:  {"splint_solid"}
+# Mixed:          {"5.0+", "splint_solid"}
+PREVIEW_FILTER = {} #{6.0, 7.0}
 
 import sys
 import json
@@ -97,19 +110,6 @@ ensure_layer = bk.ensure_layer
 def bake_preview(label, geom, layer, color, offset=None, label_z=None):
     return bk.bake_preview(label, geom, layer, color, offset=offset, report=report,
                            label_z=label_z)
-
-
-# ------------------------------------------------------------------ stop_after config --------
-# Set to a phase number to stop the pipeline early for focused dev work.
-# None = run full pipeline. Examples: 7.0 stops after rail extraction, 6.0 after loft+bore.
-STOP_AFTER = None #7.0
-
-# Whitelist of phase numbers and/or item keys to bake. Empty set = bake everything.
-# Exact phases:   {6.0, 7.0}
-# Minimum phase:  {"7.0+"}          (all phases >= 7.0)
-# Specific keys:  {"splint_solid"}
-# Mixed:          {"5.0+", "splint_solid"}
-PREVIEW_FILTER = {"7.0+"} #{6.0, 7.0}
 
 
 def _phase_color(index, total):
