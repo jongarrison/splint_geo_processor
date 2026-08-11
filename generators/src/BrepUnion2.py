@@ -96,7 +96,7 @@ def robust_brep_union(breps, tolerance=None):
 
 
 def graft_open_brep_into_face(base_brep, face_index, new_outer_curve, open_duct_brep,
-                              tolerance=None, join_tolerance=None):
+                              tolerance=None, join_tolerance=None, graft_debug=None):
     """Replace base_brep.Faces[face_index]'s OUTER boundary with new_outer_curve and Join in
     open_duct_brep to produce one closed, watertight solid - with NO boolean regularization.
 
@@ -193,9 +193,13 @@ def graft_open_brep_into_face(base_brep, face_index, new_outer_curve, open_duct_
             "not yield exactly one planar face (got {1}) - check new_outer_curve is coplanar, "
             "closed, and non-self-intersecting".format(face_index, n))
     new_face_brep = new_face_pieces[0]
+    if graft_debug is not None:
+        graft_debug["new_face_brep"] = new_face_brep
 
     result.Faces.RemoveAt(face_index)
     result.Compact()
+    if graft_debug is not None:
+        graft_debug["body_without_face"] = result.DuplicateBrep()
 
     pieces_to_join = [result, new_face_brep, open_duct_brep]
     for i, b in enumerate(pieces_to_join):

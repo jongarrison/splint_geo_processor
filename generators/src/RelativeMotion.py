@@ -39,6 +39,8 @@ import RingSlit
 reload(RingSlit)
 from RingSlit import cut_ring_slit, RingSlitError
 
+import BrepUnion
+reload(BrepUnion)
 import BrepUnion2
 reload(BrepUnion2)
 
@@ -1369,7 +1371,7 @@ def _support_between(included, i, j):
 # that connect them) from the return-leap spine that bridges directly across a leapt-over
 # support run on the OTHER side of the perimeter (_ROLE_RETURN_PATH). Both used to share one
 # combined "support" role because Phase 7.5's chamfer wants to treat them the same way
-# (extract_support_rails still does, via _SUPPORT_SIDE_ROLES below) - but Phase 7.4's Support
+# (extract_support_rails still does, via _SUPPORT_SIDE_ROLES below) - but Phase 9's Support
 # Path Ramp must root ONLY on the true support-arc side (extract_support_path_rails).
 _ROLE_SUPPORT_PATH = "support_path"
 _ROLE_RETURN_PATH = "return_path"
@@ -1445,7 +1447,7 @@ def _extract_rails_by_role(perimeter_chain, roles, tolerance=None,
         cap + return) - the original extract_support_rails behavior, used for chamfering.
       - (_ROLE_SUPPORT_PATH,) only: just the support-arc side runs, excluding any return-leap
         spine - used by features that must root specifically on the support arc (e.g. the
-        Support Path Ramp, Phase 7.4).
+        Support Path Ramp, Phase 9).
 
     use_support_touch_curve: if True, substitute each entry's 'support_touch_curve' (when set)
     for its 'curve' when assembling runs. End-support cradle entries carry the plain pre-cap
@@ -1530,7 +1532,7 @@ def extract_support_path_rails(perimeter_chain, tolerance=None):
     end-support cradles, and the bridges connecting them - EXCLUDING the return-leap spine
     that bridges anchors directly across a leapt-over support run on the opposite side of the
     perimeter. Use this (not extract_support_rails) for features that must root specifically
-    on the support-arc side, e.g. the Support Path Ramp (Phase 7.4).
+    on the support-arc side, e.g. the Support Path Ramp (Phase 9).
 
     For end-support cradles, uses the plain pre-cap support arc (support_touch_curve), not the
     cradle's full welded there-and-back loop (arc + tip cap + return edge) - otherwise the rail
@@ -2239,7 +2241,7 @@ class RelativeMotionGenerator(SplintGenerator):
         # perimeter and the anchor bore rims get chamfered in Phase 7.5.
         p_support_rails = extract_support_rails(p_perimeter_chain, _JOIN_TOL)
         d_support_rails = extract_support_rails(d_perimeter_chain, _JOIN_TOL)
-        # Support-arc-side ONLY (excludes the return-leap spine) - Phase 7.4's Support Path
+        # Support-arc-side ONLY (excludes the return-leap spine) - Phase 9's Support Path
         # Ramp must root on the true support-arc side, not the return-path stretch that
         # extract_support_rails also (correctly, for chamfering) lumps in.
         d_support_path_rails = extract_support_path_rails(d_perimeter_chain, _JOIN_TOL)
@@ -2303,7 +2305,7 @@ class RelativeMotionGenerator(SplintGenerator):
         # The ramp changes perimeter topology in a way that makes the rail-based edge lookup
         # unreliable until we've confirmed the union succeeds. Anchor rim chamfers (7.5a above)
         # stay active - those are independent of the perimeter shape.
-        # TODO: re-enable once Phase 7.4 ramp unions are landing successfully.
+        # TODO: re-enable once Phase 9 ramp unions are landing successfully.
         log("Phase 7.5b: SKIPPED (perimeter chamfer temporarily disabled for ramp dev)")
         tracker.log_phase(7.5, "chamfer", splint_solid_chamfered=splint_solid_chamfered_copy)
 
@@ -2521,7 +2523,7 @@ class RelativeMotionGenerator(SplintGenerator):
             # Construction curves are always extracted so failure cases are visible too.
             ramp_loft_curves = []
             ramp_open_ducts = []
-            ramp_phase_kwargs = {"splint_solid": splint_solid}
+            ramp_phase_kwargs = {"splint_solid_preramp": Brep.DuplicateBrep(splint_solid)}
             for ri, rd in enumerate(support_path_ramp_debugs):
                 lc = rd.get("loft_curves")
                 if lc:
@@ -2530,14 +2532,17 @@ class RelativeMotionGenerator(SplintGenerator):
                 if od:
                     ramp_open_ducts.append(od)
                 pfx = "r{0}_".format(ri)
-                for key in ("trimmed_rail", "rail_top", "rail_bottom", "cap_start", "cap_end",
-                            "ramp_profile", "ramp_u", "outer_loop_curve",
-                            "boundary_long_way", "new_outer_curve"):
+
+                #other keys for preview:
+                # "trimmed_rail", "rail_top", "rail_bottom", "cap_start", "cap_end",
+                            # "ramp_profile", "boot_profile", "boot_cap",
+                            # "ramp_solid", "boot_loft" 
+                for key in (["ramp_solid"]):
                     val = rd.get(key)
                     if val is not None:
                         ramp_phase_kwargs[pfx + key] = val
-            ramp_phase_kwargs["ramp_loft_curves"] = ramp_loft_curves
-            ramp_phase_kwargs["ramp_open_ducts"] = ramp_open_ducts
+            #ramp_phase_kwargs["ramp_loft_curves"] = ramp_loft_curves
+            #ramp_phase_kwargs["ramp_open_ducts"] = ramp_open_ducts
             tracker.log_phase(9.0, "support path ramp", **ramp_phase_kwargs)
 
         # Mesh the finished solid, then lay it proximal-face-down on the build plate.

@@ -30,15 +30,15 @@ SWITCHING INPUTS
 # One or more inputs to run in the same session. Each row is offset in +Y so results sit
 # side-by-side without overlapping. Add / remove entries freely.
 INPUT_FILES = [
-    # "AASA_20.json",
-    # "ASAA_BTR8_prod.json",
-    # "ASAX_20deg.json",
-    # "ASSA_20.json",
-    # "XASA_ZM1Q_prod.json",
-    # "ASSA_2QY6.json",
-    # "2QY6_prod_exact.json",
-    # "MX2E.json",
-    # "AASX_20.json",
+    "AASA_20.json",
+    "ASAA_BTR8_prod.json",
+    "ASAX_20deg.json",
+    "ASSA_20.json",
+    "XASA_ZM1Q_prod.json",
+    "ASSA_2QY6.json",
+    "2QY6_prod_exact.json",
+    "MX2E.json",
+    "AASX_20.json",
     "RVN0.json"
 ]
 

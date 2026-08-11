@@ -23,6 +23,7 @@ import json
 import time
 import random
 import string
+import math
 import scriptcontext as sc
 import System
 import Rhino
@@ -86,6 +87,11 @@ def mesh_brep(brep):
     mesh.Vertices.CombineIdentical(True, True)
     mesh.Vertices.CullUnused()
     mesh.Faces.CullDegenerateFaces()
+    # Weld merges near-coincident seam vertices that CombineIdentical misses when adjacent
+    # faces (e.g. flat cap + lofted ramp) have slightly different mesh parameterizations.
+    # math.pi = weld across any angle so ALL seam vertices close; for printing, sharp-edge
+    # rendering is irrelevant and an open mesh is worse than a smooth one.
+    mesh.Weld(math.pi)
     mesh.UnifyNormals()
     mesh.Normals.ComputeNormals()
     mesh.Compact()

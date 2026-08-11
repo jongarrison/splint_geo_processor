@@ -64,12 +64,28 @@ fi
 echo "Dispatching $(basename "$HARNESS") (Rhino may be busy ~20s+)..."
 "$RC8" -r "$INSTANCE" script "$HARNESS" || true
 
-# --- tail Rhino's own log to the console with [rhino] prefix ---
-RHINO_TAIL_PID=""
-if [ -f "$RHINO_LOG" ]; then
-    tail -f -n 0 "$RHINO_LOG" 2>/dev/null | sed 's/^/[rhino] /' &
-    RHINO_TAIL_PID=$!
-fi
+# Print only new lines from the report and Rhino log, once per line, without leaving follow-mode
+# processes alive after the run is complete. `tail -F` on a file that is recreated or replaced can
+# print stale content again and again, which is exactly the duplication we were seeing.
+print_new_report_lines() {
+    if [ -f "$REPORT" ]; then
+        REPORT_LINES=$(wc -l < "$REPORT" 2>/dev/null | tr -d ' ')
+        if [ "$REPORT_LINES" -gt "${REPORT_PRINTED_LINES:-0}" ]; then
+            tail -n "+$((REPORT_PRINTED_LINES + 1))" "$REPORT" 2>/dev/null
+            REPORT_PRINTED_LINES=$REPORT_LINES
+        fi
+    fi
+}
+
+print_new_rhino_lines() {
+    if [ -f "$RHINO_LOG" ]; then
+        RHINO_LINES=$(wc -l < "$RHINO_LOG" 2>/dev/null | tr -d ' ')
+        if [ "$RHINO_LINES" -gt "${RHINO_PRINTED_LINES:-$RHINO_LOG_START}" ]; then
+            tail -n "+$((RHINO_PRINTED_LINES + 1))" "$RHINO_LOG" 2>/dev/null | sed 's/^/[rhino] /'
+            RHINO_PRINTED_LINES=$RHINO_LINES
+        fi
+    fi
+}
 
 # --- wait for the report file to appear (Rhino has started executing) ---
 waited=0
@@ -82,14 +98,16 @@ while [ ! -f "$REPORT" ]; do
     waited=$((waited + 1))
 done
 
-# --- stream report output in real time ---
+# --- stream report output in real time until the harness explicitly declares itself done ---
 echo '------------------------------------------------------------'
-tail -f "$REPORT" &
-TAIL_PID=$!
-trap 'kill $TAIL_PID 2>/dev/null || true' EXIT
+REPORT_PRINTED_LINES=0
+RHINO_PRINTED_LINES=$RHINO_LOG_START
 
-# --- wait for done marker (Rhino has finished) ---
+# The .done file is the clear completion signal written by ReportBuffer.flush(). We should return
+# as soon as that marker appears instead of relying on lingering background `tail -f` jobs.
 while [ ! -f "$DONE" ]; do
+    print_new_rhino_lines
+    print_new_report_lines
     if [ "$waited" -ge "$TIMEOUT" ]; then
         echo "TIMEOUT after ${TIMEOUT}s waiting for Rhino to finish." >&2
         exit 2
@@ -98,11 +116,9 @@ while [ ! -f "$DONE" ]; do
     waited=$((waited + 1))
 done
 
-# Let tail catch the final lines, then clean up.
-sleep 1
-kill $TAIL_PID 2>/dev/null || true
-wait $TAIL_PID 2>/dev/null || true
-[ -n "$RHINO_TAIL_PID" ] && { kill $RHINO_TAIL_PID 2>/dev/null || true; wait $RHINO_TAIL_PID 2>/dev/null || true; }
+print_new_rhino_lines
+print_new_report_lines
+
 echo '------------------------------------------------------------'
 echo "Rhino finished in ~${waited}s."
 

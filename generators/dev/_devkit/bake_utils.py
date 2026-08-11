@@ -83,7 +83,8 @@ def _bake_one(geom, layer, offset=None, name=None, color=None):
         guid = sc.doc.Objects.AddCurve(geom)
     elif isinstance(geom, rg.Point3d):
         guid = sc.doc.Objects.AddPoint(geom)
-    if guid:
+    # AddBrep/AddCurve can return Guid.Empty (all zeros, not None) on failure; treat it as None.
+    if guid and str(guid) != "00000000-0000-0000-0000-000000000000":
         rs.ObjectLayer(guid, layer)
         if name:
             rs.ObjectName(guid, name)
