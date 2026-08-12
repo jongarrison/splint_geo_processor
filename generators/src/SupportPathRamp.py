@@ -268,7 +268,7 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
 
     # Push loft_curves[0] (the mouth) just inside the splint so the ramp_tube walls cross
     # the cap face rather than being tangent to it, giving BooleanUnion a clean intersection.
-    _MOUTH_INSET_MM = 0.3
+    _MOUTH_INSET_MM = -0.1
     _mouth_inset_vec = rg.Vector3d(
         inward_dir.X * _MOUTH_INSET_MM,
         inward_dir.Y * _MOUTH_INSET_MM,
