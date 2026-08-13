@@ -800,7 +800,7 @@ export async function runPipeline(input: PipelineInputs): Promise<PipelineOutput
     const start = Date.now();
     const inactivityTimeoutMs = Number(process.env.GH_INACTIVITY_TIMEOUT_MS || 90_000);
     const noProgressTimeoutMs = Number(process.env.GH_NO_PROGRESS_TIMEOUT_MS || 30_000);
-    const maxTimeoutMs = Number(process.env.GH_MAX_TIMEOUT_MS || (10 * 60_000));
+    const maxTimeoutMs = Number(process.env.GH_MAX_TIMEOUT_MS || 120_000);
     let ok = false;
     let pipelineSignalFailure = false; // set true if log.txt contains [PIPELINE_RESULT:FAILURE]
     let size = 0;
