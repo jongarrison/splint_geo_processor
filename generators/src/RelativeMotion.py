@@ -83,7 +83,7 @@ _CAP_TOL = 1e-2
 # Chamfer distances (mm). Harness-validated 2026-07-10 (dev/RelativeMotion/harness.py PROD
 # CANDIDATE): native Brep.CreateFilletEdges + BlendType.Chamfer + RailType.DistanceFromEdge.
 # Uniform per pass.
-_CHAMFER_RIM_MM = 1.35          # anchor bore rims (both proximal and distal, skin-contact points)
+_CHAMFER_RIM_MM = 1.2          # anchor bore rims (both proximal and distal, skin-contact points)
 _CHAMFER_PERIMETER_MM = 0.25   # outer perimeter over support spans (anchor stretches stay sharp)
 
 # Perimeter chamfer is applied variable-radius: taper to ~zero at both ends of each support
