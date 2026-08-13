@@ -35,6 +35,10 @@ import BrepChamfer
 reload(BrepChamfer)
 from BrepChamfer import chamfer_edges, chamfer_edges_variable, BrepChamferError
 
+import BoreChamfer
+reload(BoreChamfer)
+from BoreChamfer import chamfer_bore_rim, BoreChamferError
+
 import RingSlit
 reload(RingSlit)
 from RingSlit import cut_ring_slit, RingSlitError
@@ -79,7 +83,7 @@ _CAP_TOL = 1e-2
 # Chamfer distances (mm). Harness-validated 2026-07-10 (dev/RelativeMotion/harness.py PROD
 # CANDIDATE): native Brep.CreateFilletEdges + BlendType.Chamfer + RailType.DistanceFromEdge.
 # Uniform per pass.
-_CHAMFER_RIM_MM = 1.2          # anchor bore rims (both proximal and distal, skin-contact points)
+_CHAMFER_RIM_MM = 1.35          # anchor bore rims (both proximal and distal, skin-contact points)
 _CHAMFER_PERIMETER_MM = 0.25   # outer perimeter over support spans (anchor stretches stay sharp)
 
 # Perimeter chamfer is applied variable-radius: taper to ~zero at both ends of each support
@@ -2268,35 +2272,38 @@ class RelativeMotionGenerator(SplintGenerator):
         # re-resolve edge indices on the mutated brep (each chamfer changes topology).
         included = [f for f in raw_data["finger_data"] if f.get("is_included")]
 
-        # Rims: one closed loop per (anchor finger, face). Label carries enough context to
-        # correlate a failure back to the finger/face without cross-referencing indices.
-        rim_targets = []  # list of (label, rail_curve)
+        # Rims: one closed loop per (anchor finger, face). Each rim gets a frustum-based
+        # chamfer (BoreChamfer) that is topology-independent, so adjacent anchors cannot
+        # interfere with each other's chamfers. push_dir points into the bore from each face.
+        rim_targets = []  # list of (label, ring_curve, push_dir)
         for i, f in enumerate(included):
             if not f.get("is_anchor_finger"):
                 continue
+            # push_dir for proximal face: bore axis points from proximal toward distal (+X)
+            # push_dir for distal face: bore axis points from distal toward proximal (-X)
+            bore_axis = p1_lines_oriented[i].Direction
+            bore_axis.Unitize()
             if i < len(p_full_curves) and p_full_curves[i] is not None:
-                rim_targets.append(("finger {0} proximal".format(i), p_full_curves[i]))
+                rim_targets.append(("finger {0} proximal".format(i),
+                                    p_full_curves[i], Vector3d(bore_axis)))
             if i < len(d_full_curves) and d_full_curves[i] is not None:
-                rim_targets.append(("finger {0} distal".format(i), d_full_curves[i]))
-        log("Phase 7.5a: per-rim chamfer on {0} anchor rim(s) at d={1}mm".format(
+                rim_targets.append(("finger {0} distal".format(i),
+                                    d_full_curves[i], Vector3d(-bore_axis.X, -bore_axis.Y, -bore_axis.Z)))
+        log("Phase 7.5a: frustum bore chamfer on {0} anchor rim(s) at d={1}mm".format(
             len(rim_targets), _CHAMFER_RIM_MM))
         rim_successes = 0
-        for label, rail in rim_targets:
-            # Re-lookup on the CURRENT brep - previous rim chamfers shift edge indices.
-            res = find_edges_for_curve(splint_solid, rail)
-            if not res.edge_indices:
-                log("  rim {0}: no edges resolved on current brep (coverage={1!r}); "
-                    "skipping".format(label, res.coverage))
-                continue
-            edge_ids = sorted(set(res.edge_indices))
+        chamfer_frustums = []
+        for label, ring_curve, push_dir in rim_targets:
+            chamfer_debug = {}
             try:
-                splint_solid = chamfer_edges(splint_solid, edge_ids, _CHAMFER_RIM_MM)
-                log("  rim {0}: chamfer OK on edge(s) {1} at d={2}mm".format(
-                    label, edge_ids, _CHAMFER_RIM_MM))
+                splint_solid = chamfer_bore_rim(
+                    ring_curve, splint_solid, push_dir, _CHAMFER_RIM_MM, debug=chamfer_debug)
+                log("  rim {0}: frustum chamfer OK at d={1}mm".format(label, _CHAMFER_RIM_MM))
                 rim_successes += 1
-            except BrepChamferError as exc:
-                log("  rim {0}: chamfer FAILED on edge(s) {1} at d={2}mm: {3}".format(
-                    label, edge_ids, _CHAMFER_RIM_MM, exc))
+            except BoreChamferError as exc:
+                log("  rim {0}: frustum chamfer FAILED: {1}".format(label, exc))
+            if chamfer_debug.get("frustum_solid") is not None:
+                chamfer_frustums.append(chamfer_debug["frustum_solid"])
         log("Phase 7.5a: rim chamfer finished, {0}/{1} rim(s) chamfered".format(
             rim_successes, len(rim_targets)))
         splint_solid_chamfered_copy = splint_solid.Duplicate()
@@ -2307,7 +2314,9 @@ class RelativeMotionGenerator(SplintGenerator):
         # stay active - those are independent of the perimeter shape.
         # TODO: re-enable once Phase 9 ramp unions are landing successfully.
         log("Phase 7.5b: SKIPPED (perimeter chamfer temporarily disabled for ramp dev)")
-        tracker.log_phase(7.5, "chamfer", splint_solid_chamfered=splint_solid_chamfered_copy)
+        tracker.log_phase(7.5, "chamfer",
+            splint_solid_chamfered=splint_solid_chamfered_copy,
+            chamfer_frustums=chamfer_frustums)
 
         # --- Phase 7.6: cut anchor slits ------------------------------------------------------
         # For every anchor finger flagged is_slitted, punch a small through-slit across its ring
@@ -2422,7 +2431,8 @@ class RelativeMotionGenerator(SplintGenerator):
             failed_slit_panels=failed_slit_panels,
             failed_slit_raw_intersections=failed_slit_raw_intersections,
             failed_slit_joined_intersections=failed_slit_joined_intersections,
-            failed_slit_cutters=failed_slit_cutters)
+            failed_slit_cutters=failed_slit_cutters,
+            splint_solid_slitted=splint_solid_slitted_copy)
 
         # --- Phase 8: emboss the objectID into the if-side anchor bore ------------------------
         if proximal_profile_plane is None or distal_profile_plane is None:
