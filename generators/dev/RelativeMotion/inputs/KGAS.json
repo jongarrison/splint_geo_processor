@@ -1,0 +1,46 @@
+{
+  "note": "KGAS was created by Liz on 8/5/26. It fails by running for a long time, but still creating log output",
+  "is_right_hand": false,
+  "finger_data": [
+    {
+      "finger_abbr": "if",
+      "is_included": true,
+      "is_anchor_finger": true,
+      "p1_mid_circ": 62,
+      "p1_length": 55,
+      "pip_neighbor_fwd_offset": 0,
+      "is_slitted": false
+    },
+    {
+      "finger_abbr": "mf",
+      "is_included": true,
+      "is_anchor_finger": false,
+      "p1_mid_circ": 61,
+      "p1_length": 60,
+      "pip_neighbor_fwd_offset": 2,
+      "is_slitted": false
+    },
+    {
+      "finger_abbr": "rf",
+      "is_included": true,
+      "is_anchor_finger": false,
+      "p1_mid_circ": 58,
+      "p1_length": 55,
+      "pip_neighbor_fwd_offset": 0,
+      "is_slitted": false
+    },
+    {
+      "finger_abbr": "sf",
+      "is_included": true,
+      "is_anchor_finger": true,
+      "p1_mid_circ": 53,
+      "p1_length": 45,
+      "pip_neighbor_fwd_offset": -8,
+      "is_slitted": false
+    }
+  ],
+  "all_splint_finger_circ": 155,
+  "relative_elevation_angle": 25,
+  "longitudinal_band_width_mm": 10,
+  "enable_support_path_ramp": true
+}

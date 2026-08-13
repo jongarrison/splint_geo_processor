@@ -1818,108 +1818,98 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
     return closed, bridges, perimeter_chain
 
 
-def build_splint_solid(proximal_profile, distal_profile, seam_reference_point=None,
-                       diagnostics=None):
-    """Loft the two profile perimeters into one closed, watertight solid slab (Phase 6).
+def _rebuild_matched_pair(crv_a, crv_b, pts_per_mm=1.0, min_pts=4):
+    """Rebuild two corresponding chain segment curves to matching control-point structure.
 
-    Preconditions for a reliable ruled loft:
-      1. Both perimeters must be closed.
-      2. Re-seam both to the same geometric feature (anchor +Y apex via ClosestPoint).
-      3. Reparameterize both to [0,1] so the ruled loft maps proportionally.
-      4. Match curve directions (reverse if opposed).
-      5. Straight loft -> one open tube wall.
-      6. CapPlanarHoles -> closed solid; validate and orient outward.
+    Samples both at the same normalized-length fractions (count based on the longer segment),
+    then creates degree-3 control-point curves through those samples. The result is two curves
+    with identical knot vectors so a ruled loft maps corresponding features.
+    """
+    seg_len = max(crv_a.GetLength(), crv_b.GetLength())
+    k = max(min_pts, int(seg_len * pts_per_mm))
+    pts_a = []
+    pts_b = []
+    for j in range(k + 1):
+        frac = float(j) / float(k)
+        ok_a, ta = crv_a.NormalizedLengthParameter(frac)
+        ok_b, tb = crv_b.NormalizedLengthParameter(frac)
+        if ok_a and ok_b:
+            pts_a.append(crv_a.PointAt(ta))
+            pts_b.append(crv_b.PointAt(tb))
+    ra = Curve.CreateControlPointCurve(pts_a, 3)
+    rb = Curve.CreateControlPointCurve(pts_b, 3)
+    return ra, rb
 
-    When diagnostics dict is provided, populates it with pre-loft curves and seam points
-    for visual inspection in the dev harness.
+
+def build_splint_solid(p_perimeter_chain, d_perimeter_chain, diagnostics=None):
+    """Loft two perimeter chains into a closed, watertight solid slab (Phase 6).
+
+    Lofts each corresponding chain segment pair independently (feature-matched rebuild
+    ensures no twist), joins the wall patches, then caps with planar faces built from the
+    original welded perimeter curves.
 
     Returns a single closed, outward-oriented Brep.
     """
-    if proximal_profile is None or distal_profile is None:
-        raise ValueError("build_splint_solid: a profile perimeter is missing (None).")
+    if len(p_perimeter_chain) != len(d_perimeter_chain):
+        raise ValueError("build_splint_solid: chain length mismatch ({0} vs {1})".format(
+            len(p_perimeter_chain), len(d_perimeter_chain)))
 
-    prox = proximal_profile.DuplicateCurve()
-    dist = distal_profile.DuplicateCurve()
-    if not prox.IsClosed or not dist.IsClosed:
-        raise ValueError(
-            "build_splint_solid: both profile perimeters must be closed (proximal closed={0}, "
-            "distal closed={1}).".format(prox.IsClosed, dist.IsClosed))
+    # Loft each segment pair into a ruled surface patch.
+    wall_patches = []
+    for i in range(len(p_perimeter_chain)):
+        pc = p_perimeter_chain[i]["curve"]
+        dc = d_perimeter_chain[i]["curve"]
+        if pc is None or dc is None:
+            continue
+        ra, rb = _rebuild_matched_pair(pc, dc)
+        if ra is None or rb is None:
+            log("build_splint_solid: rebuild failed for chain entry {0}; skipping".format(i))
+            continue
+        if not Curve.DoDirectionsMatch(ra, rb):
+            rb.Reverse()
+        patches = Brep.CreateFromLoft([ra, rb], Point3d.Unset, Point3d.Unset,
+                                      LoftType.Straight, False)
+        if patches is not None:
+            wall_patches.extend(patches)
 
-    # Re-seam both to the same geometric feature for correct loft correspondence.
-    if seam_reference_point is not None:
-        ok_p, t_p = prox.ClosestPoint(seam_reference_point)
-        ok_d, t_d = dist.ClosestPoint(seam_reference_point)
-        if ok_p and ok_d:
-            prox.ChangeClosedCurveSeam(t_p)
-            dist.ChangeClosedCurveSeam(t_d)
-            log("build_splint_solid: seamed to reference point")
-        else:
-            log("build_splint_solid: ClosestPoint failed; falling back to +Y extreme")
-            prox.ChangeClosedCurveSeam(_extreme_point_param(prox, Vector3d.YAxis))
-            dist.ChangeClosedCurveSeam(_extreme_point_param(dist, Vector3d.YAxis))
-    else:
-        prox.ChangeClosedCurveSeam(_extreme_point_param(prox, Vector3d.YAxis))
-        dist.ChangeClosedCurveSeam(_extreme_point_param(dist, Vector3d.YAxis))
+    if not wall_patches:
+        raise ValueError("build_splint_solid: no wall patches could be lofted.")
 
-    # Align directions so the ruled surface does not twist into a self-intersection.
-    dirs_matched = Curve.DoDirectionsMatch(prox, dist)
-    if not dirs_matched:
-        dist.Reverse()
-        log("build_splint_solid: reversed distal curve to match proximal direction")
+    log("build_splint_solid: lofted {0} wall patch(es) from {1} chain entry pairs".format(
+        len(wall_patches), len(p_perimeter_chain)))
 
-    # Rebuild both curves to NurbsCurves with matching control point structure.
-    # Polycurves have mismatched segment counts; Rebuild normalizes them so the
-    # loft maps corresponding features correctly instead of twisting.
-    # ~1 control point per mm of the longer curve, floor of 100.
-    max_len = max(prox.GetLength(), dist.GetLength())
-    rebuild_pts = max(100, int(max_len))
-    prox_rebuilt = prox.Rebuild(rebuild_pts, 3, False)
-    dist_rebuilt = dist.Rebuild(rebuild_pts, 3, False)
-    if prox_rebuilt is None or dist_rebuilt is None:
-        raise ValueError("build_splint_solid: Curve.Rebuild failed (prox={0}, dist={1})".format(
-            prox_rebuilt is not None, dist_rebuilt is not None))
-    prox = prox_rebuilt
-    dist = dist_rebuilt
-    log("build_splint_solid: rebuilt both curves with {0} pts (curve len ~{1:.0f}mm)".format(
-        rebuild_pts, max_len))
-
-    # Log seam diagnostics.
-    p_start = prox.PointAtStart
-    d_start = dist.PointAtStart
-    log("build_splint_solid: prox seam ({0:.2f}, {1:.2f}, {2:.2f}), "
-        "dist seam ({3:.2f}, {4:.2f}, {5:.2f}), dirs_matched={6}".format(
-            p_start.X, p_start.Y, p_start.Z,
-            d_start.X, d_start.Y, d_start.Z, dirs_matched))
-
-    # Expose pre-loft curves and seam markers for visual inspection.
+    # Rejoin chain pieces for diagnostics preview.
+    p_pieces = [e["curve"] for e in p_perimeter_chain if e["curve"] is not None]
+    d_pieces = [e["curve"] for e in d_perimeter_chain if e["curve"] is not None]
+    p_joined = Curve.JoinCurves(p_pieces, _JOIN_TOL)
+    d_joined = Curve.JoinCurves(d_pieces, _JOIN_TOL)
     if diagnostics is not None:
-        diagnostics["loft_prox_seamed"] = prox.DuplicateCurve()
-        diagnostics["loft_dist_seamed"] = dist.DuplicateCurve()
-        diagnostics["loft_seam_pts"] = [p_start, d_start]
-        if seam_reference_point is not None:
-            diagnostics["loft_ref_pt"] = seam_reference_point
+        p_closed = next((c for c in (p_joined or []) if c.IsClosed), None)
+        d_closed = next((c for c in (d_joined or []) if c.IsClosed), None)
+        if p_closed:
+            diagnostics["loft_prox_seamed"] = p_closed.DuplicateCurve()
+        if d_closed:
+            diagnostics["loft_dist_seamed"] = d_closed.DuplicateCurve()
 
-    lofts = Brep.CreateFromLoft([prox, dist], Point3d.Unset, Point3d.Unset,
-                                LoftType.Straight, False)
-    if lofts is None or len(lofts) != 1:
-        raise ValueError(
-            "build_splint_solid: loft did not produce exactly one wall surface (got {0}); the "
-            "two perimeters are too dissimilar to ruled-loft.".format(
-                0 if lofts is None else len(lofts)))
-    wall = lofts[0]
+    # Merge wall patches into one open tube, then cap the planar ends.
+    merged = Brep.JoinBreps(wall_patches, _JOIN_TOL)
+    if merged is None or len(merged) == 0:
+        raise ValueError("build_splint_solid: could not merge wall patches.")
+    wall = merged[0]
+    log("build_splint_solid: merged wall has {0} face(s), IsSolid={1}".format(
+        wall.Faces.Count, wall.IsSolid))
 
     solid = wall.CapPlanarHoles(_CAP_TOL)
     if solid is None:
-        raise ValueError(
-            "build_splint_solid: CapPlanarHoles failed; the loft ends are not both planar closed "
-            "loops.")
-
+        # Retry with relaxed tolerance.
+        solid = wall.CapPlanarHoles(0.1)
+    if solid is None:
+        raise ValueError("build_splint_solid: CapPlanarHoles failed on merged wall.")
     if not solid.IsSolid:
         raise ValueError(
-            "build_splint_solid: capped brep is not a closed solid (IsValid={0}, IsManifold={1}, "
-            "face count={2}).".format(solid.IsValid, solid.IsManifold, solid.Faces.Count))
+            "build_splint_solid: joined brep is not a closed solid (IsValid={0}, "
+            "faces={1}).".format(solid.IsValid, solid.Faces.Count))
 
-    # A capped loft can come back inward-facing; flip so the solid's normals point outward.
     if solid.SolidOrientation == BrepSolidOrientation.Inward:
         solid.Flip()
 
@@ -2215,24 +2205,16 @@ class RelativeMotionGenerator(SplintGenerator):
             d_bridge_curves=d_bridge_curves)
 
         # --- Phase 6: loft the two faces, then bore the fingers -------------------------------
-        # Compute a seam reference point from the first anchor ring's +Y apex. This point is
-        # geometrically identical on both proximal and distal curves (anchor rings are cut from
-        # uniform cylinders) so ClosestPoint gives matched seam params, avoiding twisted lofts.
-        seam_ref = None
-        for ring in p_rings:
-            if ring is not None:
-                t_apex = _extreme_point_param(ring, Vector3d.YAxis)
-                seam_ref = ring.PointAt(t_apex)
-                log("Phase 6 seam reference: anchor +Y apex at ({0:.2f}, {1:.2f}, {2:.2f})".format(
-                    seam_ref.X, seam_ref.Y, seam_ref.Z))
-                break
         loft_diag = {}
-        splint_solid_blank = build_splint_solid(p_closed_profile, d_closed_profile,
-                                                seam_reference_point=seam_ref,
+        splint_solid_blank = build_splint_solid(p_perimeter_chain, d_perimeter_chain,
                                                 diagnostics=loft_diag)
         splint_solid_blank_copy = splint_solid_blank.Duplicate()
         finger_bores = build_finger_bores(p1_lines_oriented, p1_circles_oriented)
-        splint_solid = subtract_finger_bores(splint_solid_blank, finger_bores)
+        # Only subtract anchor bores - support fingers contact the splint surface by design.
+        included = [f for f in raw_data["finger_data"] if f.get("is_included")]
+        anchor_bores = [finger_bores[i] for i, f in enumerate(included)
+                        if f.get("is_anchor_finger")]
+        splint_solid = subtract_finger_bores(splint_solid_blank, anchor_bores)
         splint_solid_bores = splint_solid.Duplicate()
         tracker.log_phase(6.0, "loft and bore",
             splint_solid_blank=splint_solid_blank_copy, finger_bores=finger_bores,
