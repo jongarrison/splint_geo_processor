@@ -35,13 +35,13 @@ INPUT_FILES = [
     # "ASAX_20deg.json",
     # "ASSA_20.json",
     # "XASA_ZM1Q_prod.json",
-    # "ASSA_2QY6.json",
     # "2QY6_prod_exact.json",
     # "MX2E.json",
     # "AASX_20.json", #prob
     # "RVN0.json",
-    "JC8E.json", #!!! fails by running for a long time, but still creating log output
-    "KGAS.json", #fails by running for a long time, but still creating log output
+    # "JC8E.json", #!!! fails by running for a long time, but still creating log output
+    # "KGAS.json", #fails by running for a long time, but still creating log output
+    "8CH7.json",
 ]
 
 ENABLE_MESH_EXPORT = False  # when True, export 3mf to outputs/ (same path prod uses)

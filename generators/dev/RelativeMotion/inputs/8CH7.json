@@ -1,0 +1,46 @@
+{
+  "notes":"JG 8/14/26 - if slit failed to render",
+  "is_right_hand": false,
+  "finger_data": [
+    {
+      "finger_abbr": "if",
+      "is_included": true,
+      "is_anchor_finger": true,
+      "p1_mid_circ": 66,
+      "p1_length": 50,
+      "pip_neighbor_fwd_offset": 0,
+      "is_slitted": true
+    },
+    {
+      "finger_abbr": "mf",
+      "is_included": true,
+      "is_anchor_finger": false,
+      "p1_mid_circ": 65,
+      "p1_length": 50,
+      "pip_neighbor_fwd_offset": 5,
+      "is_slitted": false
+    },
+    {
+      "finger_abbr": "rf",
+      "is_included": true,
+      "is_anchor_finger": false,
+      "p1_mid_circ": 60,
+      "p1_length": 50,
+      "pip_neighbor_fwd_offset": -8,
+      "is_slitted": false
+    },
+    {
+      "finger_abbr": "sf",
+      "is_included": true,
+      "is_anchor_finger": true,
+      "p1_mid_circ": 57,
+      "p1_length": 45,
+      "pip_neighbor_fwd_offset": -10,
+      "is_slitted": true
+    }
+  ],
+  "all_splint_finger_circ": 190,
+  "relative_elevation_angle": 25,
+  "longitudinal_band_width_mm": 10,
+  "enable_support_path_ramp": true
+}
