@@ -83,6 +83,12 @@ _PERP_DOT_TOL = 1e-3
 # residual gaps Rhino's intersection leaves at ring/chamfer face boundaries.
 _INTERSECTION_JOIN_TOL_MM = 0.01
 
+# Strategy B: bounded join/closure retries when Strategy A misses a valid loop.
+_INTERSECTION_JOIN_TOL_LADDER_MM = [0.02, 0.05]
+
+# Safety cap: never force-close curves with endpoint gaps larger than this.
+_MAX_MAKECLOSED_GAP_MM = 0.25
+
 
 def _dput(debug, key, value):
     """Populate a key on the optional debug out-dict, no-op if debug is None. Keeps the
@@ -95,6 +101,74 @@ def _dput(debug, key, value):
 def _pt_str(pt):
     """Compact "(x,y,z)" formatter for per-curve debug logging."""
     return "({0:.3f},{1:.3f},{2:.3f})".format(pt.X, pt.Y, pt.Z)
+
+
+def _collect_closed_intersection_curves(joined_list, join_tol_mm):
+    """Return closed curves from joined intersections, with a bounded MakeClosed rescue."""
+    closed_curves = []
+    for c in joined_list:
+        if c.IsClosed:
+            closed_curves.append(c)
+            continue
+        try:
+            gap = c.PointAtStart.DistanceTo(c.PointAtEnd)
+        except Exception:
+            gap = None
+        if gap is None or gap > _MAX_MAKECLOSED_GAP_MM:
+            continue
+        try:
+            if c.MakeClosed(join_tol_mm) and c.IsClosed:
+                log("  MakeClosed rescued an open curve at tol={0}mm (gap={1:.5f}mm)".format(
+                    join_tol_mm, gap))
+                closed_curves.append(c)
+        except Exception as _e:
+            log("  MakeClosed raised on an open curve: {0}".format(_e))
+    return closed_curves
+
+
+def _pick_ring_wall_curve(closed_curves, p1_line_extended):
+    """Pick the closed curve whose area centroid sits nearest the extended P1 axis."""
+    p1_line_ext_curve = rg.LineCurve(p1_line_extended)
+    candidates = []  # (dist_to_p1_line, closed_curve, area_centroid)
+    for c in closed_curves:
+        amp = rg.AreaMassProperties.Compute(c)
+        if amp is None:
+            continue
+        cent = amp.Centroid
+        ok_cp, t_line = p1_line_ext_curve.ClosestPoint(cent)
+        if not ok_cp:
+            continue
+        proj_pt = p1_line_ext_curve.PointAt(t_line)
+        candidates.append((cent.DistanceTo(proj_pt), c, cent))
+    if not candidates:
+        return None, None, None
+    candidates.sort(key=lambda tup: tup[0])
+    return candidates[0]
+
+
+def _estimate_axis_point_from_open_segments(raw_curves, p1_line_extended):
+    """Estimate a ring axis point from open panel/splint segments when no loop closes."""
+    if not raw_curves:
+        return None
+    pts = []
+    for c in raw_curves:
+        try:
+            pts.append(c.PointAtStart)
+            pts.append(c.PointAtEnd)
+            pts.append(c.PointAtNormalizedLength(0.5))
+        except Exception:
+            pass
+    if len(pts) == 0:
+        return None
+    avg = rg.Point3d(
+        sum(p.X for p in pts) / len(pts),
+        sum(p.Y for p in pts) / len(pts),
+        sum(p.Z for p in pts) / len(pts))
+    p1_line_ext_curve = rg.LineCurve(p1_line_extended)
+    ok_cp, t_line = p1_line_ext_curve.ClosestPoint(avg)
+    if not ok_cp:
+        return None
+    return p1_line_ext_curve.PointAt(t_line)
 
 
 def cut_ring_slit(splint_solid,
@@ -310,105 +384,123 @@ def cut_ring_slit(splint_solid,
         except Exception as _e:
             log("  raw[{0}]: (log failed: {1})".format(i, _e))
 
-    joined_arr = rg.Curve.JoinCurves(raw_list, _INTERSECTION_JOIN_TOL_MM)
-    joined_list = list(joined_arr) if joined_arr else []
-    _dput(debug, "joined_intersection_curves", joined_list)
-    if len(joined_list) == 0:
-        raise RingSlitError(
-            "JoinCurves at {0}mm on {1} raw segment(s) returned nothing".format(
-                _INTERSECTION_JOIN_TOL_MM, len(raw_list)))
-    log("cut_ring_slit: JoinCurves(tol={0}mm) produced {1} curve(s):".format(
-        _INTERSECTION_JOIN_TOL_MM, len(joined_list)))
-    for i, c in enumerate(joined_list):
-        try:
-            gap = c.PointAtStart.DistanceTo(c.PointAtEnd)
-            log("  joined[{0}]: IsClosed={1} Length={2:.4f}mm endpoint_gap={3:.5f}mm".format(
-                i, c.IsClosed, c.GetLength(), gap))
-        except Exception as _e:
-            log("  joined[{0}]: (log failed: {1})".format(i, _e))
-
-    # Closed set: accept IsClosed as-is; for open curves whose endpoints are within loose
-    # tolerance, MakeClosed force-snaps them into a valid closed curve.
+    # Strategy A/B/C for ring-center derivation:
+    # A: base join tol, B: bounded tol ladder, C: ray-first fallback from open segments.
+    strategy_label = None
+    joined_list = []
     closed_curves = []
-    for c in joined_list:
-        if c.IsClosed:
-            closed_curves.append(c)
-            continue
-        # MakeClosed mutates in place, returns True on success.
-        try:
-            if c.MakeClosed(_INTERSECTION_JOIN_TOL_MM) and c.IsClosed:
-                log("  MakeClosed rescued an open curve (endpoint gap was within "
-                    "{0}mm)".format(_INTERSECTION_JOIN_TOL_MM))
-                closed_curves.append(c)
-        except Exception as _e:
-            log("  MakeClosed raised on an open curve: {0}".format(_e))
-    _dput(debug, "closed_intersection_curves", closed_curves)
-    if len(closed_curves) == 0:
-        raise RingSlitError(
-            "panel/splint intersection produced {0} joined curve(s), none are closed "
-            "even after MakeClosed({1}mm) rescue. See per-curve endpoint_gap in the log "
-            "to decide whether to widen the join tolerance.".format(
-                len(joined_list), _INTERSECTION_JOIN_TOL_MM))
+    join_tols = [_INTERSECTION_JOIN_TOL_MM] + _INTERSECTION_JOIN_TOL_LADDER_MM
+    for idx, join_tol in enumerate(join_tols):
+        joined_arr = rg.Curve.JoinCurves(raw_list, join_tol)
+        joined_list = list(joined_arr) if joined_arr else []
+        if idx == 0:
+            _dput(debug, "joined_intersection_curves", joined_list)
+        log("cut_ring_slit: Strategy {0} JoinCurves(tol={1}mm) produced {2} curve(s):".format(
+            "A" if idx == 0 else "B", join_tol, len(joined_list)))
+        for i, c in enumerate(joined_list):
+            try:
+                gap = c.PointAtStart.DistanceTo(c.PointAtEnd)
+                log("  joined[{0}]: IsClosed={1} Length={2:.4f}mm endpoint_gap={3:.5f}mm".format(
+                    i, c.IsClosed, c.GetLength(), gap))
+            except Exception as _e:
+                log("  joined[{0}]: (log failed: {1})".format(i, _e))
+        closed_curves = _collect_closed_intersection_curves(joined_list, join_tol)
+        if len(closed_curves) > 0:
+            strategy_label = "A" if idx == 0 else "B"
+            break
 
-    # Pick the closed curve whose area centroid is closest to the extended P1 line -
-    # that's the ring wall (other closed curves might come from adjacent-finger bridges,
-    # return-spine geometry, etc., all of which sit farther from the P1 axis).
-    p1_line_ext_curve = rg.LineCurve(p1_line_extended)
-    candidates = []  # list of (dist_to_p1_line, closed_curve, area_centroid)
-    for c in closed_curves:
-        amp = rg.AreaMassProperties.Compute(c)
-        if amp is None:
-            continue
-        cent = amp.Centroid
-        ok_cp, t_line = p1_line_ext_curve.ClosestPoint(cent)
+    _dput(debug, "closed_intersection_curves", closed_curves)
+
+    ring_wall_cross_section_curve = None
+    ring_wall_centroid = None
+    ring_centroid = None
+    best_dist = None
+    wall_thickness = None
+
+    if len(closed_curves) > 0:
+        pick = _pick_ring_wall_curve(closed_curves, p1_line_extended)
+        if pick is None or pick[1] is None:
+            raise RingSlitError(
+                "all {0} closed intersection curve(s) had unusable area properties".format(
+                    len(closed_curves)))
+        best_dist, ring_wall_cross_section_curve, ring_wall_centroid = pick
+        _dput(debug, "ring_wall_cross_section_curve", ring_wall_cross_section_curve)
+        _dput(debug, "ring_wall_centroid", ring_wall_centroid)
+        p1_line_ext_curve = rg.LineCurve(p1_line_extended)
+        ok_cp, t_line = p1_line_ext_curve.ClosestPoint(ring_wall_centroid)
         if not ok_cp:
-            continue
-        proj_pt = p1_line_ext_curve.PointAt(t_line)
-        candidates.append((cent.DistanceTo(proj_pt), c, cent))
-    if not candidates:
-        raise RingSlitError(
-            "all {0} closed intersection curve(s) had unusable area properties".format(
-                len(closed_curves)))
-    candidates.sort(key=lambda tup: tup[0])
-    best_dist, ring_wall_cross_section_curve, ring_wall_centroid = candidates[0]
-    _dput(debug, "ring_wall_cross_section_curve", ring_wall_cross_section_curve)
-    _dput(debug, "ring_wall_centroid", ring_wall_centroid)
-    if len(closed_curves) > 1:
-        log("cut_ring_slit: panel intersected {0} closed curve(s); picked one nearest the "
-            "extended P1 line (centroid gap {1:.3f} mm)".format(
-                len(closed_curves), best_dist))
-    # ring_centroid: project the wall centroid onto the extended P1 line. Sits inside
-    # the ring bore, on the finger axis, at the same longitudinal position as the wall
-    # cross-section's centroid. Used as the origin of the wall-thickness ray-shoot.
-    ok_cp, t_line = p1_line_ext_curve.ClosestPoint(ring_wall_centroid)
-    if not ok_cp:
-        raise RingSlitError("could not project ring_wall_centroid onto extended P1 line")
-    ring_centroid = p1_line_ext_curve.PointAt(t_line)
-    _dput(debug, "ring_centroid", ring_centroid)
-    log("cut_ring_slit: ring_wall_centroid=({0:.2f},{1:.2f},{2:.2f})  "
-        "ring_centroid=({3:.2f},{4:.2f},{5:.2f})  wall-to-axis dist={6:.3f}mm".format(
-            ring_wall_centroid.X, ring_wall_centroid.Y, ring_wall_centroid.Z,
-            ring_centroid.X, ring_centroid.Y, ring_centroid.Z, best_dist))
+            raise RingSlitError("could not project ring_wall_centroid onto extended P1 line")
+        ring_centroid = p1_line_ext_curve.PointAt(t_line)
+        _dput(debug, "ring_centroid", ring_centroid)
+        _dput(debug, "intersection_strategy", strategy_label)
+        if len(closed_curves) > 1:
+            log("cut_ring_slit: strategy {0} found {1} closed curve(s); picked nearest "
+                "to extended P1 line (centroid gap {2:.3f} mm)".format(
+                    strategy_label, len(closed_curves), best_dist))
+        log("cut_ring_slit: strategy {0} ring_wall_centroid=({1:.2f},{2:.2f},{3:.2f})  "
+            "ring_centroid=({4:.2f},{5:.2f},{6:.2f})  wall-to-axis dist={7:.3f}mm".format(
+                strategy_label,
+                ring_wall_centroid.X, ring_wall_centroid.Y, ring_wall_centroid.Z,
+                ring_centroid.X, ring_centroid.Y, ring_centroid.Z, best_dist))
+    else:
+        # Strategy C: derive an axis point from open segments, then infer wall centroid from ray.
+        strategy_label = "C"
+        ring_centroid = _estimate_axis_point_from_open_segments(raw_list, p1_line_extended)
+        if ring_centroid is None:
+            raise RingSlitError(
+                "panel/splint intersection produced no usable closed loop (A/B failed), and "
+                "Strategy C could not estimate an axis point from open segments")
+        ray_end_c = rg.Point3d(
+            ring_centroid.X + loc.X * _RAY_LENGTH_MM,
+            ring_centroid.Y + loc.Y * _RAY_LENGTH_MM,
+            ring_centroid.Z + loc.Z * _RAY_LENGTH_MM)
+        ray_curve_c = rg.LineCurve(ring_centroid, ray_end_c)
+        _dput(debug, "wall_thickness_ray", ray_curve_c)
+        ok_ray_c, _overlap_crvs_c, hit_points_c = Intersection.CurveBrep(
+            ray_curve_c, splint_solid, tol)
+        hit_points_list_c = list(hit_points_c) if hit_points_c else []
+        _dput(debug, "wall_thickness_hits", hit_points_list_c)
+        if not ok_ray_c or len(hit_points_list_c) < 2:
+            raise RingSlitError(
+                "panel/splint intersection produced no usable closed loop (A/B failed), and "
+                "Strategy C ray from estimated axis point found {0} hit(s), expected >= 2"
+                .format(len(hit_points_list_c)))
+        hits_c = sorted(hit_points_list_c, key=lambda p: p.DistanceTo(ring_centroid))
+        inner_hit_c = hits_c[0]
+        outer_hit_c = hits_c[1]
+        wall_thickness = inner_hit_c.DistanceTo(outer_hit_c)
+        ring_wall_centroid = rg.Point3d(
+            (inner_hit_c.X + outer_hit_c.X) / 2.0,
+            (inner_hit_c.Y + outer_hit_c.Y) / 2.0,
+            (inner_hit_c.Z + outer_hit_c.Z) / 2.0)
+        _dput(debug, "ring_centroid", ring_centroid)
+        _dput(debug, "ring_wall_centroid", ring_wall_centroid)
+        _dput(debug, "intersection_strategy", strategy_label)
+        log("cut_ring_slit: strategy C axis-point fallback engaged; "
+            "ring_wall_centroid=({0:.2f},{1:.2f},{2:.2f})".format(
+                ring_wall_centroid.X, ring_wall_centroid.Y, ring_wall_centroid.Z))
 
     # --- Measure wall thickness via a ray shoot from ring_centroid --------------------
-    ray_end = rg.Point3d(
-        ring_centroid.X + loc.X * _RAY_LENGTH_MM,
-        ring_centroid.Y + loc.Y * _RAY_LENGTH_MM,
-        ring_centroid.Z + loc.Z * _RAY_LENGTH_MM)
-    ray_curve = rg.LineCurve(ring_centroid, ray_end)
-    _dput(debug, "wall_thickness_ray", ray_curve)
-    ok_ray, _overlap_crvs, hit_points = Intersection.CurveBrep(ray_curve, splint_solid, tol)
-    hit_points_list = list(hit_points) if hit_points else []
-    _dput(debug, "wall_thickness_hits", hit_points_list)
-    if not ok_ray or len(hit_points_list) < 2:
-        raise RingSlitError(
-            "wall-thickness ray from ring_centroid found {0} hit(s), expected >= 2. Check "
-            "that the panel-derived ring_centroid is actually inside the bore.".format(
-                len(hit_points_list)))
-    hits = sorted(hit_points_list, key=lambda p: p.DistanceTo(ring_centroid))
-    inner_hit = hits[0]
-    outer_hit = hits[1]
-    wall_thickness = inner_hit.DistanceTo(outer_hit)
+    if wall_thickness is None:
+        ray_end = rg.Point3d(
+            ring_centroid.X + loc.X * _RAY_LENGTH_MM,
+            ring_centroid.Y + loc.Y * _RAY_LENGTH_MM,
+            ring_centroid.Z + loc.Z * _RAY_LENGTH_MM)
+        ray_curve = rg.LineCurve(ring_centroid, ray_end)
+        _dput(debug, "wall_thickness_ray", ray_curve)
+        ok_ray, _overlap_crvs, hit_points = Intersection.CurveBrep(ray_curve, splint_solid, tol)
+        hit_points_list = list(hit_points) if hit_points else []
+        _dput(debug, "wall_thickness_hits", hit_points_list)
+        if not ok_ray or len(hit_points_list) < 2:
+            raise RingSlitError(
+                "wall-thickness ray from ring_centroid found {0} hit(s), expected >= 2. "
+                "Check that the derived ring_centroid is actually inside the bore.".format(
+                    len(hit_points_list)))
+        hits = sorted(hit_points_list, key=lambda p: p.DistanceTo(ring_centroid))
+        inner_hit = hits[0]
+        outer_hit = hits[1]
+        wall_thickness = inner_hit.DistanceTo(outer_hit)
+
     _dput(debug, "wall_thickness_mm", wall_thickness)
     if wall_thickness < wall_min or wall_thickness > wall_max:
         raise RingSlitError(
@@ -417,7 +509,8 @@ def cut_ring_slit(splint_solid,
             "ring_centroid placement and slit_location_vector direction, or widen "
             "wall_thickness_range if this splint really does have such a wall.".format(
                 wall_thickness, wall_min, wall_max))
-    log("cut_ring_slit: wall_thickness={0:.3f}mm".format(wall_thickness))
+    log("cut_ring_slit: strategy {0} wall_thickness={1:.3f}mm".format(
+        strategy_label, wall_thickness))
 
     # --- Build the cutter's 2D profile curve, centered on ring_wall_centroid ----------
     # Use the panel-derived wall centroid as the cutter origin - it captures the true
