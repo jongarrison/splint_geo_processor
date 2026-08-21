@@ -41,7 +41,8 @@ INPUT_FILES = [
     # "RVN0.json",
     # "JC8E.json", #!!! fails by running for a long time, but still creating log output
     # "KGAS.json", #fails by running for a long time, but still creating log output
-    "8CH7.json",
+    # "8CH7.json",
+    "TRK4.json", # 8/19/26 failed to generate ramp and overly slender anchor connections
 ]
 
 ENABLE_MESH_EXPORT = False  # when True, export 3mf to outputs/ (same path prod uses)
