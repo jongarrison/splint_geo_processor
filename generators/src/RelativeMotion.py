@@ -1049,14 +1049,8 @@ def create_anchor_to_anchor_bridge(curve_a, curve_b, radius_mm):
         "{0:.1f} mm); finger spacing (all_splint_finger_circ) too large.".format(gap))
 
 
-# Minimal-non-biting-attach search bounds (normalized hemisphere arc length from the near end).
-# Attaching low (near the dropped stub) makes the blend curve sharply and dip into the ring;
-# raising the attach toward the apex clears it. We scan upward and take the first grazing attach.
-_ATTACH_SEARCH_LO = 0.15
-_ATTACH_SEARCH_HI = 0.9
-_ATTACH_SEARCH_STEP = 0.05
-# A blend that only grazes touches the kept ring solely at its touchdown; a bite crosses the ring
-# elsewhere. Ignore intersections within this distance (mm) of the touchdown as the tangent kiss.
+# Tolerance (mm) for distinguishing a graze (tangent kiss at touchdown) from a bite
+# (bridge crossing through the ring). Used by _blend_bites_ring and _clip_bridge_from_ring_invasion.
 _ATTACH_GRAZE_TOL = 0.5
 
 
@@ -1071,81 +1065,131 @@ def _blend_bites_ring(blend, kept_anchor, p_attach):
     return False
 
 
+# Pursuit bridge tuning constants.
+_PURSUIT_STEP_MM = 0.5         # fixed step distance for each pursuit iteration
+_PURSUIT_BLEND_RATE = 0.3      # fraction of heading correction toward ring per step (0=straight, 1=instant)
+_PURSUIT_LANDING_TOL = 0.1     # stop pursuit when tip is within this distance (mm) of the ring
+_PURSUIT_MAX_STEPS = 200       # safety cap on pursuit iterations
+_PURSUIT_HANDLE_FRAC = 0.35    # Bezier tangent handle length as fraction of P0-to-touchdown distance
+
+
+def _pursuit_find_touchdown(start_pt, start_tangent, anchor_curve, step_mm, blend_rate,
+                            landing_tol, max_steps):
+    """Walk from start_pt toward anchor_curve in small steps, blending heading toward the
+    closest ring point at each step. Returns (touchdown_pt, waypoints) where waypoints
+    includes start_pt through the final step."""
+    waypoints = [start_pt]
+    heading = Vector3d(start_tangent)
+    heading.Unitize()
+    pt = Point3d(start_pt)
+
+    for _ in range(max_steps):
+        # Target: closest point on the anchor ring from current tip.
+        ok, t_closest = anchor_curve.ClosestPoint(pt)
+        if not ok:
+            break
+        target = anchor_curve.PointAt(t_closest)
+        dist_to_ring = pt.DistanceTo(target)
+
+        if dist_to_ring <= landing_tol:
+            waypoints.append(Point3d(target))
+            return target, waypoints
+
+        # Blend heading: mix current direction with aim-at-target direction.
+        aim = target - pt
+        aim.Unitize()
+        heading = heading * (1.0 - blend_rate) + aim * blend_rate
+        heading.Unitize()
+
+        # Step forward.
+        step = min(step_mm, dist_to_ring)
+        pt = Point3d(pt.X + heading.X * step, pt.Y + heading.Y * step, pt.Z + heading.Z * step)
+        waypoints.append(Point3d(pt))
+
+    # Ran out of steps; snap to the closest ring point from the final tip.
+    ok, t_final = anchor_curve.ClosestPoint(pt)
+    if ok:
+        touchdown = anchor_curve.PointAt(t_final)
+        waypoints.append(Point3d(touchdown))
+        return touchdown, waypoints
+    return None, waypoints
+
+
+def _build_pursuit_bridge(start_pt, start_tangent, touchdown_pt, handle_frac):
+    """Quadratic Bezier from start_pt (tangent to start_tangent) to touchdown_pt.
+    handle_frac sets the tangent handle length as a fraction of the start-to-touchdown distance."""
+    span = start_pt.DistanceTo(touchdown_pt)
+    if span < 1e-9:
+        return None
+    handle_len = span * handle_frac
+    tangent = Vector3d(start_tangent)
+    tangent.Unitize()
+    p1 = Point3d(start_pt.X + tangent.X * handle_len,
+                 start_pt.Y + tangent.Y * handle_len,
+                 start_pt.Z + tangent.Z * handle_len)
+    # Quadratic Bezier: 3 control points, degree 2.
+    crv = Curve.CreateControlPointCurve([start_pt, p1, touchdown_pt], 2)
+    return crv
+
+
 def create_supportpath_bridge_anchor_to_support(anchor_curve, support_curve, support_center,
-                                                support_param=None, min_attach_fraction=None):
-    """Smooth (G1) bridge from an anchor ring hemisphere to a supported finger's support band.
+                                                support_param=None):
+    """Bridge from anchor ring hemisphere to a support band using pursuit-targeted Bezier.
 
-    A tangent blend leaves the support band's near end as a smooth continuation of the arc and
-    meets the anchor hemisphere tangentially a short way up from the end nearest the support. The
-    attach point is found by search: starting low and raising it up the support-facing side of the
-    hemisphere until the blend grazes the ring instead of biting into it, taking the tightest such
-    join. The anchor is trimmed back to that attach point, dropping the stub that faced the
-    support; the support band is left whole. Used for every anchor-to-support joint: mid-support
-    arcs and both prongs of an end-support cradle (support side and return side).
+    Replaces the old dual-tangency blend approach. The bridge starts tangent to the support
+    curve's near end and curves toward the anchor ring via a two-phase process:
+      1. Pursuit targeting: walk from the support endpoint toward the ring in small steps,
+         blending the heading toward the closest ring point each step, to find a natural
+         touchdown location.
+      2. Bezier construction: build a quadratic Bezier from the support endpoint (with
+         tangent) to the touchdown point. The single-span quadratic cannot inflect, so
+         the bridge maintains consistent concavity throughout.
 
-    support_param pins which end of support_curve to bridge from (used for end-support cradles,
-    whose two prongs sit only a band thickness apart); when None the facing endpoint is picked
-    automatically.
+    The anchor hemisphere is trimmed at the touchdown, keeping the far side. The support
+    curve is returned unchanged.
 
-    min_attach_fraction, when given, raises the floor of the attach search so the touchdown sits
-    higher up the hemisphere (a fuller, stronger neck); when None the search starts at its default
-    low bound.
-
-    Returns (blend_curve, anchor_curve_revised, support_curve_revised); on failure the bridge is
-    None and the curves are returned untrimmed.
+    Returns (bridge_curve, anchor_curve_revised, support_curve_revised); on failure the
+    bridge is None and the curves are returned untrimmed.
     """
+    # Determine which end of the support curve faces the anchor.
     if support_param is None:
         ta, _tb = _facing_endpoints(support_curve, anchor_curve)
     else:
         ta = support_param
     p_support = support_curve.PointAt(ta)
 
-    # Anchor end nearest the support prong is the stub we drop; attach some way up the hemisphere
-    # from it (toward the apex) so the blend meets the ring on the support-facing side. A fraction
-    # measured from the near end, mapped to a normalized-length param.
-    if (anchor_curve.PointAtStart.DistanceTo(p_support)
-            <= anchor_curve.PointAtEnd.DistanceTo(p_support)):
-        near_anchor_t = anchor_curve.Domain.T0
-        to_nl = lambda frac: frac
-    else:
-        near_anchor_t = anchor_curve.Domain.T1
-        to_nl = lambda frac: 1.0 - frac
+    # Tangent pointing away from the support body (into the gap toward the anchor).
+    tangent = support_curve.TangentAt(ta)
+    if _blend_reverse(support_curve, ta):
+        tangent.Reverse()
 
-    # Blend direction is fixed by which ends we leave from: off the support body at its prong, and
-    # back toward the dropped near stub at the anchor so the kept far portion continues smoothly.
-    rev_support = _blend_reverse(support_curve, ta)
-    rev_anchor = near_anchor_t == anchor_curve.Domain.T0
+    # Phase 1: pursuit to find the touchdown point on the anchor hemisphere.
+    touchdown, waypoints = _pursuit_find_touchdown(
+        p_support, tangent, anchor_curve,
+        _PURSUIT_STEP_MM, _PURSUIT_BLEND_RATE, _PURSUIT_LANDING_TOL, _PURSUIT_MAX_STEPS)
 
-    # Scan the attach upward and keep the first (tightest) that grazes rather than bites; remember
-    # the last valid blend as a fallback if none fully clear. A caller can raise the starting floor
-    # (min_attach_fraction) to force the touchdown higher up the ring for a fuller neck.
-    start = _ATTACH_SEARCH_LO
-    if min_attach_fraction is not None:
-        start = max(_ATTACH_SEARCH_LO, min(min_attach_fraction, _ATTACH_SEARCH_HI))
-    fallback = None
-    frac = start
-    while frac <= _ATTACH_SEARCH_HI + 1e-9:
-        ok, t_attach = anchor_curve.NormalizedLengthParameter(to_nl(frac))
-        if not ok:
-            frac += _ATTACH_SEARCH_STEP
-            continue
-        blend = Curve.CreateBlendCurve(support_curve, ta, rev_support, BlendContinuity.Tangency,
-                                       anchor_curve, t_attach, rev_anchor, BlendContinuity.Tangency)
-        if blend is not None:
-            kept = _trim_keep_far(anchor_curve, t_attach, support_center)
-            p_attach = anchor_curve.PointAt(t_attach)
-            if not _blend_bites_ring(blend, kept, p_attach):
-                return blend, kept, support_curve
-            fallback = (blend, kept)
-        frac += _ATTACH_SEARCH_STEP
+    if touchdown is None:
+        log("create_supportpath_bridge_anchor_to_support: pursuit failed to reach ring")
+        return None, anchor_curve, support_curve
 
-    if fallback is not None:
-        log("create_supportpath_bridge_anchor_to_support: no non-biting attach found; using "
-            "highest attach (subtle bite may remain)")
-        return fallback[0], fallback[1], support_curve
+    # Phase 2: build a quadratic Bezier from support endpoint to touchdown.
+    bridge = _build_pursuit_bridge(p_support, tangent, touchdown, _PURSUIT_HANDLE_FRAC)
+    if bridge is None:
+        log("create_supportpath_bridge_anchor_to_support: Bezier construction failed")
+        return None, anchor_curve, support_curve
 
-    log("create_supportpath_bridge_anchor_to_support: tangent blend failed; leaving gap")
-    return None, anchor_curve, support_curve
+    # Verify the bridge doesn't cross inside the anchor ring.
+    ok_td, t_td = anchor_curve.ClosestPoint(touchdown)
+    if not ok_td:
+        log("create_supportpath_bridge_anchor_to_support: cannot locate touchdown on ring")
+        return None, anchor_curve, support_curve
+
+    kept = _trim_keep_far(anchor_curve, t_td, support_center)
+    if _blend_bites_ring(bridge, kept, touchdown):
+        log("create_supportpath_bridge_anchor_to_support: pursuit bridge bites ring; "
+            "accepting with possible subtle intersection")
+
+    return bridge, kept, support_curve
 
 
 def _common_tangent_leap(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0):
@@ -1177,11 +1221,11 @@ def _common_tangent_leap(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevatio
 
 def create_return_leap_bridge(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0,
                               support_pieces, return_spine_thickness_mm,
-                              return_spine_end_reach, return_spine_touchdown_fraction):
+                              return_spine_end_reach):
     """Return-side spine across a support run: a short level bar spanning the leapt-over support,
     held return_spine_thickness_mm outward from the support's return-facing extreme and NOT
     touching either anchor ring. Each bar end bridges into the adjacent anchor's return
-    hemisphere with the same grazing tangent blend used for support prongs.
+    hemisphere using the pursuit-targeted Bezier bridge.
 
     A plain common tangent to the two anchor rings ignores the support height, so it pinches thin
     at low elevation and bloats into a solid wedge at high elevation. Instead the spine tracks the
@@ -1189,15 +1233,9 @@ def create_return_leap_bridge(hemi_a, ring_a, hemi_b, ring_b, profile_plane, ele
     tallest leapt-over support, so the profile keeps that thickness at its thinnest spot, and its
     lateral span matches the support's own width so it floats clear of the rings between them.
 
-    Reusing create_supportpath_bridge_anchor_to_support for both ends means the spine attaches to
-    each ring exactly like a support band does - the attach search lands the touchdown on the ring
-    edge and keeps the ring's outer arc, so the ring is never clipped.
-
     return_spine_end_reach (0..1) sets the straight-span width: each spine end reaches that far
     from the support edge toward the adjacent ring apex (0 = support width only, 1 = under the
-    apex, which risks touching the ring). return_spine_touchdown_fraction is the minimum attach
-    fraction up each anchor return hemisphere for the end blends; raising it moves the touchdown
-    higher up the ring for a fuller, stronger neck (independent of the end reach).
+    apex, which risks touching the ring).
 
     support_pieces are the leapt-over support-side curves (support arcs / cradles) between the two
     anchors. Falls back to a plain common-tangent leap when none are supplied or an end bridge
@@ -1263,16 +1301,14 @@ def create_return_leap_bridge(hemi_a, ring_a, hemi_b, ring_b, profile_plane, ele
     hemi_hi, hemi_lo = (hemi_a, hemi_b) if lat(apex_a) >= lat(apex_b) else (hemi_b, hemi_a)
 
     blend_hi, hemi_hi_trim, spine = create_supportpath_bridge_anchor_to_support(
-        hemi_hi, spine, gap_mid, support_param=spine.Domain.T1,
-        min_attach_fraction=return_spine_touchdown_fraction)
+        hemi_hi, spine, gap_mid, support_param=spine.Domain.T1)
     if blend_hi is None:
         log("create_return_leap_bridge: spine could not bridge to the +h anchor; using "
             "common-tangent leap")
         return _common_tangent_leap(hemi_a, ring_a, hemi_b, ring_b, profile_plane, elevation_ge0)
 
     blend_lo, hemi_lo_trim, spine = create_supportpath_bridge_anchor_to_support(
-        hemi_lo, spine, gap_mid, support_param=spine.Domain.T0,
-        min_attach_fraction=return_spine_touchdown_fraction)
+        hemi_lo, spine, gap_mid, support_param=spine.Domain.T0)
     if blend_lo is None:
         log("create_return_leap_bridge: spine could not bridge to the -h anchor; using "
             "common-tangent leap")
@@ -1554,6 +1590,25 @@ def extract_support_path_rails(perimeter_chain, tolerance=None):
                                   use_support_touch_curve=True, include_cantilever_info=True)
 
 
+def extract_return_rails(perimeter_chain, tolerance=None):
+    """Pull ONLY the return-leap spine side of the perimeter as open rail curves."""
+    return _extract_rails_by_role(perimeter_chain, (_ROLE_RETURN_PATH,), tolerance)
+
+
+def min_rail_separation(support_rails, return_rails):
+    """Minimum closest-point distance between any support rail and any return rail.
+    Returns float('inf') when either list is empty."""
+    best = float('inf')
+    for s_rail in support_rails:
+        for r_rail in return_rails:
+            ok, pt_s, pt_r = s_rail.ClosestPoints(r_rail)
+            if ok:
+                d = pt_s.DistanceTo(pt_r)
+                if d < best:
+                    best = d
+    return best
+
+
 def _build_perimeter_chamfer_handles(edge, rail, target_mm,
                                        endpoint_mm=_CHAMFER_PERIMETER_ENDPOINT_MM,
                                        end_inset_frac=_CHAMFER_PERIMETER_END_INSET_FRAC):
@@ -1652,8 +1707,7 @@ def _log_walk_chain_gaps(walk_segments, work, bridge_after):
 
 def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_rings,
                         anchor_bridge_radius_mm, support_bridge_radius_mm,
-                        return_spine_thickness_mm, return_spine_end_reach,
-                        return_spine_touchdown_fraction):
+                        return_spine_thickness_mm, return_spine_end_reach):
     """Bridge the ordered walk slots and join them into one closed profile perimeter (Pass 2).
 
     For each adjacent slot pair (including the loop-closing pair) the matching bridge is built
@@ -1677,9 +1731,6 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
       - return_spine_end_reach:   fraction (0..1) of the gap from the support edge to the adjacent
                                   ring apex each spine end reaches; sets the straight-span width
                                   (0 = support width only, 1 = under the apex).
-      - return_spine_touchdown_fraction: minimum attach fraction up each anchor return hemisphere
-                                  for the spine's end blends; higher pushes the touchdown up the
-                                  ring for a fuller, stronger neck.
 
     The mechanism (create_rounded_corner_bridge) is radius-agnostic; this dispatcher owns the
     policy of which radius applies to which joint type.
@@ -1765,8 +1816,7 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
                 bridge, rev_a, rev_b = create_return_leap_bridge(
                     ca, exterior_anchor_rings[fa], cb, exterior_anchor_rings[fb],
                     profile_plane, elevation_ge0, support_pieces,
-                    return_spine_thickness_mm, return_spine_end_reach,
-                    return_spine_touchdown_fraction)
+                    return_spine_thickness_mm, return_spine_end_reach)
                 work[k] = rev_a
                 work[j] = rev_b
             else:
@@ -2113,7 +2163,9 @@ class RelativeMotionGenerator(SplintGenerator):
         support_bridge_radius_mm = 10.0
         return_spine_thickness_mm = 5.0 #JG edited 7/10 5:31pm
         return_spine_end_reach = 0.1 #JG edited 8/10 10:19am
-        return_spine_touchdown_fraction = 0.35
+        min_path_separation_mm = radial_band_thickness_mm * 1.05
+        path_separation_spine_step_mm = 0.75
+        path_separation_max_attempts = 3
         objectid_text_size_factor = 0.4         # objectID text height as a fraction of the band length
         objectid_extrusion_depth_factor = 0.5   # emboss depth as a fraction of the ring wall thickness
 
@@ -2166,38 +2218,65 @@ class RelativeMotionGenerator(SplintGenerator):
             d_full_curves=d_full_curves, d_preserved=d_preserved)
 
         # --- Phase 5: walk each profile perimeter ---------------------------------------------
-        # Proximal face.
-        p_rings, p_pos_hemis, p_neg_hemis = build_exterior_anchor_rings(
-            raw_data, proximal_profile_plane, p_preserved, radial_band_thickness_mm)
-        p_cradles = build_end_support_cradles(
-            raw_data, proximal_profile_plane, p_preserved, p_rings,
-            single_sided_support_thickness_mm)
-        p_walk_segments = plan_perimeter_walk(
-            raw_data, p_pos_hemis, p_neg_hemis, p_preserved, p_cradles)
-        p_walk_preview = [s["curve"] for s in p_walk_segments]
-        p_closed_profile, p_bridge_curves, p_perimeter_chain = weld_perimeter_walk(
-            raw_data, p_walk_segments, proximal_profile_plane, p_rings,
-            anchor_bridge_radius_mm, support_bridge_radius_mm, return_spine_thickness_mm,
-            return_spine_end_reach, return_spine_touchdown_fraction)
+        # Build both perimeters inside a retry loop: if the support-path and return-path rails
+        # are closer than min_path_separation_mm, bump return_spine_thickness and rebuild.
+        effective_spine_thickness = return_spine_thickness_mm
+        for attempt in range(path_separation_max_attempts):
+            # Proximal face.
+            p_rings, p_pos_hemis, p_neg_hemis = build_exterior_anchor_rings(
+                raw_data, proximal_profile_plane, p_preserved, radial_band_thickness_mm)
+            p_cradles = build_end_support_cradles(
+                raw_data, proximal_profile_plane, p_preserved, p_rings,
+                single_sided_support_thickness_mm)
+            p_walk_segments = plan_perimeter_walk(
+                raw_data, p_pos_hemis, p_neg_hemis, p_preserved, p_cradles)
+            p_walk_preview = [s["curve"] for s in p_walk_segments]
+            p_closed_profile, p_bridge_curves, p_perimeter_chain = weld_perimeter_walk(
+                raw_data, p_walk_segments, proximal_profile_plane, p_rings,
+                anchor_bridge_radius_mm, support_bridge_radius_mm, effective_spine_thickness,
+                return_spine_end_reach)
+
+            # Distal face.
+            d_rings, d_pos_hemis, d_neg_hemis = build_exterior_anchor_rings(
+                raw_data, distal_profile_plane, d_preserved, radial_band_thickness_mm)
+            d_cradles = build_end_support_cradles(
+                raw_data, distal_profile_plane, d_preserved, d_rings,
+                single_sided_support_thickness_mm)
+            d_walk_segments = plan_perimeter_walk(
+                raw_data, d_pos_hemis, d_neg_hemis, d_preserved, d_cradles)
+            d_walk_preview = [s["curve"] for s in d_walk_segments]
+            d_closed_profile, d_bridge_curves, d_perimeter_chain = weld_perimeter_walk(
+                raw_data, d_walk_segments, distal_profile_plane, d_rings,
+                anchor_bridge_radius_mm, support_bridge_radius_mm, effective_spine_thickness,
+                return_spine_end_reach)
+
+            # Measure closest distance between support-only and return-only rails.
+            p_support_only = _extract_rails_by_role(p_perimeter_chain, (_ROLE_SUPPORT_PATH,), _JOIN_TOL)
+            p_return_only = extract_return_rails(p_perimeter_chain, _JOIN_TOL)
+            d_support_only = _extract_rails_by_role(d_perimeter_chain, (_ROLE_SUPPORT_PATH,), _JOIN_TOL)
+            d_return_only = extract_return_rails(d_perimeter_chain, _JOIN_TOL)
+            p_gap = min_rail_separation(p_support_only, p_return_only)
+            d_gap = min_rail_separation(d_support_only, d_return_only)
+            worst_gap = min(p_gap, d_gap)
+
+            log("Phase 5 attempt {0}: spine_thickness={1:.2f}mm, "
+                "p_gap={2:.2f}mm, d_gap={3:.2f}mm, target={4:.2f}mm".format(
+                    attempt + 1, effective_spine_thickness, p_gap, d_gap,
+                    min_path_separation_mm))
+
+            if worst_gap >= min_path_separation_mm:
+                break
+            if attempt < path_separation_max_attempts - 1:
+                effective_spine_thickness += path_separation_spine_step_mm
+                log("Phase 5: support/return rails too close ({0:.2f}mm < {1:.2f}mm); "
+                    "raising spine thickness to {2:.2f}mm".format(
+                        worst_gap, min_path_separation_mm, effective_spine_thickness))
+
         tracker.log_phase(5.0, "proximal perimeter walk",
             p_rings=p_rings, p_pos_hemis=p_pos_hemis, p_neg_hemis=p_neg_hemis,
             p_cradles=p_cradles, p_walk_segments=p_walk_segments,
             p_walk_preview=p_walk_preview, p_closed_profile=p_closed_profile,
             p_bridge_curves=p_bridge_curves)
-
-        # Distal face.
-        d_rings, d_pos_hemis, d_neg_hemis = build_exterior_anchor_rings(
-            raw_data, distal_profile_plane, d_preserved, radial_band_thickness_mm)
-        d_cradles = build_end_support_cradles(
-            raw_data, distal_profile_plane, d_preserved, d_rings,
-            single_sided_support_thickness_mm)
-        d_walk_segments = plan_perimeter_walk(
-            raw_data, d_pos_hemis, d_neg_hemis, d_preserved, d_cradles)
-        d_walk_preview = [s["curve"] for s in d_walk_segments]
-        d_closed_profile, d_bridge_curves, d_perimeter_chain = weld_perimeter_walk(
-            raw_data, d_walk_segments, distal_profile_plane, d_rings,
-            anchor_bridge_radius_mm, support_bridge_radius_mm, return_spine_thickness_mm,
-            return_spine_end_reach, return_spine_touchdown_fraction)
         tracker.log_phase(5.5, "distal perimeter walk",
             d_rings=d_rings, d_pos_hemis=d_pos_hemis, d_neg_hemis=d_neg_hemis,
             d_cradles=d_cradles, d_walk_segments=d_walk_segments,
@@ -2222,17 +2301,16 @@ class RelativeMotionGenerator(SplintGenerator):
             **loft_diag)
 
         # --- Phase 7: extract support-perimeter rails --------------------------------------
-        # Open rail curves marking the support-path and return-path stretches on each face.
-        # Anchor outer edges stay sharp on purpose (bed adhesion + slit curl); only the support
-        # perimeter and the anchor bore rims get chamfered in Phase 7.5.
+        # Separate support-path and return-path rails for each face.
         p_support_rails = extract_support_rails(p_perimeter_chain, _JOIN_TOL)
+        p_return_rails = extract_return_rails(p_perimeter_chain, _JOIN_TOL)
         d_support_rails = extract_support_rails(d_perimeter_chain, _JOIN_TOL)
-        # Support-arc-side ONLY (excludes the return-leap spine) - Phase 9's Support Path
-        # Ramp must root on the true support-arc side, not the return-path stretch that
-        # extract_support_rails also (correctly, for chamfering) lumps in.
+        d_return_rails = extract_return_rails(d_perimeter_chain, _JOIN_TOL)
+        # Support-arc-side ONLY (excludes the return-leap spine) for Phase 9 ramp.
         d_support_path_rails = extract_support_path_rails(d_perimeter_chain, _JOIN_TOL)
         tracker.log_phase(7.0, "extract support rails",
-            p_support_rails=p_support_rails, d_support_rails=d_support_rails,
+            p_support_rails=p_support_rails, p_return_rails=p_return_rails,
+            d_support_rails=d_support_rails, d_return_rails=d_return_rails,
             d_support_path_rails=d_support_path_rails)
 
         # --- Phase 7.5: chamfer anchor rims then outer perimeter ------------------------------

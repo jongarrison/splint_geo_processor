@@ -30,18 +30,18 @@ SWITCHING INPUTS
 # One or more inputs to run in the same session. Each row is offset in +Y so results sit
 # side-by-side without overlapping. Add / remove entries freely.
 INPUT_FILES = [
-    # "AASA_20.json",
-    # "ASAA_BTR8_prod.json", #prob
-    # "ASAX_20deg.json",
-    # "ASSA_20.json",
-    # "XASA_ZM1Q_prod.json",
-    # "2QY6_prod_exact.json",
-    # "MX2E.json",
-    # "AASX_20.json", #prob
-    # "RVN0.json",
-    # "JC8E.json", #!!! fails by running for a long time, but still creating log output
-    # "KGAS.json", #fails by running for a long time, but still creating log output
-    # "8CH7.json",
+    "AASA_20.json",
+    "ASAA_BTR8_prod.json", #prob
+    "ASAX_20deg.json",
+    "ASSA_20.json",
+    "XASA_ZM1Q_prod.json",
+    "2QY6_prod_exact.json",
+    "MX2E.json",
+    "AASX_20.json", #prob
+    "RVN0.json",
+    "JC8E.json", #!!! fails by running for a long time, but still creating log output
+    "KGAS.json", #fails by running for a long time, but still creating log output
+    "8CH7.json",
     "TRK4.json", # 8/19/26 failed to generate ramp and overly slender anchor connections
 ]
 
