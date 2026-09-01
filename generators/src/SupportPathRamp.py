@@ -150,8 +150,9 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
 
     rail_top = support_rail.DuplicateCurve()
     rail_bottom = support_rail.DuplicateCurve()
-    if not rail_bottom.Translate(rg.Vector3d(0.0, 0.0, -ramp_thickness)):
-        raise SupportPathRampError("failed to translate rail_bottom by -Z ramp_thickness")
+    # Thickness extends toward the bend side (bend_z_sign: -1 volar, +1 dorsal)
+    if not rail_bottom.Translate(rg.Vector3d(0.0, 0.0, bend_z_sign * ramp_thickness)):
+        raise SupportPathRampError("failed to translate rail_bottom by bend_z_sign * ramp_thickness")
     _dput(debug, "rail_top", rail_top)
     _dput(debug, "rail_bottom", rail_bottom)
 
@@ -287,7 +288,8 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
             # Build a smaller stadium from scratch (quarter-circle inward progression)
             t = float(si - taper_start_idx) / n_tapered
             d = max_offset * (1.0 - math.sqrt(1.0 - t * t))
-            section = _build_offset_stadium(rail_top, ramp_thickness, d, tol)
+            section = _build_offset_stadium(rail_top, ramp_thickness, d, tol,
+                                             z_sign=bend_z_sign)
             if section is None:
                 section = ramp_profile.DuplicateCurve()
             section.Translate(rg.Vector3d(offset))
@@ -357,9 +359,9 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
         if _ok_s and _ok_e and _t_s < _t_e:
             _brt = rail_top.Trim(_t_s, _t_e)
             if _brt is not None:
-                _brt.Translate(rg.Vector3d(0.0, 0.0, -_boot_z_shift))
+                _brt.Translate(rg.Vector3d(0.0, 0.0, bend_z_sign * _boot_z_shift))
                 _brb = _brt.DuplicateCurve()
-                _brb.Translate(rg.Vector3d(0.0, 0.0, -_boot_thickness))
+                _brb.Translate(rg.Vector3d(0.0, 0.0, bend_z_sign * _boot_thickness))
                 _bcs = _stadium_end_cap(_brt, _brb, at_start=True)
                 _bce = _stadium_end_cap(_brt, _brb, at_start=False)
                 if _bcs is not None and _bce is not None:
@@ -458,10 +460,11 @@ def _stadium_end_cap(rail_top, rail_bottom, at_start):
         rail_bottom, t_bot, rev_bot, rg.BlendContinuity.Tangency)
 
 
-def _build_offset_stadium(rail_top, thickness, d, tol, bottom_inset_mm=0.0):
+def _build_offset_stadium(rail_top, thickness, d, tol, bottom_inset_mm=0.0, z_sign=-1.0):
     """Build a stadium profile inset by `d` from the original. `bottom_inset_mm` additionally
     shortens inner_rail_bottom from each end to match a ramp_profile built with an inset
-    eff_bottom. Returns None if d is too large for a valid result."""
+    eff_bottom. z_sign controls whether the band extends -Z or +Z from rail_top.
+    Returns None if d is too large for a valid result."""
     rail_len = rail_top.GetLength()
     if d <= 0.0 or 2.0 * d >= thickness or 2.0 * d >= rail_len:
         return None
@@ -473,8 +476,8 @@ def _build_offset_stadium(rail_top, thickness, d, tol, bottom_inset_mm=0.0):
     inner_rail_top = rail_top.Trim(t_s, t_e)
     if inner_rail_top is None:
         return None
-    # Shift rail_top down by d (inward from the top edge)
-    inner_rail_top.Translate(rg.Vector3d(0.0, 0.0, -d))
+    # Shift inner_rail_top inward from the reference edge by d
+    inner_rail_top.Translate(rg.Vector3d(0.0, 0.0, z_sign * d))
     # Build rail_bottom shifted further down by the reduced thickness; additionally shorten
     # from each end by bottom_inset_mm to mirror the main ramp_profile's eff_bottom shape.
     new_thickness = thickness - 2.0 * d
@@ -487,7 +490,7 @@ def _build_offset_stadium(rail_top, thickness, d, tol, bottom_inset_mm=0.0):
             trimmed_inner = inner_rail_bottom.Trim(t_bi_s, t_bi_e)
             if trimmed_inner is not None:
                 inner_rail_bottom = trimmed_inner
-    inner_rail_bottom.Translate(rg.Vector3d(0.0, 0.0, -new_thickness))
+    inner_rail_bottom.Translate(rg.Vector3d(0.0, 0.0, z_sign * new_thickness))
     # End caps with the reduced thickness
     cap_s = _stadium_end_cap(inner_rail_top, inner_rail_bottom, at_start=True)
     cap_e = _stadium_end_cap(inner_rail_top, inner_rail_bottom, at_start=False)

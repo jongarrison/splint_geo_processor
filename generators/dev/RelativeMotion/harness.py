@@ -43,6 +43,7 @@ INPUT_FILES = [
     "KGAS.json", #fails by running for a long time, but still creating log output
     "8CH7.json",
     "TRK4.json", # 8/19/26 failed to generate ramp and overly slender anchor connections
+    "XR08.json", # 8/28/26 ramp doesn't attach properly because of bug when relative_elevation_angle is negative
 ]
 
 ENABLE_MESH_EXPORT = False  # when True, export 3mf to outputs/ (same path prod uses)
@@ -81,11 +82,16 @@ for _p in (_SRC, _DEVKIT):
     if str(_p) not in sys.path:
         sys.path.append(str(_p))
 
+# Truncate the Rhino log so each run starts clean (the file grows forever otherwise).
+import splintcommon
+reload(splintcommon)
+_rhino_log = Path(splintcommon.get_log_filepath())
+if _rhino_log.exists():
+    _rhino_log.write_text("", encoding="utf-8")
+
 # Reload the module chain so edits since the Rhino session started are picked up. RelativeMotion
 # reloads its own geometry deps (BrepDifference, BrepChamfer, BrepEdgeLocator, etc.) on import,
 # so reloading it cascades; splintcommon is reloaded first since RelativeMotion pulls symbols from it.
-import splintcommon
-reload(splintcommon)
 import RelativeMotion
 reload(RelativeMotion)
 from RelativeMotion import RelativeMotionGenerator

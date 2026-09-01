@@ -13,10 +13,14 @@ import math
 from importlib import reload
 from Rhino.Geometry import (Point3d, Vector3d, Line, Plane, Circle, Cylinder, Transform,
                             LineCurve, Curve, CurveOffsetCornerStyle, BlendContinuity, Arc,
-                            Brep, LoftType, BrepSolidOrientation, AreaMassProperties,
-                            PointContainment)
+                            Brep, LoftType, BrepSolidOrientation, AreaMassProperties)
 from Rhino.Geometry.Intersect import Intersection
 from splintcommon import log
+
+# Stamp logged on every reload so we can verify the running code matches the source file.
+import os as _os
+_MODULE_MTIME = _os.path.getmtime(__file__)
+log("RelativeMotion loaded, source mtime={0}".format(_MODULE_MTIME))
 
 import TwoDCirclePositioning
 reload(TwoDCirclePositioning)
@@ -1071,6 +1075,7 @@ _PURSUIT_BLEND_RATE = 0.3      # fraction of heading correction toward ring per 
 _PURSUIT_LANDING_TOL = 0.1     # stop pursuit when tip is within this distance (mm) of the ring
 _PURSUIT_MAX_STEPS = 200       # safety cap on pursuit iterations
 _PURSUIT_HANDLE_FRAC = 0.35    # Bezier tangent handle length as fraction of P0-to-touchdown distance
+_PURSUIT_FILLET_MM = 1.0       # tangent-arc radius at the bridge-to-hemisphere junction
 
 
 def _pursuit_find_touchdown(start_pt, start_tangent, anchor_curve, step_mm, blend_rate,
@@ -1132,8 +1137,36 @@ def _build_pursuit_bridge(start_pt, start_tangent, touchdown_pt, handle_frac):
     return crv
 
 
+def _fillet_bridge_junction(bridge, kept, touchdown, radius_mm):
+    """Tangent-arc fillet at the bridge-to-hemisphere junction. Smooth (G1) at both ends.
+    Returns (bridge_with_fillet, kept_trimmed), or the originals if the fillet won't fit."""
+    if radius_mm <= 0.0:
+        return bridge, kept
+
+    # Pick points on each curve away from the junction so CreateFilletCurves rounds the
+    # correct corner. Use the midpoints — well away from the meeting end.
+    p_bridge = bridge.PointAtNormalizedLength(0.5)
+    p_kept = kept.PointAtNormalizedLength(0.5)
+
+    pieces = Curve.CreateFilletCurves(bridge, p_bridge, kept, p_kept, radius_mm,
+                                      False, True, False, _INTERSECT_TOL, _INTERSECT_TOL)
+    # Facing params for _split_fillet_pieces: the ends nearest the junction.
+    ta, tb = _facing_endpoints(bridge, kept)
+    arc, rev_bridge, rev_kept = _split_fillet_pieces(pieces, bridge, kept, ta, tb)
+    if arc is None:
+        log("_fillet_bridge_junction: fillet at {0:.2f}mm did not fit; skipping".format(
+            radius_mm))
+        return bridge, kept
+
+    # Join bridge + fillet arc into one curve.
+    joined = Curve.JoinCurves([rev_bridge, arc], _JOIN_TOL)
+    if joined is None or len(joined) != 1:
+        return bridge, kept
+    return joined[0], rev_kept
+
+
 def create_supportpath_bridge_anchor_to_support(anchor_curve, support_curve, support_center,
-                                                support_param=None):
+                                                support_param=None, fillet_radius_mm=0.0):
     """Bridge from anchor ring hemisphere to a support band using pursuit-targeted Bezier.
 
     Replaces the old dual-tangency blend approach. The bridge starts tangent to the support
@@ -1188,6 +1221,10 @@ def create_supportpath_bridge_anchor_to_support(anchor_curve, support_curve, sup
     if _blend_bites_ring(bridge, kept, touchdown):
         log("create_supportpath_bridge_anchor_to_support: pursuit bridge bites ring; "
             "accepting with possible subtle intersection")
+
+    # Fillet the junction between bridge end and hemisphere (only for support-side bridges).
+    if fillet_radius_mm > 0.0:
+        bridge, kept = _fillet_bridge_junction(bridge, kept, touchdown, fillet_radius_mm)
 
     return bridge, kept, support_curve
 
@@ -1322,25 +1359,23 @@ def create_return_leap_bridge(hemi_a, ring_a, hemi_b, ring_b, profile_plane, ele
 
     ring_hi, ring_lo = (ring_a, ring_b) if lat(apex_a) >= lat(apex_b) else (ring_b, ring_a)
     bridge_curve = joined[0]
-    bridge_curve, hemi_hi_trim = _clip_bridge_from_ring_invasion(bridge_curve, ring_hi, hemi_hi_trim)
-    bridge_curve, hemi_lo_trim = _clip_bridge_from_ring_invasion(bridge_curve, ring_lo, hemi_lo_trim)
+    bridge_curve, hemi_hi_trim = _clip_bridge_from_full_ring_invasion(
+        bridge_curve, ring_hi, hemi_hi_trim)
+    bridge_curve, hemi_lo_trim = _clip_bridge_from_full_ring_invasion(
+        bridge_curve, ring_lo, hemi_lo_trim)
 
     hemi_a_trim, hemi_b_trim = ((hemi_hi_trim, hemi_lo_trim) if lat(apex_a) >= lat(apex_b)
                                 else (hemi_lo_trim, hemi_hi_trim))
     return bridge_curve, hemi_a_trim, hemi_b_trim
 
 
-def _clip_bridge_from_ring_invasion(bridge, ring, hemi_trim):
-    """Clip any invasion of bridge into ring at its near end (adjacent to hemi_trim).
+def _clip_bridge_from_full_ring_invasion(bridge, ring, hemi_trim):
+    """Clip a bridge that crosses the full closed ring before reaching its target hemisphere.
 
-    hemi_trim is a sub-arc of ring. If bridge crosses ring more than once at the hemi_trim end
-    (legitimate touchdown graze + invasion), trims bridge back to the last ring crossing and
-    extends hemi_trim along ring to close the resulting gap. Returns (bridge, hemi_trim) unchanged
-    when no invasion is detected (0 or 1 intersections).
+    The selected hemisphere controls the intended touchdown side; the full ring is the collision
+    boundary. Endpoint contact is legitimate. Any other full-ring intersection is an invasion.
     """
     events = Intersection.CurveCurve(bridge, ring, _INTERSECT_TOL, _INTERSECT_TOL)
-    if events is None or events.Count <= 1:
-        return bridge, hemi_trim
 
     # Near end: bridge endpoint closest to hemi_trim (the end adjacent to this ring).
     d_start = min(bridge.PointAtStart.DistanceTo(hemi_trim.PointAtStart),
@@ -1353,8 +1388,9 @@ def _clip_bridge_from_ring_invasion(bridge, ring, hemi_trim):
                             else bridge.Domain.T0)
 
     # Invasion params: intersections beyond the legitimate touchdown graze.
-    invasion_params = [ev.ParameterA for ev in events
-                       if ev.PointA.DistanceTo(near_pt) > _ATTACH_GRAZE_TOL]
+    invasion_params = ([] if events is None else
+                       [ev.ParameterA for ev in events
+                        if ev.PointA.DistanceTo(near_pt) > _ATTACH_GRAZE_TOL])
     if not invasion_params:
         return bridge, hemi_trim
 
@@ -1388,13 +1424,15 @@ def _clip_bridge_from_ring_invasion(bridge, ring, hemi_trim):
     extension = (arc_fwd if arc_rev is None or
                  (arc_fwd is not None and arc_fwd.GetLength() <= arc_rev.GetLength())
                  else arc_rev)
+    if extension is None:
+        return clipped, hemi_trim
 
     joined_ext = Curve.JoinCurves([hemi_trim, extension], _JOIN_TOL)
     if joined_ext is None or len(joined_ext) != 1:
         return clipped, hemi_trim
 
-    log("_clip_bridge_from_ring_invasion: trimmed {0:.2f}mm, extended hemi {1:.2f}mm".format(
-        bridge.GetLength() - clipped.GetLength(), extension.GetLength()))
+    log("_clip_bridge_from_full_ring_invasion: trimmed {0:.2f}mm, extended hemi "
+        "{1:.2f}mm".format(bridge.GetLength() - clipped.GetLength(), extension.GetLength()))
     return clipped, joined_ext[0]
 
 
@@ -1783,7 +1821,12 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
             # a plain mid-support arc uses automatic facing-endpoint detection.
             sp = work[si].Domain.T0 if walk_segments[si]["kind"] == "end_support_cradle" else None
             bridge, rev_anchor, rev_support = create_supportpath_bridge_anchor_to_support(
-                work[ai], work[si], support_center, support_param=sp)
+                work[ai], work[si], support_center, support_param=sp,
+                fillet_radius_mm=_PURSUIT_FILLET_MM)
+            if bridge is not None:
+                full_ring = exterior_anchor_rings[walk_segments[ai]["finger_index"]]
+                bridge, rev_anchor = _clip_bridge_from_full_ring_invasion(
+                    bridge, full_ring, rev_anchor)
             work[ai] = rev_anchor
             work[si] = rev_support
         elif set([ka, kb]) == set(["anchor_return_side", "end_support_cradle"]):
@@ -1797,7 +1840,8 @@ def weld_perimeter_walk(raw_data, walk_segments, profile_plane, exterior_anchor_
                 ai, si = j, k
             support_center = work[si].GetBoundingBox(True).Center
             bridge, rev_anchor, rev_support = create_supportpath_bridge_anchor_to_support(
-                work[ai], work[si], support_center, support_param=work[si].Domain.T1)
+                work[ai], work[si], support_center, support_param=work[si].Domain.T1,
+                fillet_radius_mm=_PURSUIT_FILLET_MM)
             work[ai] = rev_anchor
             work[si] = rev_support
         elif ka == "anchor_support_side" and kb == "anchor_support_side":
@@ -2180,7 +2224,7 @@ class RelativeMotionGenerator(SplintGenerator):
         support_path_ramp_thickness = radial_band_thickness_mm
         support_path_ramp_length = longitudinal_band_width_mm * 0.4
         support_path_ramp_arc_radius = longitudinal_band_width_mm * 0.3
-        support_path_ramp_trim_mm = 5.5  # trim off each end of the rail before building ramp profile
+        support_path_ramp_trim_mm = 3.0  # trim off each end of the rail before building ramp profile
 
         # --- Phase 1: finger positions --------------------------------------------------------
         mcp_points, p1_lines, p1_circles, p1_cylinders = setup_finger_positions(

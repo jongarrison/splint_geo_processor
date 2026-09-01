@@ -49,9 +49,14 @@ if [ -z "$INSTANCE" ]; then
 fi
 echo "Targeting Rhino 8 instance: $INSTANCE"
 
-# --- clear stale files ---
+# --- clear stale files and bytecode caches ---
 DONE="${REPORT%.txt}.done"
 rm -f "$REPORT" "$DONE"
+
+# Purge __pycache__ so Rhino's embedded CPython cannot serve stale .pyc bytecode.
+# Without this, reload() can silently use a cached .pyc even when the .py has changed.
+find "$(dirname "$HARNESS")/../../src" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+find "$(dirname "$HARNESS")/../_devkit" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 
 # --- record Rhino log position before dispatch so we capture only new lines ---
 RHINO_LOG="$HOME/SplintFactoryFiles/outbox/log.txt"
