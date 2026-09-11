@@ -50,7 +50,7 @@ must enforce them:
   end of the finger run, never between two included fingers.
 - Only anchor fingers may be slitted (is_slitted True only where is_anchor_finger is True).
 - pip_neighbor_fwd_offset is 0 for the first included finger (the reference finger).
-- relative_elevation_angle within [-120, +45] degrees (provisional; matches the Phase 2 clamp).
+- relative_elevation_angle within [-50, +50] degrees (matches the Phase 2 clamp).
 
 ### First function: setup_finger_positions
 
@@ -182,7 +182,7 @@ Spec:
   get this sign right at implementation so positive input reads as "up".
 - Same angle applied to every supported finger (4-finger case: both tilt up by the same
   amount, each pivoting on its own MCP). No graduation for now.
-- Angle limits: clamp relative_elevation_angle to [-120, +45] degrees (provisional, to be
+- Angle limits: clamp relative_elevation_angle to [-50, +50] degrees (to be
   verified with hand therapist cofounder Liz). FUTURE REQUIREMENT: the splint_factory web
   input form must enforce this same range.
 - The whole finger transforms together (PIP point, P1 line, circle, cylinder) via one
@@ -913,7 +913,7 @@ measurements. This matches the raw_data the geometry consumes (Phases 1-3).
 At least two anchors and one supported finger; included fingers contiguous (no gaps); the first
 included finger is the reference (forward offset forced to 0); only anchor fingers may be slitted;
 positive P1 circumference / length / band width / all-fingers circumference; relative elevation
-angle within [-120, +45]. Deeper UX/validation is a follow-up.
+angle within [-50, +50]. Deeper UX/validation is a follow-up.
 
 #### Deployment
 

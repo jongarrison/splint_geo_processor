@@ -654,9 +654,31 @@ export class Processor {
         contentType: this.getContentType(printName),
       });
     }
+
+    const uploadContentLength = await new Promise<number>((resolve, reject) => {
+      uploadForm.getLength((error, length) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(length);
+      });
+    });
+    const uploadHeaders: Record<string, string> = {
+      ...uploadForm.getHeaders(),
+      'Content-Length': String(uploadContentLength),
+    };
+
+    this.logger.info({
+      objectId,
+      jobId,
+      contentType: uploadHeaders['content-type'],
+      contentLength: uploadContentLength,
+      fileCount: printPath && printName ? 2 : 1,
+    }, 'Posting multipart files to local blob storage');
     
     const uploadResp = await this.http.post('/api/blob/upload', uploadForm, {
-      headers: uploadForm.getHeaders(),
+      headers: uploadHeaders,
       maxBodyLength: Infinity,
       maxContentLength: Infinity,
       timeout: 120000, // 2 minutes for large file uploads

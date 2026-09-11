@@ -71,9 +71,9 @@ reload(splint_generator)
 from splint_generator import SplintGenerator, SplintResult, PhaseTracker, StopAfterPhase
 
 
-# Elevation angle clamp (degrees). Provisional range pending review with hand therapist Liz.
-MIN_ELEVATION_ANGLE = -120.0
-MAX_ELEVATION_ANGLE = 45.0
+# Elevation angle clamp (degrees).
+MIN_ELEVATION_ANGLE = -50.0
+MAX_ELEVATION_ANGLE = 50.0
 
 # Tolerance (document units, mm) for plane/curve intersection and trim operations.
 _INTERSECT_TOL = 1e-6
