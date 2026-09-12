@@ -69,7 +69,10 @@ export class Processor {
     this.http = axios.create({
       baseURL: this.config.apiUrl,
       timeout: 15000, // 15 second timeout for requests
-      headers: this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {},
+      headers: {
+        ...(this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {}),
+        'X-Processor-Version': this.config.processorVersion,
+      },
       validateStatus: () => true, // Don't throw on HTTP errors, handle them manually
     });
     

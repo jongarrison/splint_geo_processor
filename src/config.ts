@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execSync } from 'node:child_process';
 import pino from 'pino';
 
 // Create logger that writes to the same log file as main logger
@@ -24,12 +25,27 @@ export interface AppConfig {
   dryRun?: boolean;            // If true, simulate outputs without invoking external tools
   keepRhinoAlive: boolean;     // If true, Rhino stays running between jobs (dedicated license)
   environment: string;         // Environment name (local, production, or derived from URL)
+  processorVersion: string;    // Short git commit hash of this repo, for diagnostics/logging
+}
+
+// Short commit hash of splint_geo_processor itself (not the Grasshopper generator repo).
+function resolveProcessorVersion(): string {
+  try {
+    return execSync('git rev-parse --short HEAD', { cwd: process.cwd(), timeout: 5000 })
+      .toString()
+      .trim();
+  } catch {
+    return 'unknown';
+  }
 }
 
 // All config is loaded from env vars; loading order: .env.target.* -> .env.platform.* -> .env (secrets)
 export function loadConfig(): AppConfig {
   const apiUrl = process.env.SF_API_URL || 'http://localhost:3000';
   logger.info({ apiUrl }, 'Config loaded from env');
+
+  const processorVersion = resolveProcessorVersion();
+  logger.info({ processorVersion }, 'splint_geo_processor version');
 
   const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS || 3000);
 
@@ -76,6 +92,7 @@ export function loadConfig(): AppConfig {
     inboxDir, 
     outboxDir, 
     ghScriptsDir, 
+    processorVersion,
     rhinoCli: rhinoCli || undefined, 
     rhinoCodeCli: rhinoCodeCli || undefined, 
     bambuCli: bambuCli || undefined, 
