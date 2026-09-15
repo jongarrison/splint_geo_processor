@@ -1,0 +1,33 @@
+{
+    "gutter_depth_mm": 8.0,
+
+    "metacarpal_stub_include": false,
+    "metacarpal_stub_len_mm": 20.0,
+
+    "mcp_include": true,
+    "mcp_circumference_mm": 68.0,
+    "mcp_flex_deg": 0.0,
+    "mcp_lateral_deg": 0.0,
+
+    "proximal_include": true,
+    "proximal_circumference_mm": 66.0,
+    "proximal_len_mm": 45.0,
+
+    "pip_include": true,
+    "pip_circumference_mm": 62.0,
+    "pip_flex_deg": 20.0,
+    "pip_lateral_deg": 0.0,
+
+    "middle_include": true,
+    "middle_circumference_mm": 58.0,
+    "middle_len_mm": 30.0,
+
+    "dip_include": true,
+    "dip_circumference_mm": 52.0,
+    "distal_len_mm": 20.0,
+    "dip_flex_deg": 10.0,
+    "dip_lateral_deg": 0.0,
+
+    "tip_include": true,
+    "tip_circumference_mm": 40.0
+}
