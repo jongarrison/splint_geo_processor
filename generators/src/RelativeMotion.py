@@ -2624,20 +2624,22 @@ class RelativeMotionGenerator(SplintGenerator):
                         support_path_ramp_arc_radius, bend_z_sign=ramp_bend_z_sign,
                         trim_start_mm=trim_start_mm, trim_end_mm=trim_end_mm,
                         debug=ramp_debug)
-                    log("Phase 9: rail {0} ramp OK".format(ri))
+                    log("Phase 9: rail {0} ATTACHED".format(ri))
                     ramp_successes += 1
                 except SupportPathRampError as exc:
-                    log("Phase 9: rail {0} ramp FAILED (splint left un-ramped): {1}".format(
+                    log("Phase 9: rail {0} FAILED - splint left un-ramped: {1}".format(
                         ri, exc))
                 support_path_ramp_debugs.append(ramp_debug)
-            log("Phase 9: support path ramp finished, {0}/{1} ramp(s) applied".format(
-                ramp_successes, len(rails_to_ramp)))
+            ramp_outcome = "PASS" if ramp_successes == len(rails_to_ramp) else "WARNING"
+            log("Phase 9: RAMP {0} - {1}/{2} ramp(s) attached".format(
+                ramp_outcome, ramp_successes, len(rails_to_ramp)))
             # Extract previewable geometry from per-rail debug dicts.
             # Single-item keys are prefixed rN_ (r0_, r1_, ...) for multi-rail clarity.
             # Construction curves are always extracted so failure cases are visible too.
             ramp_loft_curves = []
             ramp_open_ducts = []
-            ramp_phase_kwargs = {"splint_solid_preramp": Brep.DuplicateBrep(splint_solid)}
+            ramp_phase_kwargs = {
+                "splint_solid_preramp": Brep.DuplicateBrep(splint_solid_pre_ramp)}
             for ri, rd in enumerate(support_path_ramp_debugs):
                 lc = rd.get("loft_curves")
                 if lc:
@@ -2663,6 +2665,14 @@ class RelativeMotionGenerator(SplintGenerator):
         proximal_outward_normal = proximal_profile_plane.Normal * -1.0
         splint_mesh = mesh_brep(splint_solid)
         mesh_quality = inspect_mesh(splint_mesh, "final splint")
+        mesh_is_printable = (mesh_quality["is_valid"] and mesh_quality["is_closed"]
+                             and mesh_quality["naked_edges"] == 0
+                             and mesh_quality["non_manifold_edges"] == 0)
+        log("Phase 10: PRINT MESH {0} - closed={1}, naked_edges={2}, "
+            "non_manifold_edges={3}".format(
+                "PASS" if mesh_is_printable else "WARNING",
+                mesh_quality["is_closed"], mesh_quality["naked_edges"],
+                mesh_quality["non_manifold_edges"]))
         splint_oriented = splint_mesh.DuplicateMesh()
         splint_oriented.Transform(Transform.Rotation(
             proximal_outward_normal, Vector3d(0.0, 0.0, -1.0), proximal_profile_plane.Origin))

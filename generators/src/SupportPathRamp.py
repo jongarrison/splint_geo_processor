@@ -32,7 +32,8 @@ import math
 import Rhino
 import Rhino.Geometry as rg
 from splintcommon import log
-from BrepUnion import robust_brep_union, BrepUnionError as _BrepUnionError
+from BrepUnion import (robust_brep_union, get_brep_volume,
+                       BrepUnionError as _BrepUnionError)
 from BrepEdgeLocator import find_planar_face_by_plane, nearest_planar_face
 
 
@@ -193,15 +194,26 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
     _fu = (_face_obj.Domain(0).Min + _face_obj.Domain(0).Max) * 0.5
     _fv = (_face_obj.Domain(1).Min + _face_obj.Domain(1).Max) * 0.5
     _face_outward = _face_obj.NormalAt(_fu, _fv)
+    if _face_obj.OrientationIsReversed:
+        _face_outward.Reverse()
     inward_dir = rg.Vector3d(-_face_outward.X, -_face_outward.Y, -_face_outward.Z)
-    inward_dir.Unitize()
-    # Verify: a point 1mm along inward_dir from the rail midpoint should be inside the solid.
-    _rail_mid = rail_top.PointAtNormalizedLength(0.5)
-    _test_pt = rg.Point3d(_rail_mid.X + inward_dir.X, _rail_mid.Y + inward_dir.Y,
-                          _rail_mid.Z + inward_dir.Z)
-    if not splint_solid.IsPointInside(_test_pt, tol, False):
+    if not inward_dir.Unitize():
+        raise SupportPathRampError("matched cap face has no usable normal")
+
+    profile_mass = rg.AreaMassProperties.Compute(ramp_profile)
+    if profile_mass is None:
+        raise SupportPathRampError("could not locate the ramp profile centroid")
+    probe_origin = profile_mass.Centroid
+    probe_distance = min(0.5, ramp_thickness * 0.25)
+    inward_probe = probe_origin + inward_dir * probe_distance
+    outward_probe = probe_origin - inward_dir * probe_distance
+    inward_is_inside = splint_solid.IsPointInside(inward_probe, tol, False)
+    outward_is_inside = splint_solid.IsPointInside(outward_probe, tol, False)
+    if not inward_is_inside and outward_is_inside:
         inward_dir.Reverse()
-        log("build_support_path_ramp: reversed inward_dir (face normal was pointing outward)")
+    elif inward_is_inside == outward_is_inside:
+        log("build_support_path_ramp: cap direction probe was ambiguous; "
+            "using the oriented face normal")
 
     # --- Step 2: ramp_rail (planar arc, tangent-anchored at ramp_profile's start) -----
     start_point = rail_top.PointAtStart
@@ -269,7 +281,7 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
 
     # Push loft_curves[0] (the mouth) just inside the splint so the ramp_tube walls cross
     # the cap face rather than being tangent to it, giving BooleanUnion a clean intersection.
-    _MOUTH_INSET_MM = -0.1
+    _MOUTH_INSET_MM = 0.1
     _mouth_inset_vec = rg.Vector3d(
         inward_dir.X * _MOUTH_INSET_MM,
         inward_dir.Y * _MOUTH_INSET_MM,
@@ -316,10 +328,8 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
         ramp_tube.Append(extra)
     _dput(debug, "ramp_tube", ramp_tube)
 
-    # Cap ONLY the far end (loft_curves[-1]) - the near end stays open. loft_curves[0] is a
-    # zero-offset duplicate of ramp_profile, so open_duct's mouth is geometrically identical
-    # (not just close) to the curve we are about to cut into splint_solid's cap face, which is
-    # exactly what lets the final JoinBreps below zipper them together with no boolean solver.
+    # Cap only the far end; the near end remains open and slightly inside the splint so the
+    # completed ramp solid has real overlap for BooleanUnion.
     far_cap_pieces = rg.Brep.CreatePlanarBreps([loft_curves[-1]], tol)
     if far_cap_pieces is None or len(far_cap_pieces) != 1:
         n = 0 if far_cap_pieces is None else len(far_cap_pieces)
@@ -344,7 +354,7 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
     # inward normal. The short loft from boot_profile back to ramp_profile (the mouth) creates
     # walls that pierce the cap face at ramp_profile, giving BooleanUnion a clean intersection
     # curve rather than a coincident planar region.
-    _BOOT_INSET_MM = -0.8
+    _BOOT_INSET_MM = 0.8
     _BOOT_TAPER_MM = 0.8   # mm trimmed from each end of rail_top
     _BOOT_THICKNESS_FRAC = 0.3  # boot Z-height as fraction of ramp_thickness
     # Build boot_profile: shorter rail AND collapsed Z-height, vertically centered within
@@ -414,9 +424,11 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
         ramp_solid.Faces.Count))
 
     # --- Step 5: Boolean Union ---------------------------------------------------
+    base_volume = get_brep_volume(splint_solid)
+    ramp_volume = get_brep_volume(ramp_solid)
     try:
         result_brep, success, method = robust_brep_union(
-            [splint_solid, ramp_solid], base_tolerance=tol, check_volumes=False)
+            [splint_solid, ramp_solid], base_tolerance=tol)
     except (_BrepUnionError, Exception) as exc:
         raise SupportPathRampError(
             "BooleanUnion of splint_solid and ramp_solid failed: {0}".format(exc))
@@ -427,17 +439,25 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
         raise SupportPathRampError(
             "BooleanUnion result is not a closed solid (faces={0})".format(
                 result_brep.Faces.Count))
-    # Repair heals non-manifold edges left by the jiggle transform round-trip, which IsSolid
-    # does not catch (it only checks for naked edges, not 3+-valence edges).
-    result_brep.Repair(tol)
+    result_volume = get_brep_volume(result_brep)
+    if base_volume is None or ramp_volume is None or result_volume is None:
+        raise SupportPathRampError("could not verify ramp volume contribution")
+    volume_growth = result_volume - base_volume
+    min_growth = ramp_volume * 0.001
+    if volume_growth <= min_growth:
+        raise SupportPathRampError(
+            "BooleanUnion added insufficient ramp volume "
+            "(base={0:.3f}, ramp={1:.3f}, result={2:.3f})".format(
+                base_volume, ramp_volume, result_volume))
     nm_edges = sum(1 for e in result_brep.Edges
                    if e.Valence == rg.EdgeAdjacency.NonManifold)
     if nm_edges > 0:
-        log("build_support_path_ramp: {0} non-manifold edge(s) remain after repair".format(
-            nm_edges))
+        raise SupportPathRampError(
+            "BooleanUnion result has {0} non-manifold edge(s)".format(nm_edges))
     _dput(debug, "result_brep", result_brep)
-    log("build_support_path_ramp: BooleanUnion OK, faces={0}".format(
-        result_brep.Faces.Count))
+    log("build_support_path_ramp: ATTACHED - method={0}, faces={1}, "
+        "base={2:.3f}mm^3, ramp={3:.3f}mm^3, added={4:.3f}mm^3".format(
+            method, result_brep.Faces.Count, base_volume, ramp_volume, volume_growth))
     return result_brep
 
 

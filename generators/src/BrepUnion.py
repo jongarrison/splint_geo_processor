@@ -219,13 +219,18 @@ def _sequential_mesh_union(breps):
     return result
 
 def attempt_multi_union(breps, tolerance):
-    """Attempt multi-brep boolean union in one operation"""
+    """Return one merged Brep, never one arbitrarily selected disconnected piece."""
     try:
         result = rg.Brep.CreateBooleanUnion(breps, tolerance)
-        if result and len(result) > 0:
+        if result and len(result) == 1:
             return result[0]
-    except:
-        pass
+        if result and len(result) > 1:
+            volumes = [get_brep_volume(piece) for piece in result]
+            log("Boolean union returned {0} separate pieces (volumes={1})".format(
+                len(result), ["{0:.3f}".format(v) if v is not None else "unknown"
+                              for v in volumes]))
+    except Exception as exc:
+        log("Boolean union raised: {0}".format(exc))
     return None
 
 def attempt_mesh_union(brepA, brepB):
