@@ -56,8 +56,11 @@ export class Processor {
   private http: AxiosInstance;
   private inbox: string;
   private outbox: string;
+  private deploymentRequestPath: string;
+  private deploymentReadyPath: string;
   private noJobHeartbeatTick: number = 0;
   private lastCleanupTime: number = 0;
+  private readonly DEPLOYMENT_ACK_TIMEOUT_MS = 60 * 1000;
   private readonly CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours (twice daily)
   private readonly DAYS_TO_KEEP = 7;
   // Wall-clock cutoff for the keep-warm lease pushed down by the factory.
@@ -87,6 +90,12 @@ export class Processor {
     this.outbox = this.config.outboxDir;
     fs.mkdirSync(this.inbox, { recursive: true });
     fs.mkdirSync(this.outbox, { recursive: true});
+
+    const home = process.env.HOME || process.env.USERPROFILE || '.';
+    const controlDir = path.join(home, 'SplintFactoryFiles', 'control');
+    fs.mkdirSync(controlDir, { recursive: true });
+    this.deploymentRequestPath = path.join(controlDir, 'deploy-requested');
+    this.deploymentReadyPath = path.join(controlDir, 'deploy-ready');
   }
 
   private nextNoJobHeartbeat(): string {
@@ -96,6 +105,51 @@ export class Processor {
 
   private resetNoJobHeartbeat(): void {
     this.noJobHeartbeatTick = 0;
+  }
+
+  private readDeploymentRequest(): string | null {
+    try {
+      return fs.readFileSync(this.deploymentRequestPath, 'utf8').trim();
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  private async waitForDeploymentDrain(env: string): Promise<void> {
+    while (true) {
+      const requestToken = this.readDeploymentRequest();
+      if (requestToken === null) break;
+      const expiresAtSeconds = Number(requestToken.split(':', 1)[0]);
+
+      if (!Number.isFinite(expiresAtSeconds) || Date.now() >= expiresAtSeconds * 1000) {
+        this.logger.warn(`[${env}] Removing invalid or expired deployment drain request`);
+        try { fs.unlinkSync(this.deploymentRequestPath); } catch {}
+        try { fs.unlinkSync(this.deploymentReadyPath); } catch {}
+        return;
+      }
+
+      fs.writeFileSync(this.deploymentReadyPath, requestToken, 'utf8');
+      this.logger.info(`[${env}] Deployment drain acknowledged; polling paused`);
+      const acknowledgedUntilMs = Math.min(
+        expiresAtSeconds * 1000,
+        Date.now() + this.DEPLOYMENT_ACK_TIMEOUT_MS,
+      );
+
+      while (true) {
+        const currentToken = this.readDeploymentRequest();
+        if (currentToken !== requestToken) break;
+        if (Date.now() >= acknowledgedUntilMs) {
+          this.logger.warn(`[${env}] Deployment did not take control within 60 seconds; resuming polling`);
+          try { fs.unlinkSync(this.deploymentRequestPath); } catch {}
+          try { fs.unlinkSync(this.deploymentReadyPath); } catch {}
+          return;
+        }
+        await sleep(1000);
+      }
+    }
+
+    try { fs.unlinkSync(this.deploymentReadyPath); } catch {}
   }
 
   async run() {
@@ -135,6 +189,8 @@ export class Processor {
     const intervalMs = this.config.pollIntervalMs || 5000;
 
     while (true) {
+      await this.waitForDeploymentDrain(env);
+
       try {
         // Poll for next job (priority: check for work first)
         const resp = await this.http.get('/api/design-processing/next-job');
