@@ -1,0 +1,45 @@
+{
+  "is_right_hand": true,
+  "finger_data": [
+    {
+      "finger_abbr": "if",
+      "is_included": true,
+      "is_anchor_finger": true,
+      "p1_mid_circ": 55,
+      "p1_length": 19,
+      "pip_neighbor_fwd_offset": 0,
+      "is_slitted": false
+    },
+    {
+      "finger_abbr": "mf",
+      "is_included": true,
+      "is_anchor_finger": false,
+      "p1_mid_circ": 60,
+      "p1_length": 20,
+      "pip_neighbor_fwd_offset": 0,
+      "is_slitted": false
+    },
+    {
+      "finger_abbr": "rf",
+      "is_included": true,
+      "is_anchor_finger": true,
+      "p1_mid_circ": 55,
+      "p1_length": 19,
+      "pip_neighbor_fwd_offset": 0,
+      "is_slitted": false
+    },
+    {
+      "finger_abbr": "sf",
+      "is_included": false,
+      "is_anchor_finger": false,
+      "p1_mid_circ": null,
+      "p1_length": null,
+      "pip_neighbor_fwd_offset": null,
+      "is_slitted": null
+    }
+  ],
+  "all_splint_finger_circ": 120,
+  "relative_elevation_angle": -14,
+  "longitudinal_band_width_mm": 10,
+  "enable_support_path_ramp": true
+}

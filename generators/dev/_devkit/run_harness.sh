@@ -58,11 +58,13 @@ rm -f "$REPORT" "$DONE"
 find "$(dirname "$HARNESS")/../../src" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 find "$(dirname "$HARNESS")/../_devkit" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 
-# --- record Rhino log position before dispatch so we capture only new lines ---
+# --- clear the Rhino log before dispatch so every line belongs to this run ---
+# Harnesses also clear this file defensively, but doing it here ensures our line cursor cannot
+# point past the end of the newly truncated file and suppress the run's Rhino details.
 RHINO_LOG="$HOME/SplintFactoryFiles/outbox/log.txt"
 RHINO_LOG_START=0
 if [ -f "$RHINO_LOG" ]; then
-    RHINO_LOG_START=$(wc -l < "$RHINO_LOG" 2>/dev/null | tr -d ' ')
+    : > "$RHINO_LOG"
 fi
 
 # --- dispatch (returns immediately; Rhino runs async) ---

@@ -17,9 +17,9 @@ Construction summary (see cited dev-notes for the worked-out math):
      PointAtStart), tangent to a caller-supplied start_tangent direction, sweeping toward
      the caller-specified side (bend_z_sign) by arc_length / arc_radius radians.
   3. Loft translated copies of ramp_profile along ramp_rail with a tapered tip to form an
-     open duct, then cap the far end. Close the near end (mouth) with a "boot": a short loft
-     from a tapered, inset boot_profile (positioned _BOOT_INSET_MM into the splint body along
-     the cap face's inward normal) back to ramp_profile, plus a planar boot cap. The boot
+      open duct, then cap the far end. Close the near end (mouth) with a "boot": a short loft
+      from a tapered, inset boot_profile (positioned _BOOT_INSET_MM into the splint body opposite
+      the ramp's outgoing start tangent) back to ramp_profile, plus a planar boot cap. The boot
      prevents a coincident planar face at the cap face, which would block BooleanUnion. The
      resulting closed ramp_solid is merged into splint_solid via Brep.CreateBooleanUnion.
 
@@ -172,7 +172,7 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
     ramp_profile = joined[0]
     _dput(debug, "ramp_profile", ramp_profile)
 
-    # Fit ramp_profile's plane to locate the splint's cap face and get its inward normal.
+    # Fit ramp_profile's plane to confirm that it lies on a splint cap face.
     ok_plane, profile_plane = ramp_profile.TryGetPlane(tol)
     if not ok_plane:
         raise SupportPathRampError("ramp_profile is not planar; cannot locate the cap face")
@@ -188,32 +188,11 @@ def build_support_path_ramp(splint_solid, support_rail, start_tangent,
     log("build_support_path_ramp: ramp_profile plane matches splint_solid face {0} "
         "(gap={1:.4f}mm)".format(face_match.face_index, face_match.gap))
 
-    # Cap face inward normal: boot_profile is offset in this direction so ramp_solid has no
-    # coincident face with the cap face, enabling a clean BooleanUnion.
-    _face_obj = splint_solid.Faces[face_match.face_index]
-    _fu = (_face_obj.Domain(0).Min + _face_obj.Domain(0).Max) * 0.5
-    _fv = (_face_obj.Domain(1).Min + _face_obj.Domain(1).Max) * 0.5
-    _face_outward = _face_obj.NormalAt(_fu, _fv)
-    if _face_obj.OrientationIsReversed:
-        _face_outward.Reverse()
-    inward_dir = rg.Vector3d(-_face_outward.X, -_face_outward.Y, -_face_outward.Z)
-    if not inward_dir.Unitize():
-        raise SupportPathRampError("matched cap face has no usable normal")
-
-    profile_mass = rg.AreaMassProperties.Compute(ramp_profile)
-    if profile_mass is None:
-        raise SupportPathRampError("could not locate the ramp profile centroid")
-    probe_origin = profile_mass.Centroid
-    probe_distance = min(0.5, ramp_thickness * 0.25)
-    inward_probe = probe_origin + inward_dir * probe_distance
-    outward_probe = probe_origin - inward_dir * probe_distance
-    inward_is_inside = splint_solid.IsPointInside(inward_probe, tol, False)
-    outward_is_inside = splint_solid.IsPointInside(outward_probe, tol, False)
-    if not inward_is_inside and outward_is_inside:
-        inward_dir.Reverse()
-    elif inward_is_inside == outward_is_inside:
-        log("build_support_path_ramp: cap direction probe was ambiguous; "
-            "using the oriented face normal")
+    # start_tangent is the elevation-aware direction leaving the distal cap, so its inverse is
+    # always back into the splint body. Deriving this from Brep face orientation is unreliable:
+    # NormalAt/OrientationIsReversed semantics vary with topology, and a point-in-solid probe is
+    # ambiguous when the ramp profile centroid lies outside the cap face's trimmed boundary.
+    inward_dir = rg.Vector3d(-tangent.X, -tangent.Y, -tangent.Z)
 
     # --- Step 2: ramp_rail (planar arc, tangent-anchored at ramp_profile's start) -----
     start_point = rail_top.PointAtStart

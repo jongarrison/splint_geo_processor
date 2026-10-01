@@ -45,6 +45,7 @@ INPUT_FILES = [
     "TRK4.json", # 8/19/26 failed to generate ramp and overly slender anchor connections
     "XR08.json", # 8/28/26 ramp doesn't attach properly because of bug when relative_elevation_angle is negative
     "SMQF.json", # 9/17/26 ramp doesn't generate for this 0 deg 3 finger support
+    "4CMH.json", # 10/1/26 failed to generate ramp, -14 elevation angle
 ]
 
 ENABLE_MESH_EXPORT = False  # when True, export 3mf to outputs/ (same path prod uses)
