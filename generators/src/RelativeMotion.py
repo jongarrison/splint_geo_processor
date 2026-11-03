@@ -252,6 +252,34 @@ def elevate_supported_fingers(raw_data, mcp_points, p1_lines, p1_circles, p1_cyl
     return out_mcp, out_lines, out_circles, out_cylinders, transforms
 
 
+def extend_p1_intersection_geometry(p1_lines_oriented, p1_circles_oriented,
+                                    length_factor=2.0):
+    """Extend oriented P1 axes about their midpoints and rebuild matching open cylinders."""
+    if length_factor < 1.0:
+        raise ValueError("extend_p1_intersection_geometry: length_factor must be >= 1.0")
+
+    lines_extended = []
+    cylinders_extended = []
+    for i, line in enumerate(p1_lines_oriented):
+        line_extended = Line(line.From, line.To)
+        extension_per_end = line.Length * (length_factor - 1.0) / 2.0
+        line_extended.Extend(extension_per_end, extension_per_end)
+
+        axis = line_extended.To - line_extended.From
+        axis.Unitize()
+        base_circle = Circle(
+            Plane(line_extended.From, axis), p1_circles_oriented[i].Radius)
+        cylinder_extended = Cylinder(
+            base_circle, line_extended.Length).ToBrep(False, False)
+
+        lines_extended.append(line_extended)
+        cylinders_extended.append(cylinder_extended)
+
+    log("extend_p1_intersection_geometry: rebuilt {0} cylinder(s) at {1:.1f}x length".format(
+        len(cylinders_extended), length_factor))
+    return lines_extended, cylinders_extended
+
+
 # NOTE (future): if fitted splints don't match the expected hand fit, revisit this profile-plane
 # calculation first. A single flat plane across non-collinear MCP joints is inherently a
 # compromise; today it is an equal-weighted least-squares line through every posed (elevated) P1
@@ -339,6 +367,26 @@ def build_profile_planes(raw_data, p1_lines_oriented, longitudinal_band_width_mm
     log("build_profile_planes: split centre plane into proximal/distal faces {0:.2f} mm "
         "apart along World X".format(longitudinal_band_width_mm))
     return proximal, distal
+
+
+def build_profile_plane_preview(profile_plane, y_min=-50.0, y_max=150.0,
+                                z_min=-10.0, z_max=120.0):
+    """Build a finite Brep rectangle on a vertical profile plane for debug previewing."""
+    normal = profile_plane.Normal
+    if abs(normal.X) < 1e-9:
+        raise ValueError(
+            "build_profile_plane_preview: plane cannot be bounded by world Y/Z coordinates")
+
+    origin = profile_plane.Origin
+
+    def point_at(y, z):
+        x = origin.X - (normal.Y * (y - origin.Y)
+                        + normal.Z * (z - origin.Z)) / normal.X
+        return Point3d(x, y, z)
+
+    return Brep.CreateFromCornerPoints(
+        point_at(y_min, z_min), point_at(y_max, z_min),
+        point_at(y_max, z_max), point_at(y_min, z_max), _INTERSECT_TOL)
 
 
 def _plane_horizontal_axis(profile_plane):
@@ -2241,21 +2289,34 @@ class RelativeMotionGenerator(SplintGenerator):
             mcp_points_oriented=mcp_points_oriented,
             p1_lines_oriented=p1_lines_oriented,
             p1_circles_oriented=p1_circles_oriented,
-            p1_cylinders_oriented=p1_cylinders_oriented, transforms=transforms)
+            p1_cylinders_oriented=p1_cylinders_oriented, 
+            transforms=transforms
+        )
 
         # --- Phase 3: proximal + distal profile planes ----------------------------------------
         proximal_profile_plane, distal_profile_plane = build_profile_planes(
             raw_data, p1_lines_oriented, longitudinal_band_width_mm)
+        proximal_profile_plane_preview = build_profile_plane_preview(proximal_profile_plane)
+        distal_profile_plane_preview = build_profile_plane_preview(distal_profile_plane)
+        (p1_lines_oriented_extended,
+         p1_cylinders_oriented_extended) = extend_p1_intersection_geometry(
+            p1_lines_oriented, p1_circles_oriented, length_factor=2.5)
         tracker.log_phase(3.0, "profile planes",
-            proximal_profile_plane=proximal_profile_plane,
-            distal_profile_plane=distal_profile_plane)
+            distal_profile_plane=distal_profile_plane,
+            proximal_profile_plane_preview=proximal_profile_plane_preview,
+            distal_profile_plane_preview=distal_profile_plane_preview,
+            p1_lines_oriented_extended=p1_lines_oriented_extended,
+            p1_cylinders_oriented_extended=p1_cylinders_oriented_extended,
+            mcp_points=mcp_points)
 
         # --- Phase 4: finger cross-sections on each plane -------------------------------------
         p_full_curves, p_preserved = extract_finger_cross_sections(
-            raw_data, proximal_profile_plane, p1_cylinders_oriented, p1_lines_oriented,
+            raw_data, proximal_profile_plane, p1_cylinders_oriented_extended,
+            p1_lines_oriented_extended,
             support_prong_arc_deg=support_prong_arc_deg, support_arc_deg=support_arc_deg)
         d_full_curves, d_preserved = extract_finger_cross_sections(
-            raw_data, distal_profile_plane, p1_cylinders_oriented, p1_lines_oriented,
+            raw_data, distal_profile_plane, p1_cylinders_oriented_extended,
+            p1_lines_oriented_extended,
             support_prong_arc_deg=support_prong_arc_deg, support_arc_deg=support_arc_deg)
         tracker.log_phase(4.0, "finger cross-sections",
             p_full_curves=p_full_curves, p_preserved=p_preserved,
@@ -2339,6 +2400,7 @@ class RelativeMotionGenerator(SplintGenerator):
                         if f.get("is_anchor_finger")]
         splint_solid = subtract_finger_bores(splint_solid_blank, anchor_bores)
         splint_solid_bores = splint_solid.Duplicate()
+        # Note: The finger_bores are extended to ensure a clean subtraction from the splint solid.
         tracker.log_phase(6.0, "loft and bore",
             splint_solid_blank=splint_solid_blank_copy, finger_bores=finger_bores,
             splint_solid_bores=splint_solid_bores,
