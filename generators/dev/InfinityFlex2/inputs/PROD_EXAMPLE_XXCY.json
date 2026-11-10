@@ -1,0 +1,9 @@
+{
+  "id": "cmvzomqvi0009jp08y07121fd",
+  "algorithm": "InfinityFlex",
+  "params": "{\"root_circumference_mm\":70,\"mid_circumference_mm\":68,\"tip_circumference_mm\":60,\"inter_phalanx_distance_mm\":32,\"flexion_degrees\":20,\"include_slit\":false}",
+  "metadata": {
+    "jobLabel": "MC test",
+    "objectId": "XXCY"
+  }
+}

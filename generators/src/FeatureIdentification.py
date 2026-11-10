@@ -3,6 +3,10 @@ FeatureIdentification.py
 Functions for identifying and extracting geometric features from breps.
 """
 
+import math
+from typing import NamedTuple
+
+from Rhino import RhinoDoc
 import Rhino.Geometry as rg
 from splintcommon import log
 
@@ -10,6 +14,98 @@ from splintcommon import log
 class FeatureIdentificationError(Exception):
     """Raised when feature identification fails."""
     pass
+
+
+class BrepRefPointResult(NamedTuple):
+    result_point: rg.Point3d
+    distance: float
+
+
+class ExtLnPtsCLResult(NamedTuple):
+    end_point: rg.Point3d
+    extend_line: rg.LineCurve
+
+
+class ConeCreatorCLResult(NamedTuple):
+    brep: rg.Brep
+
+
+def ext_ln_pts_cl(start_point: rg.Point3d, mid_point: rg.Point3d,
+                  extension_dist: float) -> ExtLnPtsCLResult:
+    """Extend a center-to-landmark ray beyond its existing endpoint, leaving its start fixed.
+
+    The graph calls that endpoint mid_point; it is not a computed geometric midpoint.
+    """
+    if not start_point.IsValid or not mid_point.IsValid:
+        raise FeatureIdentificationError("ext_ln_pts_cl requires valid points")
+    if not math.isfinite(extension_dist) or extension_dist < 0:
+        raise FeatureIdentificationError("extension_dist must be finite and nonnegative")
+    direction = mid_point - start_point
+    if not direction.Unitize():
+        raise FeatureIdentificationError("ext_ln_pts_cl requires distinct points")
+    end_point = mid_point + direction * extension_dist
+    return ExtLnPtsCLResult(end_point, rg.LineCurve(start_point, end_point))
+
+
+def cone_creator_cl(splint_center_point: rg.Point3d, point_a: rg.Point3d,
+                    point_b: rg.Point3d, point_c: rg.Point3d, *,
+                    debug=None) -> ConeCreatorCLResult:
+    """Build a lip-relief cutter by lofting circles on three extended landmark rays.
+
+    Sections at normalized positions 0.1 and 1.0 make a truncated, possibly oblique
+    solid rather than an apex cone. Match the cluster's 10 mm one-ended extensions.
+    """
+    data = debug if debug is not None else {}
+    document = RhinoDoc.ActiveDoc
+    tolerance = document.ModelAbsoluteTolerance if document is not None else 0.001
+    rays = []
+    data["extended_lines"] = rays
+    for point in (point_a, point_b, point_c):
+        rays.append(ext_ln_pts_cl(splint_center_point, point, 10.0).extend_line)
+    far_points = [ray.PointAtEnd for ray in rays]
+    near_points = [splint_center_point + (point - splint_center_point) * 0.1
+                   for point in far_points]
+    data.update(near_points=near_points, far_points=far_points)
+    near_circle = rg.Circle(*near_points)
+    far_circle = rg.Circle(*far_points)
+    if not near_circle.IsValid or not far_circle.IsValid:
+        raise FeatureIdentificationError("cone_creator_cl requires noncollinear ray sections")
+    curves = [near_circle.ToNurbsCurve(), far_circle.ToNurbsCurve()]
+    data["section_circles"] = curves
+    lofts = rg.Brep.CreateFromLoft(curves, rg.Point3d.Unset, rg.Point3d.Unset,
+                                 rg.LoftType.Normal, False)
+    if lofts is None or len(lofts) != 1:
+        raise FeatureIdentificationError("cone_creator_cl expected one loft")
+    data["uncapped_loft"] = lofts[0]
+    solid = lofts[0].CapPlanarHoles(tolerance)
+    if solid is None or not solid.IsValid or not solid.IsSolid or not solid.IsManifold:
+        raise FeatureIdentificationError("cone_creator_cl did not produce a valid closed solid")
+    if solid.SolidOrientation == rg.BrepSolidOrientation.Inward:
+        solid.Flip()
+    volume = solid.GetVolume()
+    if not math.isfinite(volume) or volume <= 0:
+        raise FeatureIdentificationError("cone_creator_cl produced a nonpositive volume")
+    data["brep"] = solid
+    return ConeCreatorCLResult(brep=solid)
+
+
+def brep_ref_point(
+    nudge_amount: rg.Vector3d,
+    north_star_pt: rg.Point3d,
+    brep: rg.Brep,
+) -> BrepRefPointResult:
+    """Find the closest Brep point, then add a world-space nudge; distance is pre-nudge."""
+    if brep is None or not brep.IsValid:
+        raise FeatureIdentificationError("brep_ref_point requires a valid Brep")
+    if not north_star_pt.IsValid or not nudge_amount.IsValid:
+        raise FeatureIdentificationError("brep_ref_point requires a valid north star and nudge")
+    closest_point = brep.ClosestPoint(north_star_pt)
+    if not closest_point.IsValid:
+        raise FeatureIdentificationError("Could not find the Brep reference point")
+    return BrepRefPointResult(
+        result_point=closest_point + nudge_amount,
+        distance=north_star_pt.DistanceTo(closest_point),
+    )
 
 
 def box_center_slice(target_brep, bbox_plane, choose_side_vector, return_size=False):
@@ -761,4 +857,61 @@ def nudge_line_to_brep(input_line, input_brep, input_line_sample_count,
 
     log("FeatureIdentification.nudge_line_to_brep: Complete")
     return result
+
+
+def line_to_brep_gravitation(
+    input_line: rg.LineCurve,
+    output_nudge_motion: rg.Vector3d,
+    input_brep: rg.Brep,
+) -> rg.LineCurve:
+    """Use six perpendicular sections to move an exterior line to the closest section's Z.
+
+    Matches the Grasshopper cluster's flattened section curves and longest-list matching.
+    Only the selected point's Z is used; X/Y change solely by output_nudge_motion.
+    The radar line must start outside the Brep. Inputs are not modified.
+    """
+    if not input_line.IsValid or not input_brep.IsValid or not output_nudge_motion.IsValid:
+        raise FeatureIdentificationError("Gravitation requires valid line, Brep, and nudge inputs")
+
+    radar_node_count = 5
+    radar_line = rg.LineCurve(input_line.PointAtStart, input_line.PointAtEnd)
+    radar_line.Domain = rg.Interval(0.0, 1.0)
+    document = RhinoDoc.ActiveDoc
+    tolerance = document.ModelAbsoluteTolerance if document is not None else 0.001
+    sample_points = []
+    section_curves = []
+    for sample_index in range(radar_node_count + 1):
+        parameter = sample_index / radar_node_count
+        sample_points.append(radar_line.PointAt(parameter))
+        success, frame = radar_line.PerpendicularFrameAt(parameter)
+        if not success:
+            raise FeatureIdentificationError("Could not construct a gravitation sampling frame")
+        success, curves, _ = rg.Intersect.Intersection.BrepPlane(input_brep, frame, tolerance)
+        if success and curves is not None:
+            section_curves.extend(curves)
+
+    if not section_curves:
+        raise FeatureIdentificationError("No gravitation sampling planes intersected input_brep")
+
+    closest_point = None
+    minimum_distance = float("inf")
+    for pair_index in range(max(len(sample_points), len(section_curves))):
+        sample_point = sample_points[min(pair_index, len(sample_points) - 1)]
+        section = section_curves[min(pair_index, len(section_curves) - 1)]
+        success, parameter = section.ClosestPoint(sample_point)
+        if not success:
+            raise FeatureIdentificationError("Could not find a gravitation section's closest point")
+        candidate = section.PointAt(parameter)
+        distance = sample_point.DistanceTo(candidate)
+        if distance < minimum_distance:
+            closest_point = candidate
+            minimum_distance = distance
+
+    if closest_point is None:
+        raise FeatureIdentificationError("No valid gravitation closest point was found")
+    start = radar_line.PointAtStart
+    destination = rg.Point3d(start.X, start.Y, closest_point.Z) + output_nudge_motion
+    if not radar_line.Translate(destination - start):
+        raise FeatureIdentificationError("Gravitation line translation failed")
+    return radar_line
 

@@ -120,74 +120,6 @@ _layout = bk.PreviewLayout(preview_spacing_mm=90.0, row_spacing_mm=150.0, report
 ensure_layer = bk.ensure_layer
 
 
-def bake_preview(label, geom, layer, color, offset=None, label_z=None):
-    return bk.bake_preview(label, geom, layer, color, offset=offset, report=report,
-                           label_z=label_z)
-
-
-def _phase_color(index, total):
-    """Generate a visually distinct RGB tuple for phase index using HSV rotation."""
-    import colorsys
-    hue = (index * 0.618033988749895) % 1.0  # golden ratio spacing
-    r, g, b = colorsys.hsv_to_rgb(hue, 0.6, 0.9)
-    return (int(r * 255), int(g * 255), int(b * 255))
-
-
-def _bake_phase_geometry(debug, row_y, report_fn):
-    """Auto-preview all phases present in debug['_phases'], offset along +X per phase."""
-    phases = debug.get("_phases", [])
-    if not phases:
-        report_fn("  (no phase data to preview)")
-        return
-
-    # Parse PREVIEW_FILTER: numbers = exact phases, "X.X+" = minimum threshold, strings = keys.
-    filter_phases = set()
-    filter_keys = set()
-    filter_min = None
-    for x in PREVIEW_FILTER:
-        if isinstance(x, (int, float)):
-            filter_phases.add(x)
-        elif isinstance(x, str) and x.endswith("+"):
-            filter_min = float(x[:-1])
-        elif isinstance(x, str):
-            filter_keys.add(x)
-    has_filter = bool(PREVIEW_FILTER)
-
-    phase_spacing = 100.0
-    _LABEL_STEP = 8.0
-    render_index = 0
-    color_index = 0
-    for i, phase in enumerate(phases):
-        phase_match = ((not has_filter)
-                       or (phase["number"] in filter_phases)
-                       or (filter_min is not None and phase["number"] >= filter_min))
-        offset = rg.Vector3d(render_index * phase_spacing, row_y, 0.0)
-        layer_name = "P{0}_{1}".format(phase["number"], phase["title"].replace(" ", "_"))
-        keys_baked = 0
-        for key in phase["keys"]:
-            if has_filter and not phase_match and key not in filter_keys:
-                continue
-            geo = debug.get(key)
-            if geo is None:
-                continue
-            color = _phase_color(color_index, 0)
-            label_z = 20.0 + keys_baked * _LABEL_STEP
-            bake_preview(key, geo, layer_name, color, offset=offset, label_z=label_z)
-            keys_baked += 1
-            color_index += 1
-        if keys_baked:
-            title_z = 20.0 + keys_baked * _LABEL_STEP + 15.0
-            title_pt = (render_index * phase_spacing, row_y, title_z)
-            title_text = "Phase {0}: {1}".format(phase["number"], phase["title"])
-            ensure_layer("labels", (255, 255, 100))
-            title_dot = rs.AddTextDot(title_text, title_pt)
-            if title_dot:
-                rs.ObjectLayer(title_dot, "labels")
-            render_index += 1
-            report_fn("  Phase {0} ({1}): baked {2} item(s) on layer {3}".format(
-                phase["number"], phase["title"], keys_baked, layer_name))
-
-
 def main():
     report("=== RelativeMotion dev harness ===")
     bk.clear_doc()
@@ -237,7 +169,8 @@ def main():
             result = None
 
         # Auto-preview all phases that ran, laid out along +X.
-        _bake_phase_geometry(debug, row_y, report)
+        bk.bake_phase_geometry(debug, row_y=row_y, preview_filter=PREVIEW_FILTER,
+                       report=report)
 
         # Row label text-dot above the first phase offset.
         splint_solid_blank = debug.get("splint_solid_blank")

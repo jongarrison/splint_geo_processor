@@ -1,0 +1,8 @@
+{
+  "root_circumference_mm": 61,
+  "mid_circumference_mm": 58,
+  "tip_circumference_mm": 48,
+  "inter_phalanx_distance_mm": 34,
+  "flexion_degrees": 40,
+  "include_slit": false
+}

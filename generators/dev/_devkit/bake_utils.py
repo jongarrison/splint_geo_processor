@@ -97,20 +97,24 @@ def bake(geom, layer, color, offset=None, name=None):
     """Bake one geometry or a (possibly nested) list of geometries onto a layer. Returns count.
     Pass offset (Vector3d, e.g. from PreviewLayout.next_offset()) to shift the preview copy
     along +X without touching the working geometry."""
-    ensure_layer(layer, color)
     count = 0
     if geom is None:
         return 0
-    if isinstance(geom, (list, tuple)):
-        for g in geom:
-            count += bake(g, layer, color, offset=offset, name=name)
+    if isinstance(geom, (list, tuple, dict)):
+        items = geom.values() if isinstance(geom, dict) else geom
+        for item in items:
+            count += bake(item, layer, color, offset=offset, name=name)
         return count
+    if not isinstance(geom, (rg.Brep, rg.Mesh, rg.Curve, rg.Point3d)):
+        return 0
+    ensure_layer(layer, color)
     if _bake_one(geom, layer, offset=offset, name=name, color=color) is not None:
         count += 1
     return count
 
 
-def bake_preview(label, geom, layer, color, offset=None, report=None, label_z=None):
+def bake_preview(label, geom, layer, color, offset=None, report=None, label_z=None,
+                 label_layer="labels"):
     """Bake `geom` to `layer` at `offset`, then drop a text-dot label above it.
     When label_z is given, the label is placed at that absolute Z (pre-offset) instead of
     computing from the bounding box. Returns baked object count."""
@@ -135,11 +139,72 @@ def bake_preview(label, geom, layer, color, offset=None, report=None, label_z=No
     top = rg.Point3d(cx, cy, z)
     if offset is not None:
         top = rg.Point3d(top.X + offset.X, top.Y + offset.Y, top.Z + offset.Z)
-    ensure_layer("labels", (255, 255, 100))
+    ensure_layer(label_layer, (255, 255, 100))
     dot = rs.AddTextDot(label, (top.X, top.Y, top.Z))
     if dot:
-        rs.ObjectLayer(dot, "labels")
+        rs.ObjectLayer(dot, label_layer)
     return count
+
+
+def bake_phase_geometry(debug, row_y=0.0, preview_filter=None, report=None, layer_prefix=""):
+    """Bake construction keys by phase; filters accept phase numbers, 'N+', or key names."""
+    import colorsys
+
+    report_fn = report or (lambda message: None)
+    phases = list(debug.get("_phases", []))
+    registered = {key for phase in phases for key in phase["keys"]}
+    pending = [key for key in debug if not key.startswith("_") and key not in registered]
+    if pending:
+        phases.append({"number": None, "title": "unfinished construction", "keys": pending})
+
+    filter_phases = set()
+    filter_keys = set()
+    filter_min = None
+    for entry in preview_filter or ():
+        if isinstance(entry, (int, float)):
+            filter_phases.add(entry)
+        elif isinstance(entry, str) and entry.endswith("+"):
+            threshold = float(entry[:-1])
+            filter_min = threshold if filter_min is None else min(filter_min, threshold)
+        elif isinstance(entry, str):
+            filter_keys.add(entry)
+
+    render_index = 0
+    color_index = 0
+    total_keys = 0
+    label_layer = layer_prefix + "labels"
+    for phase in phases:
+        number = phase["number"]
+        phase_match = (not preview_filter or number in filter_phases
+                       or (filter_min is not None and number is not None and number >= filter_min))
+        offset = rg.Vector3d(render_index * 100.0, row_y, 0.0)
+        phase_name = ("P{0}_{1}".format(number, phase["title"].replace(" ", "_"))
+                      if number is not None else "unfinished_construction")
+        layer_name = layer_prefix + phase_name
+        keys_baked = 0
+        for key in phase["keys"]:
+            if not phase_match and key not in filter_keys:
+                continue
+            hue = (color_index * 0.618033988749895) % 1.0
+            red, green, blue = colorsys.hsv_to_rgb(hue, 0.6, 0.9)
+            color = (int(red * 255), int(green * 255), int(blue * 255))
+            count = bake_preview(
+                key, debug.get(key), layer_name, color, offset=offset,
+                label_z=20.0 + keys_baked * 8.0, label_layer=label_layer)
+            if count:
+                keys_baked += 1
+                color_index += 1
+        if keys_baked:
+            title = ("Phase {0}: {1}".format(number, phase["title"])
+                     if number is not None else "Unfinished construction")
+            annotate(rg.Point3d(0.0, 0.0, 35.0 + keys_baked * 8.0),
+                     title, label_layer, offset=offset)
+            report_fn("  {0}: baked {1} key(s) on layer {2}".format(title, keys_baked, layer_name))
+            render_index += 1
+            total_keys += keys_baked
+    if not total_keys:
+        report_fn("  (no construction geometry to preview)")
+    return total_keys
 
 
 def annotate(point, text, layer, offset=None):
